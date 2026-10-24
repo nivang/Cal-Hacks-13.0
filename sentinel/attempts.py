@@ -64,6 +64,8 @@ def load_history(conn: Connection, agent: str, quote: dict[str, Any], policy: di
 
     Returns seller_status, week_spend, seller_settled, duplicate and duplicate_of as a dict that builds
     guard.History. Spend counts settled and in flight attempts so money on its way out is not double spent.
+    seller_settled is this agent's own last settled prices from the seller, so the price jump baseline is per
+    agent: one user can neither see nor move another's. Only the approved seller list is shared by everyone.
     Time windows are computed by the database clock.
     """
     aid = agent_id(conn, agent)
@@ -73,8 +75,9 @@ def load_history(conn: Connection, agent: str, quote: dict[str, Any], policy: di
     ).fetchone()
     settled = conn.execute(
         f"SELECT (amount {ATOMIC})::bigint AS amount FROM payment_attempts"
-        " WHERE status = 'settled' AND lower(pay_to) = lower(%s) ORDER BY settled_at DESC, id DESC LIMIT %s",
-        (quote["pay_to"], policy["price_jump_window"]),
+        " WHERE status = 'settled' AND agent_id = %s AND lower(pay_to) = lower(%s)"
+        " ORDER BY settled_at DESC, id DESC LIMIT %s",
+        (aid, quote["pay_to"], policy["price_jump_window"]),
     ).fetchall()
     duplicate = conn.execute(
         "SELECT id FROM payment_attempts WHERE agent_id = %s AND lower(pay_to) = lower(%s) AND url = %s"

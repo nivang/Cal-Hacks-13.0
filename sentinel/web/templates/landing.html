@@ -1,0 +1,28 @@
+{% extends "base.html" %}
+{% block nav %}
+{% if signed_in %}<a href="/account" class="text-sm text-stone-700 underline">Your account</a>
+{% else %}<a href="/signin" class="text-sm text-stone-700 underline">Sign in</a>{% endif %}
+{% endblock %}
+{% block content %}
+<h1 class="text-3xl font-semibold tracking-tight">Let your AI agent pay, the way you meant.</h1>
+<p class="mt-4 text-stone-700">
+  Sentinel holds a wallet for you so your agent never does. Every payment your agent asks for is checked against
+  your limits and the approved sellers, and every one that goes through lands in proper books.
+</p>
+<ol class="mt-8 space-y-3 text-stone-700">
+  <li><span class="font-semibold">1.</span> Sign in with your email. Your own wallet is created on first sign in.</li>
+  <li><span class="font-semibold">2.</span> Fund it with Base Sepolia test USDC.</li>
+  <li><span class="font-semibold">3.</span> Add Sentinel to your AI app and approve the connection.</li>
+</ol>
+<div class="mt-8 rounded-lg border border-stone-200 bg-white p-4">
+  <p class="text-sm text-stone-600">MCP server URL</p>
+  <p class="mt-1 break-all font-mono text-sm">{{ mcp_url }}</p>
+</div>
+<p class="mt-8">
+  {% if signed_in %}
+  <a href="/account" class="inline-block rounded-md bg-stone-900 px-4 py-2 font-medium text-white">Go to your account</a>
+  {% else %}
+  <a href="/signin" class="inline-block rounded-md bg-stone-900 px-4 py-2 font-medium text-white">Sign in with email</a>
+  {% endif %}
+</p>
+{% endblock %}

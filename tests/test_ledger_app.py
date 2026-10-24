@@ -2,11 +2,12 @@
 from contextlib import contextmanager
 
 import pytest
-from conftest import ASSET, DATACO, NETWORK
+from conftest import ASSET, DATACO, NETWORK, access_token_for, fake_wallet_address
 from fastapi.testclient import TestClient
 
-from sentinel import auth, ledger_app, payments
+from sentinel import ledger_app, payments
 from sentinel.guard import Quote
+from sentinel.web import users
 
 PASSWORD = "correct horse battery staple"
 NEW_SELLER = "0x2222222222222222222222222222222222222222"
@@ -48,9 +49,13 @@ def test_forms_cannot_be_posted_without_signing_in(client, conn):
     assert conn.execute("SELECT 1 FROM sellers WHERE pay_to = %s", (NEW_SELLER,)).fetchone() is None
 
 
-def test_a_wrong_password_or_the_agent_token_is_refused(client, conn):
+def test_a_wrong_password_or_an_agents_access_token_is_refused(client, conn, settings):
     assert client.post("/login", data={"password": "nope"}).status_code == 401
-    agent_token = auth.issue_token(conn, "research-agent")
+    user = users.find_or_create_user(conn, "agent-owner@example.com", "agent-owner@example.com")
+    users.create_books(conn, user["id"], fake_wallet_address(user["id"]))
+    identity = users.identity_for(conn, user["id"])
+    assert identity is not None
+    agent_token = access_token_for(conn, settings, identity)  # a real, live OAuth access token
     assert client.post("/login", data={"password": agent_token}).status_code == 401
     assert client.get("/").status_code == 303
 

@@ -3,14 +3,16 @@
 Every entry is balanced and append only. Both rules are enforced by the database (triggers in
 migrations/002 and 003), and balance is also checked here first for a clear error. A settlement
 updates the attempt and posts its entry in one transaction, so the books never drift from the
-payment log. Used by payments.py after a payment settles. Amounts are integer atomic units.
+payment log. It credits the paying agent's own cash account when it has one (each signed in user's
+agent does, 1010-<agent id>) and the shared 1010 USDC Cash otherwise (research-agent, the demo).
+Used by payments.py after a payment settles. Amounts are integer atomic units.
 """
 import hashlib
 from typing import Any
 
 from sentinel.db import Connection, account_id, insert, transaction, usdc
 
-CASH = "1010"
+CASH = "1010"  # shared USDC Cash, for agents without a cash account of their own
 OWNER_CONTRIBUTIONS = "3000"
 ATOMIC = "* 1000000"  # SQL: whole USDC (numeric) to integer atomic units
 
@@ -71,19 +73,23 @@ def settle_attempt(
     response_body: bytes | str,
     content_type: str | None = None,
 ) -> int:
-    """Mark an approved attempt settled and post Dr expense / Cr USDC Cash in one transaction.
+    """Mark an approved attempt settled and post Dr expense / Cr the agent's cash account in one transaction.
 
-    Stores the tx hash, the response hash and the body itself (write once, in attempt_results) so the
-    agent can collect what it paid for later. All of it commits together or not at all. Returns the
-    journal entry id. Only approved attempts can settle, so a blocked or failed attempt can never reach
-    the books. The row is locked while we work so two settlers cannot both book the same payment.
+    The cash account is the agent's own (agents.cash_account_id) when it has one, else the shared 1010
+    USDC Cash, so each user's payments come out of that user's books. Stores the tx hash, the response
+    hash and the body itself (write once, in attempt_results) so the agent can collect what it paid for
+    later. All of it commits together or not at all. Returns the journal entry id. Only approved attempts
+    can settle, so a blocked or failed attempt can never reach the books. The row is locked while we work
+    so two settlers cannot both book the same payment.
     """
     with transaction(conn):
         row = conn.execute(
-            f"SELECT a.url, (a.amount {ATOMIC})::bigint AS amount, a.status, ac.code AS expense_code"
+            f"SELECT a.url, (a.amount {ATOMIC})::bigint AS amount, a.status, ac.code AS expense_code,"
+            " COALESCE(cash.code, %s) AS cash_code"
             " FROM payment_attempts a JOIN agents ag ON ag.id = a.agent_id"
-            " JOIN accounts ac ON ac.id = ag.expense_account_id WHERE a.id = %s FOR UPDATE OF a",
-            (attempt_id,),
+            " JOIN accounts ac ON ac.id = ag.expense_account_id"
+            " LEFT JOIN accounts cash ON cash.id = ag.cash_account_id WHERE a.id = %s FOR UPDATE OF a",
+            (CASH, attempt_id),
         ).fetchone()
         if row is None or row["status"] != "approved":
             status = row["status"] if row else "missing"
@@ -100,7 +106,7 @@ def settle_attempt(
         return post_entry(
             conn,
             f"x402 payment {row['url']} tx {tx_hash}",
-            [(row["expense_code"], row["amount"], 0), (CASH, 0, row["amount"])],
+            [(row["expense_code"], row["amount"], 0), (row["cash_code"], 0, row["amount"])],
             attempt_id=attempt_id,
         )
 

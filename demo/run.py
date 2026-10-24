@@ -5,16 +5,17 @@
     python -m demo.run scam  a quote from an unlisted seller, as an injected page would push: BLOCK (seller)
 
 Also seeds the approved sellers and the opening balance on first run. Real testnet payments, no simulation.
+Pays as research-agent from the shared test wallet (demo.DEMO_ACCOUNT), which is created on first use.
 """
 import asyncio
 import os
 import sys
 
 import httpx
-from cdp import CdpClient
 from dotenv import load_dotenv
 
-from sentinel import ENV_FILE, db, ledger
+from demo import DEMO_ACCOUNT
+from sentinel import ENV_FILE, db, ledger, wallets
 from sentinel.payments import NETWORK, USDC_BASE_SEPOLIA, PaymentRejected, pay_for
 
 SELLERS_URL = "http://localhost:4000"
@@ -55,15 +56,16 @@ async def set_price(path: str, price: str) -> None:
 async def run(scenario: str) -> None:
     """Run one demo scenario and print what the guard decided, then the trial balance."""
     paths = {"buy": "/benchmarks/email", "surge": "/benchmarks/email", "scam": "/premium"}
-    async with CdpClient() as cdp:
-        account = await cdp.evm.get_or_create_account(name="sentinel")
+    async with wallets.cdp_wallet(DEMO_ACCOUNT, create=True) as signer:
         with db.connection() as conn:
             db.init(conn)
-            await bootstrap_books(conn, account.address)
+            await bootstrap_books(conn, signer.address)
         if scenario == "surge":
             await set_price("/benchmarks/email", "$2.00")
         try:
-            result = await pay_for(f"{SELLERS_URL}{paths[scenario]}", account, reason=f"demo {scenario}")
+            result = await pay_for(
+                f"{SELLERS_URL}{paths[scenario]}", signer, agent="research-agent", reason=f"demo {scenario}"
+            )
             print(f"PAID HTTP {result.status} {result.body}")
             print(f"https://sepolia.basescan.org/tx/{result.tx_hash}")
         except PaymentRejected as e:

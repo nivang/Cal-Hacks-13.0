@@ -1,18 +1,18 @@
 """The x402 payment flow with the guard in the middle. This is the only code that signs.
 
 pay_for() asks the seller for a price, builds a Quote, lets guard.evaluate decide, and only then
-signs with the Sentinel wallet and pays. Every outcome is written to the attempt log, and a settled
+signs with the calling user's wallet and pays. Every outcome is written to the attempt log, and a settled
 payment is posted to the ledger. Payment details (payTo, amount) come from the seller's quote and are
-authorized by the approved seller list, never by text the agent read online.
+authorized by the approved seller list, never by text the agent read online. Which wallet signs is
+decided in wallets.py; this file only sees the x402 signer interface.
 """
 from dataclasses import asdict, dataclass
 from typing import Any
 
 import httpx
-from cdp.evm_local_account import EvmLocalAccount
 from x402 import x402Client
 from x402.http import x402HTTPClient
-from x402.mechanisms.evm import EthAccountSigner
+from x402.mechanisms.evm import ClientEvmSigner
 from x402.mechanisms.evm.exact import ExactEvmScheme
 
 from sentinel import attempts, db, guard, ledger
@@ -114,21 +114,24 @@ def authorize(conn: db.Connection, agent: str, reason: str | None, quote: guard.
         raise PaymentRejected("duplicate", detail, blocked_id, live_id) from None
 
 
-async def pay_for(url: str, account: Any, agent: str = "research-agent", reason: str | None = None) -> PayResult:
+async def pay_for(url: str, signer: ClientEvmSigner, *, agent: str, reason: str | None = None) -> PayResult:
     """Fetch url, paying the seller if it returns 402 and the guard allows it.
 
-    account is the CDP account that signs. Returns the response and, if paid, the tx hash. Raises
-    PaymentRejected when the guard stops the payment, and PaymentFailed when an approved payment does
-    not complete.
+    signer is the wallet that signs: the calling user's own, from wallets.open_user_wallet(). agent is that
+    user's agent, whose limits and history the guard applies; there is no default, so every caller names one.
+    Returns the response and, if paid, the tx hash. Raises PaymentRejected when the guard stops the payment,
+    and PaymentFailed when an approved payment does not complete.
     """
     with db.connection() as conn:
-        return await _pay_with(conn, url, account, agent, reason)
+        return await _pay_with(conn, url, signer, agent, reason)
 
 
-async def _pay_with(conn: db.Connection, url: str, account: Any, agent: str, reason: str | None) -> PayResult:
+async def _pay_with(
+    conn: db.Connection, url: str, signer: ClientEvmSigner, agent: str, reason: str | None
+) -> PayResult:
     """The payment flow itself, on a borrowed connection. Split out so pay_for can manage the pool."""
     client = x402Client()
-    client.register(NETWORK, ExactEvmScheme(EthAccountSigner(EvmLocalAccount(account))))
+    client.register(NETWORK, ExactEvmScheme(signer))
     http = x402HTTPClient(client)
 
     async with httpx.AsyncClient() as session:
@@ -154,8 +157,11 @@ async def _pay_with(conn: db.Connection, url: str, account: Any, agent: str, rea
             narrowed = payment_required.model_copy(update={"accepts": [requirement]})
             payload = await client.create_payment_payload(narrowed)
             paid = await session.get(url, headers=http.encode_payment_signature_header(payload))
-        except Exception as e:
+        except BaseException as e:
+            # Also on cancellation (a BaseException), so a dropped call never leaves the attempt approved.
             attempts.set_attempt_status(conn, attempt_id, "failed")  # releases the in flight lock
+            if not isinstance(e, Exception):
+                raise
             raise PaymentFailed("signing or sending the payment failed", attempt_id) from e
 
     try:

@@ -1,0 +1,65 @@
+{% extends "base.html" %}
+{% block title %}Your account · Sentinel{% endblock %}
+{% block nav %}
+<form method="post" action="/signout">
+  <input type="hidden" name="csrf" value="{{ csrf }}">
+  <button type="submit" class="text-sm text-stone-700 underline">Sign out</button>
+</form>
+{% endblock %}
+{% block content %}
+<h1 class="text-2xl font-semibold tracking-tight">Your account</h1>
+<p class="mt-2 break-all text-stone-700">{{ email }}</p>
+
+<section class="mt-8 rounded-lg border border-stone-200 bg-white p-5">
+  <h2 class="font-semibold">Wallet</h2>
+  {% if wallet_address %}
+  <p class="mt-2 break-all font-mono text-sm"><a href="{{ basescan_url }}" class="underline" rel="noreferrer">{{ wallet_address }}</a></p>
+  <p class="mt-3 text-sm text-stone-600">Fund it with Base Sepolia USDC from
+    <a href="{{ faucet_url }}" class="underline" rel="noreferrer">faucet.circle.com</a> (pick Base Sepolia, paste the address).</p>
+  {% else %}
+  <p class="mt-2 text-sm text-stone-700">Your wallet could not be created yet.</p>
+  <form method="post" action="/account/wallet" class="mt-3">
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <input type="hidden" name="next" value="/account">
+    <button type="submit" class="rounded-md bg-stone-900 px-4 py-2 font-medium text-white">Create my wallet</button>
+  </form>
+  {% endif %}
+</section>
+
+{% if agent %}
+<section class="mt-4 rounded-lg border border-stone-200 bg-white p-5">
+  <h2 class="font-semibold">Agent and limits</h2>
+  <dl class="mt-2 space-y-1 text-sm">
+    <div><dt class="inline text-stone-600">Agent</dt> <dd class="inline font-mono">{{ agent }}</dd></div>
+    <div><dt class="inline text-stone-600">Per payment cap</dt> <dd class="inline">{{ cap }}</dd></div>
+    <div><dt class="inline text-stone-600">Weekly budget</dt> <dd class="inline">{{ budget }}</dd></div>
+    <div><dt class="inline text-stone-600">Spent this week</dt> <dd class="inline">{{ spent }}</dd></div>
+  </dl>
+  <p class="mt-3 text-xs text-stone-500">Only approved sellers can be paid. The owner sets sellers and limits.</p>
+</section>
+{% endif %}
+
+<section class="mt-4 rounded-lg border border-stone-200 bg-white p-5">
+  <h2 class="font-semibold">Connect your AI app</h2>
+  <p class="mt-2 text-sm text-stone-700">Add a custom connector with this URL (leave the OAuth fields empty):</p>
+  <p class="mt-2 break-all rounded bg-stone-100 px-3 py-2 font-mono text-sm">{{ mcp_url }}</p>
+  <p class="mt-4 text-sm text-stone-700">In Claude Code:</p>
+  <p class="mt-2 break-all rounded bg-stone-100 px-3 py-2 font-mono text-sm">{{ claude_command }}</p>
+  <p class="mt-2 text-sm text-stone-600">Then run /mcp and approve the connection in your browser.</p>
+</section>
+
+<section class="mt-4 rounded-lg border border-stone-200 bg-white p-5">
+  <h2 class="font-semibold">Sign out</h2>
+  <p class="mt-2 text-sm text-stone-700">Sign out everywhere ends every browser session and disconnects every app you approved.</p>
+  <div class="mt-3 flex flex-wrap gap-3">
+    <form method="post" action="/account/signout-everywhere">
+      <input type="hidden" name="csrf" value="{{ csrf }}">
+      <button type="submit" class="rounded-md border border-red-300 bg-white px-4 py-2 font-medium text-red-800">Sign out everywhere</button>
+    </form>
+    <form method="post" action="/signout">
+      <input type="hidden" name="csrf" value="{{ csrf }}">
+      <button type="submit" class="rounded-md border border-stone-300 bg-white px-4 py-2 font-medium">Sign out</button>
+    </form>
+  </div>
+</section>
+{% endblock %}

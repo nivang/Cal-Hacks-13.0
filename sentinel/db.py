@@ -1,12 +1,19 @@
-"""Postgres (Supabase) connection pool, migrations and seed data for Sentinel's store.
+"""Postgres (Supabase) connection pool, tracked migrations and seed data for Sentinel's store.
 
-The tables live in Supabase Postgres (see migrations/*.sql): agents, sellers, payment_attempts,
-approvals, accounts, journal_entries, journal_lines. attempts.py and ledger.py read and write them
-through the connections this module hands out. Every other file imports from here and never touches
-the driver, so swapping databases again means editing this file and the SQL in those two modules.
+The tables live in Supabase Postgres (see migrations/*.sql): agents, sellers, payment_attempts, approvals, accounts,
+journal_entries, journal_lines and attempt_results, plus users, magic_links and the oauth_* tables for sign in.
+attempts.py and ledger.py read and write them through the connections this module hands out. Every other file
+imports from here and never touches the driver, so swapping databases again means editing this file and the SQL in
+the modules that query it.
 
-Money: the database stores USDC as numeric(18,6) (0.500000). The rest of the code works in integer
-atomic units (500000) and converts here with usdc() and atomic(). Never floats.
+Migrations are tracked: schema_migrations records each migrations/*.sql file once it has run, and apply_migrations
+runs only the files not recorded yet. From now on they go through `python -m sentinel.db migrate` only, never by
+hand or another tool, so the record stays true. A database built before tracking began (it has the tables but no
+records) is checked to be at 006 and recorded as that baseline the first time; 007 runs again (it only changes
+rows). pending_migrations lets a server refuse to start on a database that is behind.
+
+Money: the database stores USDC as numeric(18,6) (0.500000). The rest of the code works in integer atomic units
+(500000) and converts here with usdc() and in the SQL of the modules that read amounts back. Never floats.
 """
 import os
 import sys
@@ -30,7 +37,11 @@ __all__ = ["Connection", "DatabaseError", "IntegrityError", "UniqueViolation"]
 
 ATOMIC_PER_USDC = 1_000_000
 USDC = ATOMIC_PER_USDC  # one USDC in atomic units
+DEFAULT_PER_PAYMENT_CAP = 10 * USDC  # limits every new agent starts with; the owner changes them on the ledger page
+DEFAULT_WEEKLY_BUDGET = 50 * USDC
 MIGRATIONS_DIR = Path(__file__).parent / "migrations"
+MIGRATION_LOCK = 0x53454E54494E454C  # advisory lock key ("SENTINEL" in ASCII): one migration run at a time
+BASELINE = "006"  # the last migration a pre tracking database provably has; 007 only changes rows, so it runs again
 
 CHART_OF_ACCOUNTS = [
     ("1010", "USDC Cash", "asset"),
@@ -59,7 +70,7 @@ def get_pool() -> ConnectionPool:
         _pool = ConnectionPool(
             os.environ["DATABASE_URL"],
             min_size=1,
-            max_size=5,
+            max_size=10,
             kwargs={"autocommit": True, "row_factory": dict_row, "prepare_threshold": None},
             check=ConnectionPool.check_connection,  # drop connections the server closed while idle
             open=True,
@@ -108,17 +119,76 @@ def insert(conn: Connection, query: str, params: tuple[Any, ...]) -> int:
     return int(row["id"])
 
 
-def apply_migrations(conn: Connection) -> None:
-    """Run every migrations/*.sql file in order if the tables do not exist yet.
+def migration_files() -> list[Path]:
+    """Every migrations/*.sql file, in the order they run (by name, which starts with the number)."""
+    return sorted(MIGRATIONS_DIR.glob("*.sql"))
 
-    The Supabase project already has these applied through the Supabase migrations tool. This is for
-    a fresh database, and for building the "test" schema, which is why the SQL has no schema prefix.
+
+def _in_baseline(name: str) -> bool:
+    """True for the files a database built before tracking already has: numbers 001 to BASELINE."""
+    return name.split("_", 1)[0] <= BASELINE
+
+
+def _exists(conn: Connection, table: str) -> bool:
+    """True if the table exists on the current search_path (the "test" schema in the test suite)."""
+    row = conn.execute("SELECT to_regclass(%s) IS NOT NULL AS found", (table,)).fetchone()
+    return bool(row and row["found"])
+
+
+def _recorded(conn: Connection) -> set[str]:
+    """The migration file names schema_migrations says have run."""
+    return {row["name"] for row in conn.execute("SELECT name FROM schema_migrations").fetchall()}
+
+
+def apply_migrations(conn: Connection) -> list[str]:
+    """Run every migrations/*.sql file not yet recorded in schema_migrations, in order, and return their names.
+
+    It is all one transaction (a savepoint when the caller already has one open, as the test suite does) under an
+    advisory lock, so two migrators never run a file twice and a file that fails leaves nothing behind. A database
+    built before tracking began has payment_attempts but no records: its files 001 to 006 are recorded as the
+    baseline without running, after checking it really reached 006 (attempt_results exists). 007 only changes rows,
+    so table checks cannot show it ran; it is safe to repeat, so it simply runs. The SQL has no schema prefix and
+    everything resolves through search_path, which is how the test suite builds the "test" schema from the same files.
     """
-    if conn.execute("SELECT to_regclass('payment_attempts') AS t").fetchone()["t"] is not None:  # type: ignore[index]
-        return
+    applied: list[str] = []
     with transaction(conn):
-        for path in sorted(MIGRATIONS_DIR.glob("*.sql")):
-            conn.execute(path.read_text())
+        conn.execute("SELECT pg_advisory_xact_lock(%s)", (MIGRATION_LOCK,))
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS schema_migrations"
+            " (name text PRIMARY KEY, applied_at timestamptz NOT NULL DEFAULT now())"
+        )
+        conn.execute("ALTER TABLE schema_migrations ENABLE ROW LEVEL SECURITY")  # default deny, as in 004
+        conn.execute("REVOKE ALL ON schema_migrations FROM anon, authenticated")
+        done = _recorded(conn)
+        if not done and _exists(conn, "payment_attempts"):
+            if not _exists(conn, "attempt_results"):
+                raise RuntimeError(
+                    "This database predates migration 006 (it has payment_attempts but no attempt_results). "
+                    "Bring it to 006 by hand, then run python -m sentinel.db migrate again."
+                )
+            for path in migration_files():
+                if _in_baseline(path.name):
+                    conn.execute("INSERT INTO schema_migrations (name) VALUES (%s)", (path.name,))
+                    done.add(path.name)
+        for path in migration_files():
+            if path.name not in done:
+                conn.execute(path.read_text())
+                conn.execute("INSERT INTO schema_migrations (name) VALUES (%s)", (path.name,))
+                applied.append(path.name)
+    return applied
+
+
+def pending_migrations(conn: Connection) -> list[str]:
+    """Return the migration file names apply_migrations would run now, in order, without changing anything.
+
+    For startup checks: a server should refuse to run while this is not empty. A database that predates 006 still
+    lists files here, so it is refused too; apply_migrations then says what to do.
+    """
+    names = [path.name for path in migration_files()]
+    done = _recorded(conn) if _exists(conn, "schema_migrations") else set()
+    if not done and _exists(conn, "payment_attempts"):
+        done = {name for name in names if _in_baseline(name)}
+    return [name for name in names if name not in done]
 
 
 def init(conn: Connection) -> None:
@@ -131,7 +201,7 @@ def init(conn: Connection) -> None:
     conn.execute(
         "INSERT INTO agents (name, per_payment_cap, weekly_budget, expense_account_id)"
         " VALUES (%s, %s, %s, %s) ON CONFLICT (name) DO NOTHING",
-        ("research-agent", usdc(10 * USDC), usdc(50 * USDC), account_id(conn, "6100")),
+        ("research-agent", usdc(DEFAULT_PER_PAYMENT_CAP), usdc(DEFAULT_WEEKLY_BUDGET), account_id(conn, "6100")),
     )
 
 
@@ -172,9 +242,9 @@ if __name__ == "__main__":
 
     load_dotenv(ENV_FILE)
     if sys.argv[1:] != ["migrate"]:
-        sys.exit("usage: python -m sentinel.db migrate (builds the tables on an empty database)")
+        sys.exit("usage: python -m sentinel.db migrate (runs the migrations this database does not have yet)")
     with connection() as c:
-        apply_migrations(c)
+        applied = apply_migrations(c)
         init(c)
     close_pool()
-    print("migrations applied")
+    print(f"applied {', '.join(applied)}" if applied else "no pending migrations; the database is up to date")

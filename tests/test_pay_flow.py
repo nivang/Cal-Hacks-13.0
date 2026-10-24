@@ -3,6 +3,7 @@
 No network and no wallet: only the flow and what it records are real. Covers the happy path, a free resource,
 and every way an approved payment can fail, so a failure never leaves an attempt stuck holding the lock.
 """
+import asyncio
 from types import SimpleNamespace
 
 import httpx
@@ -61,6 +62,8 @@ def seller(monkeypatch):
         if not config["paywalled"]:
             return httpx.Response(200, content=b"free page")
         if "PAYMENT-SIGNATURE" in request.headers:
+            if config.get("cancel_send"):
+                raise asyncio.CancelledError  # the call is cancelled while the payment is being sent
             return httpx.Response(config["paid_status"], content=config["paid_body"],
                                   headers={"content-type": "application/json"})
         return httpx.Response(402, json={})
@@ -69,16 +72,26 @@ def seller(monkeypatch):
     monkeypatch.setattr(payments.httpx, "AsyncClient", lambda: real_client(transport=httpx.MockTransport(handler)))
     monkeypatch.setattr(payments, "x402Client", lambda: fake_client)
     monkeypatch.setattr(payments, "x402HTTPClient", FakeHTTPClient)
-    monkeypatch.setattr(payments, "EvmLocalAccount", lambda account: account)
-    monkeypatch.setattr(payments, "EthAccountSigner", lambda account: account)
-    monkeypatch.setattr(payments, "ExactEvmScheme", lambda signer: signer)
+
+    def scheme(signer):
+        config["signer"] = signer  # what the flow handed to x402
+        return signer
+
+    monkeypatch.setattr(payments, "ExactEvmScheme", scheme)
     config["client"] = fake_client
     return config
 
 
-async def pay(conn):
+async def pay(conn, signer=None):
     reason = "need DataCo email benchmarks for the Q3 report"
-    return await payments._pay_with(conn, URL, object(), "research-agent", reason)
+    return await payments._pay_with(conn, URL, signer or object(), "research-agent", reason)
+
+
+@pytest.mark.anyio
+async def test_the_signer_reaches_x402_unwrapped(conn, seller):
+    signer = object()
+    await pay(conn, signer)
+    assert seller["signer"] is signer  # the flow adds no wallet specific wrapping; wallets.py owns that
 
 
 @pytest.mark.anyio
@@ -110,6 +123,17 @@ async def test_signing_failure_marks_the_attempt_failed_and_releases_the_lock(co
     assert attempt is not None and attempt["status"] == "failed"
     seller["client"].fail_signing = False
     assert (await pay(conn)).settled  # the same payment can be retried, the lock is free
+
+
+@pytest.mark.anyio
+async def test_a_cancelled_send_marks_the_attempt_failed_and_still_cancels(conn, seller):
+    seller["cancel_send"] = True
+    with pytest.raises(asyncio.CancelledError):
+        await pay(conn)
+    rows = conn.execute("SELECT status FROM payment_attempts").fetchall()
+    assert [row["status"] for row in rows] == ["failed"]
+    seller["cancel_send"] = False
+    assert (await pay(conn)).settled  # the lock is free again
 
 
 @pytest.mark.anyio
