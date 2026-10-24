@@ -25,6 +25,7 @@ FORMULA_START = ("=", "+", "-", "@", "\t", "\r")  # a spreadsheet would run a ce
 CSV_COLUMNS = [
     "id", "created_at", "agent", "reason", "seller", "pay_to", "amount_usdc", "decision", "rule", "detail",
     "status", "tx_hash", "response_hash", "url", "seller_listed_by", "seller_listed_at",
+    "task_id", "found_at", "intent_tier", "intent_verdict", "intent_reason", "found_while_searching",
 ]
 
 
@@ -119,7 +120,8 @@ def list_attempts(conn: Connection, limit: int = 200, agent_id: int | None = Non
     rows = conn.execute(
         f"SELECT a.id, a.created_at, ag.name AS agent, a.reason, s.name AS seller, a.pay_to,"
         f" (a.amount {ATOMIC})::bigint AS amount, a.decision, a.rule_fired, a.status, a.tx_hash, a.response_hash,"
-        " a.url, s.added_by AS seller_listed_by, s.added_at AS seller_listed_at"
+        " a.url, s.added_by AS seller_listed_by, s.added_at AS seller_listed_at, a.mandate_id AS task_id, a.found_at,"
+        " a.intent_tier, a.intent_verdict, a.intent_reason, COALESCE(a.preview, false) AS found_while_searching"
         " FROM payment_attempts a JOIN agents ag ON ag.id = a.agent_id"
         " LEFT JOIN LATERAL (SELECT x.name, x.added_by, x.added_at FROM sellers x"
         "  WHERE lower(x.pay_to) = lower(a.pay_to) AND x.network = %s AND lower(x.asset) = lower(%s)"

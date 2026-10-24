@@ -2,5 +2,18 @@
   "price_jump_multiplier": 2,
   "price_jump_window": 5,
   "duplicate_window_s": 600,
-  "budget_window_days": 7
+  "budget_window_days": 7,
+  "max_payment_window_s": 600,
+  "intent_provisional_budget": 1000000,
+  "intent_rate_per_minute": 6,
+  "intent_loop_count": 3,
+  "intent_split_window_s": 600,
+  "intent_per_call_multiple": 3,
+  "intent_big_share_percent": 50,
+  "intent_drift_window": 6,
+  "intent_drift_judged": 3,
+  "intent_cache_ttl_s": 3600,
+  "intent_mandate_ttl_s": 86400,
+  "intent_allowance_ttl_s": 86400,
+  "intent_tasks_per_day": 50
 }

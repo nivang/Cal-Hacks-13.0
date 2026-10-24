@@ -2,13 +2,18 @@
 
 evaluate() is pure, so the same inputs always give the same decision. payments.py calls it before
 anything is signed, and test_guard.py is its answer key. Rules run in order and the first to fire wins:
-  1. seller      any seller the owner has not approved (unlisted or blocked) -> BLOCK
-  2. cap         amount above the agent's per payment cap -> BLOCK
-  3. budget      rolling spend + amount above the weekly budget -> BLOCK
-  4. price_jump  amount above 2x the median of the seller's last 5 settled -> BLOCK
-                 (no history means the first price is trusted and becomes the baseline)
-  5. duplicate   same agent, payTo, url and amount inside the duplicate window -> BLOCK
-  6. clean       everything passed -> ALLOW
+  1. long_window    the seller wants an authorization valid longer than max_payment_window_s, long enough to hold the
+                    signature and settle it much later -> BLOCK
+  2. lookalike      the payee is not approved but imitates an approved seller's (or the owner's own) address: same
+                    first 6 and last 4 hex characters, the address poisoning trick -> BLOCK
+  3. seller         any seller the owner has not approved (unlisted or blocked) -> BLOCK
+  4. payee_changed  this agent already paid this exact URL to a different address: the payee was swapped -> BLOCK
+  5. cap            amount above the agent's per payment cap -> BLOCK
+  6. budget         rolling spend + amount above the weekly budget -> BLOCK
+  7. price_jump     amount above 2x the median of the last 5 settled prices of this product (seller and URL) -> BLOCK
+                    (no history means the first price is trusted and becomes the baseline)
+  8. duplicate      same agent, payTo, url and amount inside the duplicate window -> BLOCK
+  9. clean          everything passed -> ALLOW
 """
 import json
 from dataclasses import dataclass
@@ -46,9 +51,11 @@ class History:
 
     seller_status: str | None  # approved, blocked, or None if the seller is not listed
     week_spend: int  # settled plus in flight spend inside the budget window
-    seller_settled: tuple[int, ...] = ()  # this seller's most recent settled amounts, newest first
+    seller_settled: tuple[int, ...] = ()  # this product's (seller and URL) most recent settled amounts, newest first
     duplicate: bool = False  # a matching attempt exists inside the duplicate window
     duplicate_of: int | None = None  # id of that earlier attempt, so the caller can be pointed at it
+    lookalike_of: str | None = None  # the approved (or own) address an unapproved payee imitates, if any
+    url_paid_to: tuple[str, ...] = ()  # addresses this agent already paid for this exact URL
 
 
 @dataclass(frozen=True)
@@ -64,6 +71,21 @@ class Decision:
     related_id: int | None = None
 
 
+def imitates(address: str, known: list[str]) -> str | None:
+    """The known address this one imitates (same first 6 and last 4 hex characters, not the same address), or None.
+
+    Address poisoning sends a payment to a wallet that looks right at a glance in a shortened 0x1234ab...cdef view.
+    """
+    a = address.lower()
+    if len(a) != 42:
+        return None
+    for candidate in known:
+        c = candidate.lower()
+        if len(c) == 42 and c != a and c[2:8] == a[2:8] and c[-4:] == a[-4:]:
+            return candidate
+    return None
+
+
 def usd(atomic: int) -> str:
     """Format USDC atomic units as dollars for messages only. Never used for arithmetic."""
     return f"${atomic / 1_000_000:.2f}"
@@ -74,6 +96,21 @@ def evaluate(agent: Agent, quote: Quote, history: History, policy: dict[str, int
 
     detail is written for the owner and for the agent that asked, so it avoids jargon and rule names.
     """
+    if quote.timeout_s > policy["max_payment_window_s"]:
+        return Decision(
+            BLOCK, "long_window",
+            f"The seller wants the payment authorization to stay valid for {quote.timeout_s // 60} minutes, long "
+            f"enough to hold it and cash it later. Sentinel signs for at most "
+            f"{policy['max_payment_window_s'] // 60} minutes.",
+        )
+
+    if history.lookalike_of is not None and history.seller_status != "approved":
+        return Decision(
+            BLOCK, "lookalike",
+            f"The seller's address {quote.pay_to} imitates {history.lookalike_of} (same start and end, different "
+            "middle). That is address poisoning: someone hoping a payment goes to the wrong wallet.",
+        )
+
     if history.seller_status == "blocked":
         return Decision(BLOCK, "seller", f"The seller {quote.pay_to} is on the owner's blocked list.")
     # Only the owner adds sellers, so anything not approved stops here, however convincing the page was.
@@ -81,6 +118,14 @@ def evaluate(agent: Agent, quote: Quote, history: History, policy: dict[str, int
         return Decision(
             BLOCK, "seller",
             f"The seller {quote.pay_to} is not on the owner's approved list. Only the owner can add sellers.",
+        )
+
+    paid_before = {address.lower() for address in history.url_paid_to}
+    if paid_before and quote.pay_to.lower() not in paid_before:
+        earlier = ", ".join(sorted(history.url_paid_to))
+        return Decision(
+            BLOCK, "payee_changed",
+            f"This URL was paid to {earlier} before, but now asks to be paid to {quote.pay_to}. The payee was swapped.",
         )
 
     if quote.amount > agent.per_payment_cap:
@@ -105,7 +150,7 @@ def evaluate(agent: Agent, quote: Quote, history: History, policy: dict[str, int
             ratio = quote.amount * 2 / twice_median  # display only
             return Decision(
                 BLOCK, "price_jump",
-                f"This seller's price is {ratio:.1f}x its usual ({usd(quote.amount)} vs a typical "
+                f"This product's price is {ratio:.1f}x its usual ({usd(quote.amount)} vs a typical "
                 f"{usd(twice_median // 2)}). More than {policy['price_jump_multiplier']}x is not allowed.",
             )
 

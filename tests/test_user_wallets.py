@@ -40,6 +40,7 @@ from conftest import (
     ASSET,
     DATACO,
     NETWORK,
+    TASK,
     TEST_BASE_URL,
     PaySpy,
     call_tool,
@@ -707,7 +708,10 @@ async def test_users_do_not_share_a_budget_over_http(conn, browser, mailer, fake
 
 
 @pytest.mark.anyio
-async def test_users_cannot_move_each_others_price_baseline_over_http(browser, mailer, fake_wallets, pay_spy):
+async def test_users_cannot_move_each_others_price_baseline_over_http(browser, mailer, fake_wallets, pay_spy,
+                                                                      monkeypatch):
+    # Each pay starts its own task; let a new task spend $2.00 before confirmation, so only the guard decides here.
+    monkeypatch.setitem(guard.POLICY, "intent_provisional_budget", 5_000_000)
     ann_client, ann = await connected(browser, mailer, "ann@example.com", ANN_IP)
     bo_client, bo = await connected(browser, mailer, "bo@example.com", BO_IP)
     for path in ("a", "b", "c"):  # Ann's baseline for DataCo: $0.50
@@ -804,7 +808,7 @@ async def test_the_per_user_in_flight_limit_holds_over_http(browser, mailer, fak
     release = asyncio.Event()
     entered = []
 
-    async def blocking(self, url, signer, *, agent, reason=None):  # no database work while calls overlap
+    async def blocking(self, url, signer, *, agent, reason=None, task=None):  # no database work while calls overlap
         entered.append(agent)
         await release.wait()
         return PayResult(200, "ok")
@@ -819,17 +823,23 @@ async def test_the_per_user_in_flight_limit_holds_over_http(browser, mailer, fak
         raise AssertionError(f"only {len(entered)} payments started, expected {n}")
 
     limit = mcp_server.MAX_IN_FLIGHT_PER_USER
+    # Start each user's task before the calls overlap: the tests share one database connection.
+    ann_task = (await call_tool(ann_client, ann.access_token, "start_task", {"task": TASK}))["task_id"]
+    bo_task = (await call_tool(bo_client, bo.access_token, "start_task", {"task": TASK}))["task_id"]
     running = [
-        asyncio.create_task(call_tool(ann_client, ann.access_token, "pay", pay_args(f"a{n}"))) for n in range(limit)
+        asyncio.create_task(call_tool(ann_client, ann.access_token, "pay", {"task_id": ann_task, **pay_args(f"a{n}")}))
+        for n in range(limit)
     ]
     try:
         await wait_for(limit)
         opened = len(fake_wallets.opened)
-        refused = await call_tool(ann_client, ann.access_token, "pay", pay_args("a-extra"))
+        refused = await call_tool(ann_client, ann.access_token, "pay", {"task_id": ann_task, **pay_args("a-extra")})
         assert refused["status"] == "FAILED" and refused["message"] == mcp_server.BUSY_USER
         assert len(fake_wallets.opened) == opened  # the refused call opened no wallet
 
-        running.append(asyncio.create_task(call_tool(bo_client, bo.access_token, "pay", pay_args("b"))))
+        running.append(asyncio.create_task(
+            call_tool(bo_client, bo.access_token, "pay", {"task_id": bo_task, **pay_args("b")})
+        ))
         await wait_for(limit + 1)  # Bo is not held back by Ann's payments
         assert entered.count(users.agent_name(bo.user_id)) == 1
     finally:

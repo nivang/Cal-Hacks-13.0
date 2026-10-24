@@ -1,0 +1,91 @@
+{% extends "account_base.html" %}
+{% from "account_macros.html" import primary, secondary, danger, input, card, banners, no_wallet %}
+{% block title %}Tasks · Sentinel{% endblock %}
+{% block content %}
+<h1 class="text-2xl font-semibold tracking-tight">Tasks</h1>
+<p class="mt-1 text-sm text-stone-600">Every payment your agent makes belongs to a task you gave it. Sentinel checks each one against the task, and holds anything you should decide.</p>
+<div class="mt-6">
+{{ banners(done, done_text, error) }}
+{% if not agent %}
+{{ no_wallet() }}
+{% else %}
+
+<section class="{{ card }}" aria-labelledby="held-h">
+  <h2 id="held-h" class="font-semibold">Held for you</h2>
+  {% if held %}
+  <p class="mt-1 text-sm text-stone-600">Nothing was paid. Allow a payment once and your agent's next try goes through; otherwise leave it and it stays unpaid.</p>
+  <ul class="mt-4 divide-y divide-stone-100">
+    {% for h in held %}
+    <li class="flex flex-wrap items-start justify-between gap-3 py-3">
+      <div class="min-w-0 max-w-xl">
+        <p class="text-sm"><span class="font-semibold tabular-nums">{{ h.amount | usd }}</span> <span class="break-all text-stone-600">{{ h.url | host_path }}</span></p>
+        <p class="mt-1 text-sm text-stone-800">{{ h.detail }}</p>
+        {% if h.reason %}<p class="mt-1 text-xs text-stone-500">Agent's reason: {{ h.reason }}</p>{% endif %}
+        <p class="mt-1 text-xs text-stone-500">Task: {{ h.goal }} · {{ h.created_at | when }}</p>
+      </div>
+      <form method="post" action="/account/tasks/allow" class="shrink-0">
+        <input type="hidden" name="csrf" value="{{ csrf }}">
+        <input type="hidden" name="request_id" value="{{ h.id }}">
+        <button type="submit" class="{{ primary }}">Allow once</button>
+      </form>
+    </li>
+    {% endfor %}
+  </ul>
+  {% else %}
+  <p class="mt-2 text-sm text-stone-600">Nothing is waiting for you.</p>
+  {% endif %}
+</section>
+
+<section class="mt-4 {{ card }}" aria-labelledby="tasks-h">
+  <h2 id="tasks-h" class="font-semibold">Your agent's tasks</h2>
+  <p class="mt-1 text-sm text-stone-600">A new task can spend up to {{ provisional_cap }} until you confirm it. Check that Sentinel read it the way you meant, then confirm it with the budget you want, up to your weekly budget of {{ budget }}.</p>
+  {% if tasks %}
+  <ul class="mt-4 space-y-4">
+    {% for t in tasks %}
+    <li class="rounded-md border border-stone-200 p-4">
+      <div class="flex flex-wrap items-start justify-between gap-2">
+        <div class="min-w-0">
+          <p class="font-medium">{{ t.goal }}</p>
+          <p class="mt-1 text-xs text-stone-500">Task {{ t.id }} · started {{ t.created_at | when }}{% if not t.expired and t.status != "revoked" %} · ends {{ t.expires_at | when }}{% endif %}</p>
+        </div>
+        {% if t.status == "revoked" %}<span class="rounded-full bg-stone-100 px-2 py-0.5 text-xs font-semibold text-stone-700">Revoked</span>
+        {% elif t.expired %}<span class="rounded-full bg-stone-100 px-2 py-0.5 text-xs font-semibold text-stone-700">Ended</span>
+        {% elif t.status == "confirmed" %}<span class="rounded-full bg-emerald-100 px-2 py-0.5 text-xs font-semibold text-emerald-800">Confirmed</span>
+        {% else %}<span class="rounded-full bg-amber-100 px-2 py-0.5 text-xs font-semibold text-amber-900">Needs your confirmation</span>{% endif %}
+      </div>
+      <p class="mt-3 text-sm text-stone-700"><span class="font-medium">What you asked:</span> {{ t.task_text }}</p>
+      <dl class="mt-3 grid grid-cols-1 gap-3 text-sm sm:grid-cols-3">
+        <div class="min-w-0"><dt class="text-xs uppercase tracking-wide text-stone-500">May buy</dt><dd class="mt-1">{{ t.expected_types | join(", ") or "Not stated" }}</dd></div>
+        <div class="min-w-0"><dt class="text-xs uppercase tracking-wide text-stone-500">Out of scope</dt><dd class="mt-1">{{ t.out_of_scope | join(", ") or "Not stated" }}</dd></div>
+        <div class="min-w-0"><dt class="text-xs uppercase tracking-wide text-stone-500">Spent</dt><dd class="mt-1 tabular-nums">{{ t.spent | usd }} of {{ t.budget | usd }}{% if t.per_call %} · about {{ t.per_call | usd }} each{% endif %}</dd></div>
+      </dl>
+      {% if t.status != "revoked" and not t.expired %}
+      <div class="mt-4 flex flex-wrap items-end gap-3 border-t border-stone-100 pt-4">
+        {% if t.status == "provisional" %}
+        <form method="post" action="/account/tasks/confirm" class="flex flex-wrap items-end gap-3">
+          <input type="hidden" name="csrf" value="{{ csrf }}">
+          <input type="hidden" name="task_id" value="{{ t.id }}">
+          <div>
+            <label for="budget-{{ t.id }}" class="text-sm font-medium">Budget (USD)</label>
+            <input id="budget-{{ t.id }}" name="budget" type="text" inputmode="decimal" autocomplete="off" required value="{{ (t.budget | usd)[1:] }}" class="{{ input }} w-32">
+          </div>
+          <button type="submit" class="{{ primary }}">Confirm</button>
+        </form>
+        {% endif %}
+        <form method="post" action="/account/tasks/revoke">
+          <input type="hidden" name="csrf" value="{{ csrf }}">
+          <input type="hidden" name="task_id" value="{{ t.id }}">
+          <button type="submit" class="{{ danger }}">Revoke</button>
+        </form>
+      </div>
+      {% endif %}
+    </li>
+    {% endfor %}
+  </ul>
+  {% else %}
+  <p class="mt-4 rounded-md bg-stone-50 p-3 text-sm text-stone-700">No tasks yet. When you ask your agent to buy something, it starts a task with your words, and it shows up here.</p>
+  {% endif %}
+</section>
+{% endif %}
+</div>
+{% endblock %}

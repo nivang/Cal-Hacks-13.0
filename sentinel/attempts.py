@@ -5,12 +5,17 @@ did not happen as well as what did. Sits between payments.py (writes attempts) a
 (reads the facts load_history returns). Amounts go in and out as integer atomic units.
 """
 import json
+from collections.abc import Mapping
 from typing import Any
 
+from sentinel import guard
 from sentinel.db import Connection, agent_id, insert, usdc
 
 LIVE_STATUSES = ["settled", "approved"]  # attempts that count as spent or in flight
 ATOMIC = "* 1000000"  # SQL: whole USDC (numeric) to integer atomic units
+# What intent binding records with a payment made under a task (migration 010).
+INTENT_COLUMNS = ("mandate_id", "found_at", "seller_description", "intent_tier", "intent_verdict", "intent_reason",
+                  "preview")  # preview: a service stopped during a search, nothing attempted (migration 011)
 
 
 def record_attempt(
@@ -22,24 +27,37 @@ def record_attempt(
     status: str = "blocked",  # fail closed: only an explicit "approved" takes the lock and can settle
     decision: str | None = None,
     rule_fired: str | None = None,
+    intent: Mapping[str, Any] | None = None,
 ) -> int:
     """Insert one payment attempt row and return its id.
 
     A row with status approved takes the in flight lock for its dedupe key, so a second identical insert
-    raises db.UniqueViolation. Blocked rows never take the lock.
+    raises db.UniqueViolation. Blocked and escalated rows never take the lock. intent holds the INTENT_COLUMNS of a
+    payment made under a task (payments.review_intent); missing keys stay null.
     """
     dedupe_key = quote and f"{agent}|{quote['pay_to'].lower()}|{url}|{quote['amount']}"
+    facts = intent or {}
     return insert(
         conn,
         "INSERT INTO payment_attempts"
-        " (agent_id, url, reason, pay_to, amount, quote_json, dedupe_key, decision, rule_fired, status)"
-        " VALUES (%s, %s, %s, %s, %s, %s::jsonb, %s, %s, %s, %s)",
+        " (agent_id, url, reason, pay_to, amount, quote_json, dedupe_key, decision, rule_fired, status,"
+        f" {', '.join(INTENT_COLUMNS)})"
+        f" VALUES (%s, %s, %s, %s, %s, %s::jsonb, %s, %s, %s, %s, {', '.join(['%s'] * len(INTENT_COLUMNS))})",
         (
             agent_id(conn, agent), url, reason,
             quote and quote["pay_to"], quote and usdc(quote["amount"]), quote and json.dumps(quote),
-            dedupe_key, decision, rule_fired, status,
+            dedupe_key, decision, rule_fired, status, *(facts.get(column) for column in INTENT_COLUMNS),
         ),
     )
+
+
+def preview_logged(conn: Connection, mandate_id: int, url: str, status: str) -> bool:
+    """True when a search already logged this URL with this status under this task (so it is logged once)."""
+    row = conn.execute(
+        "SELECT 1 FROM payment_attempts WHERE preview AND mandate_id = %s AND url = %s AND status = %s LIMIT 1",
+        (mandate_id, url, status),
+    ).fetchone()
+    return row is not None
 
 
 def set_attempt_status(conn: Connection, attempt_id: int, status: str) -> None:
@@ -62,13 +80,16 @@ def load_agent(conn: Connection, name: str) -> dict[str, Any]:
 def load_history(conn: Connection, agent: str, quote: dict[str, Any], policy: dict[str, int]) -> dict[str, Any]:
     """Read the ledger facts guard.evaluate needs for this agent and quote.
 
-    Returns seller_status, week_spend, seller_settled, duplicate and duplicate_of as a dict that builds
-    guard.History. Spend counts settled and in flight attempts so money on its way out is not double spent.
-    seller_settled is this agent's own last settled prices from the seller, so the price jump baseline is per
-    agent: one user can neither see nor move another's. seller_status follows the seller lists: the operator's rows
-    (agent_id null) apply to every agent and this agent's own rows to it alone; any applicable blocked row wins, then
-    any approved row, then whatever else is listed (pending), else None. So an operator block cannot be overridden by
-    a personal approval, and one user's approval never opens a seller for another agent.
+    Returns seller_status, week_spend, seller_settled, duplicate, duplicate_of, lookalike_of and url_paid_to as a dict
+    that builds guard.History. Spend counts settled and in flight attempts so money on its way out is not double spent.
+    seller_settled is this agent's own last settled prices for this product (seller and URL), so the price jump
+    baseline is per agent and per product: one user can neither see nor move another's, and a seller's cheap product
+    never sets the baseline for its expensive one. lookalike_of is an approved (or the owner's own) address the payee
+    imitates; url_paid_to the addresses this agent already paid for this URL. seller_status follows the seller
+    lists: the operator's rows (agent_id null) apply to every agent and this agent's own rows to it alone; any
+    applicable blocked row wins, then any approved row, then whatever else is listed (pending), else None. So an
+    operator block cannot be overridden by a personal approval, and one user's approval never opens a seller for
+    another agent.
     Time windows are computed by the database clock.
     """
     aid = agent_id(conn, agent)
@@ -80,10 +101,20 @@ def load_history(conn: Connection, agent: str, quote: dict[str, Any], policy: di
     ).fetchone()
     settled = conn.execute(
         f"SELECT (amount {ATOMIC})::bigint AS amount FROM payment_attempts"
-        " WHERE status = 'settled' AND agent_id = %s AND lower(pay_to) = lower(%s)"
+        " WHERE status = 'settled' AND agent_id = %s AND lower(pay_to) = lower(%s) AND url = %s"
         " ORDER BY settled_at DESC, id DESC LIMIT %s",
-        (aid, quote["pay_to"], policy["price_jump_window"]),
+        (aid, quote["pay_to"], quote["url"], policy["price_jump_window"]),
     ).fetchall()
+    paid_to = conn.execute(
+        "SELECT DISTINCT pay_to FROM payment_attempts WHERE agent_id = %s AND url = %s AND status = 'settled'"
+        " AND pay_to IS NOT NULL",
+        (aid, quote["url"]),
+    ).fetchall()
+    known = [r["pay_to"] for r in conn.execute(
+        "SELECT pay_to FROM sellers WHERE status = 'approved' AND (agent_id IS NULL OR agent_id = %s)"
+        " UNION SELECT wallet_address FROM users WHERE agent_id = %s AND wallet_address IS NOT NULL",
+        (aid, aid),
+    ).fetchall()]
     duplicate = conn.execute(
         "SELECT id FROM payment_attempts WHERE agent_id = %s AND lower(pay_to) = lower(%s) AND url = %s"
         " AND amount = %s AND created_at >= now() - make_interval(secs => %s) AND status = ANY(%s)"
@@ -96,6 +127,8 @@ def load_history(conn: Connection, agent: str, quote: dict[str, Any], policy: di
         "seller_settled": tuple(r["amount"] for r in settled),
         "duplicate": duplicate is not None,
         "duplicate_of": duplicate["id"] if duplicate else None,
+        "lookalike_of": guard.imitates(quote["pay_to"], known),
+        "url_paid_to": tuple(r["pay_to"] for r in paid_to),
     }
 
 
@@ -128,7 +161,7 @@ def get_attempt(conn: Connection, attempt_id: int, agent: str) -> dict[str, Any]
     """
     return conn.execute(
         f"SELECT a.id, a.status, a.url, a.pay_to, (a.amount {ATOMIC})::bigint AS amount, a.decision, a.rule_fired,"
-        " a.tx_hash, a.reason FROM payment_attempts a WHERE a.id = %s AND a.agent_id = %s",
+        " a.tx_hash, a.reason, a.mandate_id FROM payment_attempts a WHERE a.id = %s AND a.agent_id = %s",
         (attempt_id, agent_id(conn, agent)),
     ).fetchone()
 

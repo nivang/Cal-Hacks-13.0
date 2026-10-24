@@ -10,6 +10,7 @@ CSV, balanced books, the dev only demo sellers, the getting started checklist an
 import csv
 import dataclasses
 import io
+import json
 import re
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
@@ -21,7 +22,7 @@ import pytest
 from conftest import ASSET, BROWSER_IP, DATACO, NETWORK, call_tool, connect_flow, form_value, sign_in
 from fastmcp.utilities.asgi_transport import run_asgi_lifespan
 
-from sentinel import payments
+from sentinel import db, mandates, payments
 from sentinel.guard import Quote
 from sentinel.web import app as web_app
 from sentinel.web import books
@@ -31,8 +32,8 @@ BOB_IP = "203.0.113.20"
 EVIL = "https://evil.example"
 SELLER = "0x1111111111111111111111111111111111111111"
 OTHER_SELLER = "0x2222222222222222222222222222222222222222"
-PAGES = [("/account", "Overview"), ("/account/payments", "Payments"), ("/account/rules", "Rules"),
-         ("/account/books", "Books")]
+PAGES = [("/account", "Overview"), ("/account/payments", "Payments"), ("/account/tasks", "Tasks"),
+         ("/account/rules", "Rules"), ("/account/books", "Books")]
 REASON = "Need 2026 email open-rate benchmarks for the Q3 report the owner asked for; DataCo is named in the brief."
 
 
@@ -126,6 +127,7 @@ async def serve(settings, **kw) -> AsyncIterator[Callable[..., httpx.AsyncClient
 @pytest.mark.parametrize("path, next_path", [
     ("/account", "/account"), ("/account/payments", "/account/payments"), ("/account/rules", "/account/rules"),
     ("/account/books", "/account/books"), ("/account/payments.csv", "/account/payments"),
+    ("/account/tasks", "/account/tasks"),
 ])
 async def test_without_a_session_every_page_sends_you_to_sign_in_and_back(browser, path, next_path):
     response = await browser().get(path)
@@ -642,3 +644,181 @@ async def test_sign_in_approve_a_seller_on_the_rules_page_then_pay_over_mcp(brow
     await add_seller(client, "DataCo", DATACO, "blocked")
     stopped = await call_tool(client, tokens.access_token, "pay", {"url": url + "?fourth=1", "reason": REASON})
     assert stopped["status"] == "BLOCKED" and stopped["rule"] == "seller"
+
+
+# Tasks
+
+
+def task_for(conn, user, text="Write the Q3 email report; buy benchmarks from DataCo.") -> int:
+    """A provisional task for this user's agent, as start_task stores it."""
+    return mandates.create(conn, user["agent_id"], text, "Write the Q3 email report.", ["email benchmarks"],
+                           ["crypto signals"], 50_000_000, None)
+
+
+def held_for(conn, user, task_id, url="http://seller.test/benchmarks/email") -> int:
+    """A held (escalated) payment under this task."""
+    quote = {"url": url, "pay_to": DATACO, "amount": 500_000, "asset": ASSET, "network": NETWORK, "timeout_s": 300}
+    return db.insert(conn, "INSERT INTO payment_attempts (agent_id, url, reason, pay_to, amount, quote_json, status,"
+                     " decision, rule_fired, mandate_id, intent_tier) VALUES (%s, %s, 'why', %s, 0.5, %s::jsonb,"
+                     " 'escalated', 'ESCALATE', 'judge: The owner should decide this one.', %s, 2)",
+                     (user["agent_id"], url, DATACO, json.dumps(quote), task_id))
+
+
+def task_status(conn, task_id) -> tuple[str, int]:
+    row = conn.execute("SELECT status, (budget * 1000000)::bigint AS budget FROM mandates WHERE id = %s",
+                       (task_id,)).fetchone()
+    return row["status"], row["budget"]
+
+
+@pytest.mark.anyio
+async def test_the_tasks_page_shows_what_the_owner_asked_and_confirming_sets_the_budget(browser, mailer, conn):
+    client = await signed_in(browser, mailer)
+    user = user_of(conn, client)
+    task_id = task_for(conn, user)
+    page = await client.get("/account/tasks")
+    assert "Write the Q3 email report; buy benchmarks from DataCo." in page.text
+    assert "Needs your confirmation" in page.text and "email benchmarks" in page.text
+    token = form_value(page.text, "csrf")
+    done = await client.post("/account/tasks/confirm", data={"csrf": token, "task_id": task_id, "budget": "5"})
+    assert done.status_code == 303 and done.headers["location"] == "/account/tasks?done=confirm"
+    assert task_status(conn, task_id) == ("confirmed", 5_000_000)
+    assert "Confirmed. Your agent can now spend" in (await client.get(done.headers["location"])).text
+
+
+@pytest.mark.anyio
+async def test_a_task_budget_above_the_weekly_budget_is_refused_and_changes_nothing(browser, mailer, conn):
+    client = await signed_in(browser, mailer)
+    task_id = task_for(conn, user_of(conn, client))
+    response = await client.post("/account/tasks/confirm",
+                                 data={"csrf": await csrf(client), "task_id": task_id, "budget": "900"})
+    assert response.status_code == 400 and "at most your weekly budget" in response.text
+    assert task_status(conn, task_id) == ("provisional", 50_000_000)
+
+
+@pytest.mark.anyio
+async def test_revoking_a_task_stops_it(browser, mailer, conn):
+    client = await signed_in(browser, mailer)
+    task_id = task_for(conn, user_of(conn, client))
+    response = await client.post("/account/tasks/revoke", data={"csrf": await csrf(client), "task_id": task_id})
+    assert response.status_code == 303 and task_status(conn, task_id)[0] == "revoked"
+    assert "Revoked" in (await client.get("/account/tasks")).text
+
+
+@pytest.mark.anyio
+async def test_a_held_payment_is_listed_and_allow_once_records_the_owners_allowance(browser, mailer, conn):
+    client = await signed_in(browser, mailer)
+    user = user_of(conn, client)
+    held = held_for(conn, user, task_for(conn, user))
+    overview = await client.get("/account")
+    assert "1 payment held for you." in overview.text and "1 task waiting" in overview.text
+    assert "HELD" in (await client.get("/account/payments")).text
+    page = await client.get("/account/tasks")
+    assert "The owner should decide this one." in page.text and "Allow once" in page.text
+    response = await client.post("/account/tasks/allow", data={"csrf": form_value(page.text, "csrf"),
+                                                               "request_id": held})
+    assert response.status_code == 303
+    allowance = conn.execute("SELECT granted_by::text AS by, used_at FROM allowances WHERE attempt_id = %s",
+                             (held,)).fetchone()
+    assert allowance["by"] == user["id"] and allowance["used_at"] is None
+    assert "Allow once" not in (await client.get("/account/tasks")).text
+    again = await client.post("/account/tasks/allow", data={"csrf": await csrf(client), "request_id": held})
+    assert again.status_code == 400
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("path", ["/account/tasks/confirm", "/account/tasks/revoke", "/account/tasks/allow"])
+async def test_nobody_can_act_on_another_users_task_or_held_payment(browser, mailer, conn, path):
+    alice = await signed_in(browser, mailer)
+    alice_user = user_of(conn, alice)
+    task_id = task_for(conn, alice_user)
+    held = held_for(conn, alice_user, task_id)
+    bob = await signed_in(browser, mailer, "bob@example.com", BOB_IP)
+    data = {"csrf": await csrf(bob), "task_id": task_id, "request_id": held, "budget": "5"}
+    assert (await bob.post(path, data=data)).status_code == 400
+    assert task_status(conn, task_id) == ("provisional", 50_000_000)
+    assert conn.execute("SELECT count(*) AS n FROM allowances").fetchone()["n"] == 0
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("case", ["foreign origin", "no csrf", "wrong csrf"])
+async def test_task_forms_refuse_a_post_that_did_not_come_from_our_page(browser, mailer, conn, case):
+    client = await signed_in(browser, mailer)
+    task_id = task_for(conn, user_of(conn, client))
+    token = await csrf(client)
+    data = {"task_id": task_id, "csrf": token}
+    if case == "foreign origin":
+        response = await client.post("/account/tasks/revoke", data=data, headers={"origin": EVIL})
+    elif case == "no csrf":
+        response = await client.post("/account/tasks/revoke", data={"task_id": task_id})
+    else:
+        response = await client.post("/account/tasks/revoke", data={**data, "csrf": token[::-1]})
+    assert response.status_code == 403 and task_status(conn, task_id)[0] == "provisional"
+
+
+@pytest.mark.anyio
+async def test_a_hostile_task_text_is_shown_as_text(browser, mailer, conn):
+    client = await signed_in(browser, mailer)
+    task_for(conn, user_of(conn, client), text="<script>alert(1)</script> buy everything")
+    page = await client.get("/account/tasks")
+    assert "<script>alert(1)</script>" not in page.text and "&lt;script&gt;alert(1)&lt;/script&gt;" in page.text
+
+
+# Approving a seller: look twice at fresh and lookalike wallets
+
+
+@pytest.mark.anyio
+async def test_approving_a_wallet_with_no_history_asks_for_a_second_click(browser, mailer, conn, fake_chain):
+    client = await signed_in(browser, mailer)
+    user = user_of(conn, client)
+    fake_chain.unused.add(SELLER.lower())
+    first = await add_seller(client, "FreshCo", SELLER)
+    assert first.status_code == 200 and "Check this seller before you approve it" in first.text
+    assert "may have just been created" in first.text and own_sellers(conn, user) == []
+    second = await client.post("/account/rules/sellers", data={
+        "csrf": form_value(first.text, "csrf"), "name": "FreshCo", "pay_to": SELLER, "status": "approved",
+        "confirm": "1",
+    })
+    assert second.status_code == 303 and [s["pay_to"] for s in own_sellers(conn, user)] == [SELLER]
+
+
+@pytest.mark.anyio
+async def test_approving_a_lookalike_of_an_approved_address_warns(browser, mailer, conn):
+    client = await signed_in(browser, mailer)
+    lookalike = DATACO[:8] + "0" * 30 + DATACO[-4:]
+    response = await add_seller(client, "DataCo2", lookalike)
+    assert response.status_code == 200 and f"It looks like {DATACO}" in response.text
+
+
+@pytest.mark.anyio
+async def test_a_chain_that_cannot_be_read_still_asks_for_the_second_click(browser, mailer, conn, fake_chain):
+    client = await signed_in(browser, mailer)
+    fake_chain.down = True
+    response = await add_seller(client, "NewCo", SELLER)
+    assert "could not check this wallet" in response.text and own_sellers(conn, user_of(conn, client)) == []
+
+
+@pytest.mark.anyio
+async def test_a_wallet_with_history_is_approved_at_once_and_blocking_never_checks(browser, mailer, conn, fake_chain):
+    client = await signed_in(browser, mailer)
+    assert (await add_seller(client, "NewCo", SELLER)).status_code == 303
+    fake_chain.asked.clear()
+    assert (await add_seller(client, "NewCo", SELLER, status="blocked")).status_code == 303
+    assert fake_chain.asked == []
+
+
+# Payments grouped by task
+
+
+@pytest.mark.anyio
+async def test_payments_are_grouped_by_task_with_counts_and_loose_ones_last(browser, mailer, conn):
+    client = await signed_in(browser, mailer)
+    user = user_of(conn, client)
+    first, second = task_for(conn, user, "First task"), task_for(conn, user, "Second task")
+    held_for(conn, user, first)
+    held_for(conn, user, second, url="http://seller.test/other")
+    attempt(conn, user["agent"], url="http://x/loose")
+    page = (await client.get("/account/payments")).text
+    headings = re.findall(r'<h2 id="task-\d+-h" class="font-semibold">([^<]+)</h2>', page)
+    assert headings == [f"Task {second}: Write the Q3 email report.", f"Task {first}: Write the Q3 email report.",
+                        "Not under a task"]
+    assert page.count("0 paid · 0 blocked · 1 held") == 2 and "Needs your confirmation" in page

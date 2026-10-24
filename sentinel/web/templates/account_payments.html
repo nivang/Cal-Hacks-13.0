@@ -20,6 +20,23 @@
   <p class="mt-4 flex flex-wrap justify-center gap-3"><a href="/account/rules" class="{{ primary }}">Approve a seller</a> <a href="/account" class="{{ secondary }}">Connect your AI app</a></p>
 </div>
 {% else %}
+{% for group in groups %}
+<section class="{% if not loop.first %}mt-8 {% endif %}" aria-labelledby="task-{{ loop.index }}-h">
+  <div class="mb-3 flex flex-wrap items-end justify-between gap-2">
+    <div class="min-w-0">
+      {% if group.task %}
+      <h2 id="task-{{ loop.index }}-h" class="font-semibold">Task {{ group.task_id }}: {{ group.task.goal }}</h2>
+      <p class="mt-0.5 text-xs text-stone-500">
+        {% if group.state == "provisional" %}Needs your confirmation{% elif group.state == "confirmed" %}Confirmed{% elif group.state == "revoked" %}Revoked{% else %}Ended{% endif %}
+        · spent {{ group.task.spent | usd }} of {{ group.task.budget | usd }} · started {{ group.task.created_at | when }}
+      </p>
+      {% else %}
+      <h2 id="task-{{ loop.index }}-h" class="font-semibold">Not under a task</h2>
+      <p class="mt-0.5 text-xs text-stone-500">Payments made outside an agent task, such as the command line demo.</p>
+      {% endif %}
+    </div>
+    <p class="text-xs text-stone-600">{{ group.paid }} paid · {{ group.blocked }} blocked · {{ group.held }} held{% if group.searched %} · {{ group.searched }} found while searching{% endif %}</p>
+  </div>
 <div class="overflow-x-auto rounded-lg border border-stone-200 bg-white">
   <table class="w-full min-w-[56rem] text-left text-sm">
     <thead class="border-b border-stone-200 bg-stone-50 text-xs uppercase tracking-wide text-stone-500">
@@ -34,7 +51,7 @@
       </tr>
     </thead>
     <tbody class="divide-y divide-stone-100 align-top">
-    {% for p in payments %}
+    {% for p in group.rows %}
       <tr>
         <td class="whitespace-nowrap px-3 py-2 text-stone-600">{{ p.created_at | when }}</td>
         <td class="px-3 py-2">{{ seller_cell(p) }}</td>
@@ -46,6 +63,8 @@
           {% set w = p | why %}
           {% if w[0] %}<div class="max-w-[16rem] break-words"><span class="text-sm font-medium">{{ w[0] }}</span>{% if w[1] %}
             <p class="mt-0.5 text-xs text-stone-500">{{ w[1] }}</p>{% endif %}</div>{% endif %}
+          {% if p.found_while_searching %}<p class="mt-0.5 text-xs text-stone-500">Found while your agent was searching; it was never shown this one and nothing was paid.</p>{% endif %}
+          {% if p.intent_tier is not none %}<p class="mt-0.5 max-w-[16rem] break-words text-xs text-stone-500">Intent tier {{ p.intent_tier }}{% if p.status == "settled" and p.intent_reason %}: {{ p.intent_reason }}{% endif %}</p>{% endif %}
         </td>
         <td class="px-3 py-2">{% if p.tx_hash %}<a href="{{ tx_url }}{{ p.tx_hash }}" rel="noreferrer" class="break-all font-mono text-xs underline" title="{{ p.tx_hash }}">{{ p.tx_hash | short(8, 6) }}</a>{% endif %}</td>
       </tr>
@@ -53,6 +72,8 @@
     </tbody>
   </table>
 </div>
+</section>
+{% endfor %}
 <p class="mt-2 text-xs text-stone-500">Showing the latest 200 payments. The CSV has up to the latest {{ csv_limit }}.</p>
 {% endif %}
 </div>

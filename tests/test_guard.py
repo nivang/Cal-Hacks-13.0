@@ -1,7 +1,7 @@
 """Answer key for the guard. Each planted case maps to one rule; the rest are edge cases."""
 import pytest
 
-from sentinel.guard import ALLOW, BLOCK, Agent, History, Quote, evaluate
+from sentinel.guard import ALLOW, BLOCK, Agent, History, Quote, evaluate, imitates
 
 USDC = 1_000_000
 DATACO = "0x290E84b17Ce32cF9403f5D0218cB50ccdcc94781"
@@ -106,3 +106,49 @@ def test_duplicate_message_points_at_the_earlier_request():
     d = evaluate(AGENT, quote(500_000), history(duplicate=True, duplicate_of=7))
     assert d.related_id == 7 and "request 7" in d.detail
     assert evaluate(AGENT, quote(500_000), history(duplicate=True)).related_id is None
+
+
+# Seller attacks
+
+
+LOOKALIKE = "0x290E84" + "0" * 30 + "4781"  # same first 6 and last 4 hex as DataCo
+
+
+def test_a_payment_window_longer_than_ten_minutes_blocks():
+    long = Quote("http://x/a", DATACO, 500_000, "0xusdc", "eip155:84532", 24 * 3600)
+    d = evaluate(AGENT, long, history())
+    assert (d.decision, d.rule) == (BLOCK, "long_window") and "1440 minutes" in d.detail
+    assert evaluate(AGENT, Quote("http://x/a", DATACO, 500_000, "0xusdc", "eip155:84532", 600), history()).decision \
+        == ALLOW
+
+
+def test_a_lookalike_of_an_approved_address_blocks_and_names_what_it_imitates():
+    d = evaluate(AGENT, quote(500_000, LOOKALIKE), history(seller_status=None, lookalike_of=DATACO))
+    assert (d.decision, d.rule) == (BLOCK, "lookalike") and DATACO in d.detail and LOOKALIKE in d.detail
+
+
+def test_an_approved_address_is_never_called_a_lookalike():
+    assert evaluate(AGENT, quote(500_000), history(lookalike_of="0xsomething")).decision == ALLOW
+
+
+def test_imitates_needs_the_same_start_and_end_but_a_different_address():
+    assert imitates(LOOKALIKE, [DATACO]) == DATACO
+    assert imitates(LOOKALIKE.upper().replace("0X", "0x"), [DATACO]) == DATACO
+    assert imitates(DATACO, [DATACO]) is None  # the same address
+    assert imitates("0x290E85" + "0" * 30 + "4781", [DATACO]) is None  # start differs
+    assert imitates("0x290E84" + "0" * 30 + "4782", [DATACO]) is None  # end differs
+    assert imitates("0x1234", [DATACO]) is None
+
+
+def test_a_url_paid_to_one_wallet_that_now_asks_for_another_blocks():
+    d = evaluate(AGENT, quote(500_000), history(url_paid_to=("0xEarlier",)))
+    assert (d.decision, d.rule) == (BLOCK, "payee_changed") and "0xEarlier" in d.detail
+    assert evaluate(AGENT, quote(500_000), history(url_paid_to=(DATACO.lower(),))).decision == ALLOW
+
+
+def test_seller_attacks_are_checked_first():
+    long = Quote("http://x/a", LOOKALIKE, 15 * USDC, "0xusdc", "eip155:84532", 3600)
+    assert evaluate(AGENT, long, history(seller_status=None, lookalike_of=DATACO)).rule == "long_window"
+    assert evaluate(AGENT, quote(15 * USDC, LOOKALIKE), history(seller_status=None, lookalike_of=DATACO)).rule \
+        == "lookalike"
+    assert evaluate(AGENT, quote(15 * USDC), history(url_paid_to=("0xEarlier",))).rule == "payee_changed"
