@@ -231,11 +231,11 @@ def tier0(
         )
 
     share = policy["intent_big_share_percent"]
-    if amount * 100 > share * budget:
+    if amount * 100 > share * mandate.budget:  # the task's real budget, not the cap before it is confirmed
         return Verdict(
             ESCALATE, 0, "big_share",
-            f"{guard.usd(amount)} is more than {share}% of this task's {guard.usd(budget)} budget in one purchase, so "
-            "the owner decides.",
+            f"{guard.usd(amount)} is more than {share}% of this task's {guard.usd(mandate.budget)} budget in one "
+            "purchase, so the owner decides.",
         )
 
     window = session.recent_tiers[: policy["intent_drift_window"]]

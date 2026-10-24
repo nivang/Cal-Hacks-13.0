@@ -275,8 +275,8 @@ def test_the_database_refuses_two_users_sharing_a_wallet_or_an_agent(conn):
 
 def test_one_agents_settled_prices_do_not_move_another_agents_price_baseline(conn):
     other, _, _ = new_agent(conn)
-    for i in range(3):
-        settle(conn, "research-agent", url=f"http://x/{i}")  # research-agent's baseline for DataCo: $0.50
+    for _ in range(3):
+        settle(conn, "research-agent", url="http://x/surge")  # research-agent's baseline for this product: $0.50
     surge = Quote("http://x/surge", DATACO, 2_000_000, ASSET, NETWORK, 300)
 
     assert attempts.load_history(conn, other, asdict(surge), guard.POLICY)["seller_settled"] == ()
@@ -692,7 +692,8 @@ async def test_users_cannot_read_each_others_requests_over_http(browser, mailer,
 
 
 @pytest.mark.anyio
-async def test_users_do_not_share_a_budget_over_http(conn, browser, mailer, fake_wallets, pay_spy):
+async def test_users_do_not_share_a_budget_over_http(conn, browser, mailer, fake_wallets, pay_spy, monkeypatch):
+    monkeypatch.setitem(guard.POLICY, "intent_big_share_percent", 100)  # a tiny budget: only the guard decides here
     ann_client, ann = await connected(browser, mailer, "ann@example.com", ANN_IP)
     bo_client, bo = await connected(browser, mailer, "bo@example.com", BO_IP)
     conn.execute(
@@ -714,13 +715,12 @@ async def test_users_cannot_move_each_others_price_baseline_over_http(browser, m
     monkeypatch.setitem(guard.POLICY, "intent_provisional_budget", 5_000_000)
     ann_client, ann = await connected(browser, mailer, "ann@example.com", ANN_IP)
     bo_client, bo = await connected(browser, mailer, "bo@example.com", BO_IP)
-    for path in ("a", "b", "c"):  # Ann's baseline for DataCo: $0.50
-        assert (await call_tool(ann_client, ann.access_token, "pay", pay_args(path)))["status"] == "SETTLED"
+    # Ann's baseline for this product: $0.50
+    assert (await call_tool(ann_client, ann.access_token, "pay", pay_args("a")))["status"] == "SETTLED"
 
-    pay_spy.amount = 2_000_000
-    for path in ("d", "e"):  # Bo has no baseline of his own, so $2.00 is no jump for him, then becomes his baseline
-        assert (await call_tool(bo_client, bo.access_token, "pay", pay_args(path)))["status"] == "SETTLED"
-    surge = await call_tool(ann_client, ann.access_token, "pay", pay_args("f"))
+    pay_spy.amount = 2_000_000  # Bo has no baseline of his own for it, so $2.00 is no jump for him
+    assert (await call_tool(bo_client, bo.access_token, "pay", pay_args("a")))["status"] == "SETTLED"
+    surge = await call_tool(ann_client, ann.access_token, "pay", pay_args("a"))
     assert surge["status"] == "BLOCKED" and surge["rule"] == "price_jump"
 
 
