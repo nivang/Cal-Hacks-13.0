@@ -17,7 +17,7 @@ Sentinel holds the wallet so the agent never does. Every payment request passes 
 | `sentinel/intent.py` | Pure intent binding: the tier 0 rules on a task, how tier 1 and tier 2 answers map to ALLOW, BLOCK or ESCALATE, and the quoted JSON case the judge reads |
 | `sentinel/judge.py` | Claude Haiku 5.5 reads a task into a mandate (`extract`), checks a purchase against it (`classify`, tier 1) and judges what tier 1 cannot settle (`decide`, tier 2); any failure raises `JudgeError` |
 | `sentinel/discovery.py` | Reads the paid service catalog (x402 Bazaar shape), ranks it against a query, and previews each listing under a task (`find`, `preview`) |
-| `sentinel/chain.py` | Read only Base Sepolia lookups: a wallet's history (fresh wallet warning) and USDC balance |
+| `sentinel/chain.py` | Read only Base Sepolia lookups: a wallet's profile from the explorer (activity, first seen, scam flag; cached), its RPC history and USDC balance |
 | `sentinel/mandates.py` | Tasks in the database: create, session facts for the rules, the tier 1 cache, confirm, revoke, held payments and Allow once |
 | `sentinel/policy.json` | Guard thresholds (price jump multiplier and window, duplicate window, budget window) and the `intent_*` thresholds |
 | `sentinel/attempts.py` | Attempt log and the history lookups the guard reads (price history per agent) |
@@ -141,7 +141,9 @@ A link the agent says it found on a web page, to a seller host the owner's task 
 
 **Seller attacks are deterministic.** The rules above that catch a malicious seller (long window, lookalike, payee changed, bait and switch, injection, unlisted URL, listing changed) are plain comparisons, not model calls: they run first, in milliseconds, and a seller cannot talk its way past them. What the catalog advertised is stored per task in `listings_seen` (migration 012) so the paywall's real 402 can be compared against it.
 
-**Fresh wallets.** Approving a seller on the Rules page reads the address on Base Sepolia (`chain.wallet_history`: transactions sent, ETH and USDC held). An address with none of them may have just been created, and one that imitates an address the owner already trusts is a poisoning attempt; either needs a second click, **Approve anyway**. A failed lookup also asks for it.
+**Wallet history.** `chain.wallet_profile` asks the Base Sepolia Blockscout explorer (no key) for a wallet's transactions, token transfers, when it was first seen, and whether it is flagged as a scam; if the explorer is down it falls back to the RPC node, which can only say whether the wallet was ever used. It is used twice:
+- **Approving a seller** (Rules page): a flagged wallet, one with no activity, one first seen under 24 hours ago, or one that imitates an address the owner already trusts needs a second click, **Approve anyway**. A failed lookup also asks for it. The Rules page shows each seller's history, in red when it is new, unused or flagged.
+- **Every payment under a task** (`payments.payee_profile`, cached an hour in `wallet_profiles`, migration 013): a payee the explorer flags is blocked (guard rule `flagged_wallet`, which also catches a wallet flagged after it was approved), and one with no activity at all is held for the owner (intent rule `unused_wallet`). Age alone does not hold a payment, since the owner already saw it when approving. If the explorer and the node are both unreachable, these two rules do not fire.
 
 **Held payments.** ESCALATE records an `escalated` attempt (no in flight lock, not counted as spend) and the agent gets `ESCALATED`. The Tasks page lists it with the reason and an **Allow once** button, which writes an `allowances` row. The next identical payment under the same task (seller, URL, amount) hits tier 0's allowance rule and goes through, using the allowance up. Blocks still win over an allowance.
 

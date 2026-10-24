@@ -152,3 +152,8 @@ def test_seller_attacks_are_checked_first():
     assert evaluate(AGENT, quote(15 * USDC, LOOKALIKE), history(seller_status=None, lookalike_of=DATACO)).rule \
         == "lookalike"
     assert evaluate(AGENT, quote(15 * USDC), history(url_paid_to=("0xEarlier",))).rule == "payee_changed"
+
+
+def test_a_payee_the_explorer_flags_as_a_scam_is_blocked_even_when_approved():
+    d = evaluate(AGENT, quote(500_000), history(payee_flagged=True))
+    assert (d.decision, d.rule) == (BLOCK, "flagged_wallet") and DATACO in d.detail

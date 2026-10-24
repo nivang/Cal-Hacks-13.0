@@ -19,6 +19,7 @@ import uuid
 from collections.abc import AsyncIterator, Callable, Iterator
 from contextlib import asynccontextmanager, contextmanager
 from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from typing import Any
 from urllib.parse import parse_qs, urlsplit
@@ -92,12 +93,25 @@ def allow_local_urls(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 class FakeChain:
-    """Stands in for chain.wallet_history: every wallet has a history unless the test marks it unused or down."""
+    """Stands in for chain.wallet_history and chain.wallet_profile: every wallet has a long history unless the test
+    marks it unused, new or flagged (lower case addresses), or the chain down."""
 
     def __init__(self) -> None:
         self.unused: set[str] = set()
+        self.new: set[str] = set()
+        self.flagged: set[str] = set()
         self.down = False
         self.asked: list[str] = []
+
+    async def profile(self, address: str) -> chain.WalletProfile:
+        self.asked.append(address)
+        if self.down:
+            raise chain.ChainError("explorer and RPC down")
+        key = address.lower()
+        if key in self.unused:
+            return chain.WalletProfile(0, 0, None, False, "explorer")
+        first_seen = datetime.now(timezone.utc) - timedelta(hours=2) if key in self.new else None
+        return chain.WalletProfile(5, 120, first_seen, key in self.flagged, "explorer")
 
     async def history(self, address: str) -> chain.WalletHistory:
         self.asked.append(address)
@@ -110,9 +124,10 @@ class FakeChain:
 
 @pytest.fixture(autouse=True)
 def fake_chain(monkeypatch: pytest.MonkeyPatch) -> FakeChain:
-    """No test reads Base Sepolia: wallet_history answers from FakeChain."""
+    """No test reads Base Sepolia: wallet_history and wallet_profile answer from FakeChain."""
     fake = FakeChain()
     monkeypatch.setattr(chain, "wallet_history", fake.history)
+    monkeypatch.setattr(chain, "wallet_profile", fake.profile)
     return fake
 
 

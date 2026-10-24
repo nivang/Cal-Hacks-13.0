@@ -6,7 +6,8 @@ anything is signed, and test_guard.py is its answer key. Rules run in order and 
                     signature and settle it much later -> BLOCK
   2. lookalike      the payee is not approved but imitates an approved seller's (or the owner's own) address: same
                     first 6 and last 4 hex characters, the address poisoning trick -> BLOCK
-  3. seller         any seller the owner has not approved (unlisted or blocked) -> BLOCK
+  3. flagged_wallet the Base Sepolia explorer flags the payee as a scam (chain.wallet_profile) -> BLOCK
+  3b. seller        any seller the owner has not approved (unlisted or blocked) -> BLOCK
   4. payee_changed  this agent already paid this exact URL to a different address: the payee was swapped -> BLOCK
   5. cap            amount above the agent's per payment cap -> BLOCK
   6. budget         rolling spend + amount above the weekly budget -> BLOCK
@@ -56,6 +57,7 @@ class History:
     duplicate_of: int | None = None  # id of that earlier attempt, so the caller can be pointed at it
     lookalike_of: str | None = None  # the approved (or own) address an unapproved payee imitates, if any
     url_paid_to: tuple[str, ...] = ()  # addresses this agent already paid for this exact URL
+    payee_flagged: bool = False  # the explorer flags the payee as a scam (payments.payee_profile)
 
 
 @dataclass(frozen=True)
@@ -109,6 +111,12 @@ def evaluate(agent: Agent, quote: Quote, history: History, policy: dict[str, int
             BLOCK, "lookalike",
             f"The seller's address {quote.pay_to} imitates {history.lookalike_of} (same start and end, different "
             "middle). That is address poisoning: someone hoping a payment goes to the wrong wallet.",
+        )
+
+    if history.payee_flagged:
+        return Decision(
+            BLOCK, "flagged_wallet",
+            f"The Base Sepolia explorer flags the seller's wallet {quote.pay_to} as a scam.",
         )
 
     if history.seller_status == "blocked":

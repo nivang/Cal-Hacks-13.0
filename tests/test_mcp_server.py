@@ -1053,3 +1053,30 @@ async def test_a_swapped_payee_on_a_url_already_bought_is_blocked(conn, make_ser
     assert first["status"] == "SETTLED"
     swapped = await call(make_server(fake_pay_for(conn, pay_to=other, amount=400_000)), "pay", url=URL, reason=REASON)
     assert swapped["status"] == "BLOCKED" and swapped["rule"] == "payee_changed" and DATACO in swapped["message"]
+
+
+# The payee's wallet history at payment time
+
+
+@pytest.mark.anyio
+async def test_a_payee_flagged_by_the_explorer_is_blocked_at_payment(conn, make_server, alice, fake_chain):
+    fake_chain.flagged.add(DATACO.lower())
+    r = await call(make_server(), "pay", url=URL, reason=REASON)
+    assert r["status"] == "BLOCKED" and r["rule"] == "flagged_wallet"
+
+
+@pytest.mark.anyio
+async def test_a_payee_with_no_activity_is_held_for_the_owner(conn, make_server, alice, fake_chain):
+    fake_chain.unused.add(DATACO.lower())
+    r = await call(make_server(), "pay", url=URL, reason=REASON)
+    assert r["status"] == "ESCALATED" and r["rule"] == "unused_wallet"
+
+
+@pytest.mark.anyio
+async def test_the_wallet_profile_is_cached_so_the_explorer_is_asked_once_an_hour(conn, make_server, alice,
+                                                                                 fake_chain):
+    await call(make_server(), "pay", url="http://seller.test/one", reason=REASON)
+    await call(make_server(), "pay", url="http://seller.test/two", reason=REASON)
+    assert fake_chain.asked == [DATACO]
+    cached = conn.execute("SELECT profile FROM wallet_profiles WHERE address = %s", (DATACO.lower(),)).fetchone()
+    assert cached["profile"]["token_transfers"] == 120
