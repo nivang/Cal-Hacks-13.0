@@ -2,11 +2,10 @@
 from types import SimpleNamespace
 
 import pytest
-
-import ledger
-import payments
 from conftest import ASSET, DATACO, NETWORK, SCAMMER
-from guard import Quote
+
+from sentinel import ledger, payments
+from sentinel.guard import Quote
 
 
 def requirement(network: str = NETWORK, asset: str = ASSET, amount: str = "500000"):

@@ -1,7 +1,7 @@
 """Tests for the result shape and wording the agent sees. Pure: no database, no server."""
-import results
-from guard import Quote
-from payments import PayResult
+from sentinel import results
+from sentinel.guard import Quote
+from sentinel.payments import PayResult
 
 QUOTE = Quote("http://x/a", "0xSeller", 500_000, "0xusdc", "eip155:84532", 300)
 

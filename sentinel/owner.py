@@ -11,10 +11,9 @@ import re
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
-import attempts
-import results
-from db import USDC, Connection, insert, usdc
-from payments import NETWORK, USDC_BASE_SEPOLIA
+from sentinel import attempts, results
+from sentinel.db import USDC, Connection, insert, usdc
+from sentinel.payments import NETWORK, USDC_BASE_SEPOLIA
 
 ATOMIC = "* 1000000"  # SQL: whole USDC (numeric) to integer atomic units
 MAX_USDC = 10**12  # numeric(18,6) holds 12 whole digits

@@ -2,13 +2,11 @@
 from contextlib import contextmanager
 
 import pytest
+from conftest import ASSET, DATACO, NETWORK
 from fastapi.testclient import TestClient
 
-import auth
-import ledger_app
-import payments
-from conftest import ASSET, DATACO, NETWORK
-from guard import Quote
+from sentinel import auth, ledger_app, payments
+from sentinel.guard import Quote
 
 PASSWORD = "correct horse battery staple"
 NEW_SELLER = "0x2222222222222222222222222222222222222222"

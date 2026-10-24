@@ -2,14 +2,14 @@
 
 A token is random, shown once when issued, and stored only as a sha256 hash in agents.token_hash. Both MCP
 transports (stdio and HTTP) verify tokens here, so who is asking never depends on a label the agent chose for
-itself. Used by mcp_server.py. Run `python auth.py issue research-agent` to create or rotate a token.
+itself. Used by mcp_server.py. Run `python -m sentinel.auth issue research-agent` to create or rotate a token.
 """
 import hashlib
 import secrets
 import sys
 from pathlib import Path
 
-from db import Connection
+from sentinel.db import Connection
 
 TOKEN_PREFIX = "snt_"
 ENV_VAR = "SENTINEL_AGENT_TOKEN"
@@ -50,12 +50,13 @@ def write_env_var(path: Path, name: str, value: str) -> None:
 if __name__ == "__main__":
     from dotenv import load_dotenv
 
-    import db
+    from sentinel import ENV_FILE, db
 
-    load_dotenv()
+    load_dotenv(ENV_FILE)
     args = sys.argv[1:]
     if len(args) < 2 or args[0] != "issue":
-        sys.exit("usage: python auth.py issue <agent> [--env-file .env]  (token is shown once, or written to the file)")
+        sys.exit("usage: python -m sentinel.auth issue <agent> [--env-file .env]"
+                 "  (token is shown once, or written to the file)")
     with db.connection() as c:
         new_token = issue_token(c, args[1])
     db.close_pool()

@@ -1,7 +1,7 @@
 """Answer key for the guard. Each planted case maps to one rule; the rest are edge cases."""
 import pytest
 
-from guard import ALLOW, BLOCK, Agent, History, Quote, evaluate
+from sentinel.guard import ALLOW, BLOCK, Agent, History, Quote, evaluate
 
 USDC = 1_000_000
 DATACO = "0x290E84b17Ce32cF9403f5D0218cB50ccdcc94781"

@@ -1,7 +1,7 @@
 """Tests for agent tokens: issuing, hashing, lookup, rotation and the env file writer."""
 import pytest
 
-import auth
+from sentinel import auth
 
 
 def test_issue_then_lookup_round_trips(conn):
@@ -42,7 +42,7 @@ def test_two_agents_cannot_share_a_token_hash(conn):
         " SELECT 'second-agent', 1, 1, expense_account_id FROM agents WHERE name = 'research-agent'"
     )
     token = auth.issue_token(conn, "research-agent")
-    from db import UniqueViolation, transaction
+    from sentinel.db import UniqueViolation, transaction
 
     with pytest.raises(UniqueViolation), transaction(conn):
         conn.execute("UPDATE agents SET token_hash = %s WHERE name = 'second-agent'", (auth.hash_token(token),))

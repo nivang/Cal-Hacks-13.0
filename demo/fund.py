@@ -7,6 +7,8 @@ import asyncio
 from cdp import CdpClient
 from dotenv import load_dotenv
 
+from sentinel import ENV_FILE
+
 
 async def main() -> None:
     """Create or load the "sentinel" account and ask the faucet to send it USDC."""
@@ -18,5 +20,5 @@ async def main() -> None:
 
 
 if __name__ == "__main__":
-    load_dotenv()
+    load_dotenv(ENV_FILE)
     asyncio.run(main())

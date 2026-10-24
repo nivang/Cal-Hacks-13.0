@@ -3,7 +3,7 @@
 Serves three x402 paid endpoints on port 4000 (DataCo, InsightLab and a scammer), a trap page with a
 hidden prompt injection, and an unauthenticated /admin/price endpoint to flip a price live. The admin
 endpoint exists only so the demo can show a price surge; never expose this server publicly.
-Run with: uvicorn sellers:app --port 4000
+Run with: uvicorn demo.sellers:app --port 4000
 """
 import os
 
@@ -17,7 +17,9 @@ from x402.http.types import RouteConfig
 from x402.mechanisms.evm.exact import ExactEvmServerScheme
 from x402.server import x402ResourceServer
 
-load_dotenv()
+from sentinel import ENV_FILE
+
+load_dotenv(ENV_FILE)
 NET = "eip155:84532"
 
 # Mutable on purpose: /admin/price changes these live.

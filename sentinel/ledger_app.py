@@ -5,7 +5,7 @@ separate from the MCP server, and every route sits behind SENTINEL_OWNER_PASSWOR
 So the agent asks (pay) and the owner decides what it may buy (here), and the two never share a door.
 Reads and writes go through owner.py and ledger.py; nothing here touches the wallet.
 
-Run:  uvicorn ledger_app:create_app --factory --port 5000     then open http://127.0.0.1:5000
+Run:  uvicorn sentinel.ledger_app:create_app --factory --port 5000 then open http://127.0.0.1:5000
 """
 import hashlib
 import hmac
@@ -22,11 +22,7 @@ from fastapi import Depends, FastAPI, Form, HTTPException, Request, Response
 from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 
-import db
-import guard
-import ledger
-import owner
-import results
+from sentinel import ENV_FILE, db, guard, ledger, owner, results
 
 COOKIE = "sentinel_owner"
 CSP = "default-src 'self'; style-src 'unsafe-inline'; frame-ancestors 'none'"
@@ -47,7 +43,7 @@ def session_token(password: str) -> str:
 def create_app(connect: Connect = db.connection, password: str | None = None) -> FastAPI:
     """Build the ledger app. password defaults to SENTINEL_OWNER_PASSWORD; startup fails without a strong one."""
     if password is None:
-        load_dotenv()
+        load_dotenv(ENV_FILE)
         password = os.environ.get(PASSWORD_VAR, "")
     if len(password) < MIN_PASSWORD:
         raise RuntimeError(f"Set {PASSWORD_VAR} in .env to at least {MIN_PASSWORD} characters before starting.")

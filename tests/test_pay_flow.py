@@ -7,11 +7,9 @@ from types import SimpleNamespace
 
 import httpx
 import pytest
-
-import attempts
-import ledger
-import payments
 from conftest import ASSET, DATACO, NETWORK
+
+from sentinel import attempts, ledger, payments
 
 URL = "http://seller.test/benchmarks/email"
 REQUIREMENT = SimpleNamespace(network=NETWORK, asset=ASSET, amount="500000", pay_to=DATACO, max_timeout_seconds=300)

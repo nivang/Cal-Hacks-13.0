@@ -10,9 +10,9 @@ from collections.abc import Iterator
 import pytest
 from dotenv import load_dotenv
 
-import db
+from sentinel import ENV_FILE, db
 
-load_dotenv()
+load_dotenv(ENV_FILE)
 
 TEST_SCHEMA = "test"
 NETWORK = "eip155:84532"

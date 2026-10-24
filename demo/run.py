@@ -1,8 +1,8 @@
-"""Command line demo of the three guard moments against the local test sellers (sellers.py).
+"""Command line demo of the three guard moments against the local test sellers (demo/sellers.py).
 
-    python demo.py buy     clean $0.50 purchase from approved DataCo: ALLOW, settles on Base Sepolia
-    python demo.py surge   DataCo suddenly quotes 4x the usual price: BLOCK (price_jump)
-    python demo.py scam    a quote from an unlisted seller, as an injected page would push: BLOCK (seller)
+    python -m demo.run buy   clean $0.50 purchase from approved DataCo: ALLOW, settles on Base Sepolia
+    python -m demo.run surge DataCo suddenly quotes 4x the usual price: BLOCK (price_jump)
+    python -m demo.run scam  a quote from an unlisted seller, as an injected page would push: BLOCK (seller)
 
 Also seeds the approved sellers and the opening balance on first run. Real testnet payments, no simulation.
 """
@@ -14,9 +14,8 @@ import httpx
 from cdp import CdpClient
 from dotenv import load_dotenv
 
-import db
-import ledger
-from payments import NETWORK, USDC_BASE_SEPOLIA, PaymentRejected, pay_for
+from sentinel import ENV_FILE, db, ledger
+from sentinel.payments import NETWORK, USDC_BASE_SEPOLIA, PaymentRejected, pay_for
 
 SELLERS_URL = "http://localhost:4000"
 USDC_BALANCE_OF = "0x70a08231"  # ERC20 balanceOf(address) selector
@@ -79,7 +78,7 @@ async def run(scenario: str) -> None:
 
 
 if __name__ == "__main__":
-    load_dotenv()
+    load_dotenv(ENV_FILE)
     if len(sys.argv) != 2 or sys.argv[1] not in ("buy", "surge", "scam"):
         sys.exit(__doc__)
     try:

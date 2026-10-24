@@ -6,8 +6,8 @@ token checked against the agents table: over HTTP the token comes in the Authori
 SENTINEL_AGENT_TOKEN in the agent's MCP config. There is deliberately no tool to add sellers or change limits: the
 owner does that on the ledger page (ledger_app.py), behind a password the agent never holds.
 
-Run:  python mcp_server.py                      stdio (Claude Desktop, Claude Code, MCP Inspector)
-      python mcp_server.py --transport http     Streamable HTTP at http://127.0.0.1:8000/mcp
+Run:  python -m sentinel.mcp_server                    stdio (Claude Desktop, Claude Code, MCP Inspector)
+      python -m sentinel.mcp_server --transport http   Streamable HTTP at http://127.0.0.1:8000/mcp
 Fits between the agent (above) and payments.py / attempts.py (below).
 """
 import argparse
@@ -29,12 +29,7 @@ from fastmcp.server.dependencies import get_access_token
 from fastmcp.server.lifespan import lifespan
 from pydantic import Field
 
-import attempts
-import auth
-import db
-import payments
-import results
-import urls
+from sentinel import ENV_FILE, attempts, auth, db, payments, results, urls
 
 log = logging.getLogger("sentinel.mcp")
 
@@ -207,17 +202,19 @@ def bound_agent_from_env() -> str:
     """For stdio: verify SENTINEL_AGENT_TOKEN once at startup and return the agent it belongs to, or exit with why."""
     token = os.environ.get(auth.ENV_VAR, "")
     if not token:
-        sys.exit(f"{auth.ENV_VAR} is not set. Create one with: python auth.py issue research-agent --env-file .env")
+        sys.exit(f"{auth.ENV_VAR} is not set. Create one with: "
+                 "python -m sentinel.auth issue research-agent --env-file .env")
     with db.connection() as conn:
         agent = auth.agent_for_token(conn, token)
     if agent is None:
-        sys.exit(f"{auth.ENV_VAR} is not a valid agent token. Issue a new one with: python auth.py issue <agent>")
+        sys.exit(f"{auth.ENV_VAR} is not a valid agent token. Issue a new one with: "
+                 "python -m sentinel.auth issue <agent>")
     return agent
 
 
 def main(argv: list[str] | None = None) -> None:
     """Parse arguments, check the environment and run the server on stdio or Streamable HTTP."""
-    load_dotenv()
+    load_dotenv(ENV_FILE)
     parser = argparse.ArgumentParser(description="Sentinel MCP server")
     parser.add_argument("--transport", choices=["stdio", "http"], default="stdio")
     parser.add_argument("--host", default=os.environ.get("SENTINEL_MCP_HOST", "127.0.0.1"))

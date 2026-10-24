@@ -1,8 +1,43 @@
+[build-system]
+requires = ["setuptools>=75"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "sentinel"
+version = "0.1.0"
+description = "MCP server that holds the wallet, guards every agent payment and keeps the books"
+requires-python = ">=3.13"
+dependencies = [
+    "cdp-sdk==1.51.0",
+    "x402[evm,httpx,fastapi]==2.25.0",
+    "fastapi==0.162.0",
+    "uvicorn==0.54.0",
+    "httpx==0.28.1",
+    "python-dotenv==1.2.4",
+    "psycopg[binary,pool]==3.3.6",
+    "psycopg-pool==3.3.3",
+    "fastmcp==4.1.0",
+    "Jinja2==3.1.6",
+    "python-multipart==0.0.32",
+]
+
+[project.optional-dependencies]
+dev = ["pytest==9.1.1", "ruff==0.17.2", "mypy==2.4.0"]
+
+[tool.setuptools]
+packages = ["sentinel", "demo"]
+
+[tool.setuptools.package-data]
+sentinel = ["policy.json", "templates/*.html", "migrations/*.sql"]
+
 [tool.ruff]
 line-length = 120
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "B"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["sentinel", "demo"]
 
 [tool.mypy]
 python_version = "3.13"
@@ -10,4 +45,4 @@ ignore_missing_imports = true
 warn_unused_ignores = true
 
 [tool.pytest.ini_options]
-testpaths = ["."]
+testpaths = ["tests"]

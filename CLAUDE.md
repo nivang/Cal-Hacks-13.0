@@ -15,11 +15,12 @@ Sentinel is an MCP server that holds the wallet so the agent never does. Every p
 - Phase 0 done: keys, wallets, buyer funded (about 9.5 USDC left, CDP faucet is rate limited, use faucet.circle.com)
 - Phase 1 done: sellers.py serves /benchmarks/email ($0.50, seller-a), /reports/social ($1.00, seller-b), /premium ($9.00, seller-c) and /article (trap page) on port 4000. POST /admin/price {"path","price"} flips price live without restart (verified).
 - Phase 2 done: payments.py runs the manual x402 flow and settled on Base Sepolia.
-- Phase 3 done: db.py, attempts.py, ledger.py (Supabase Postgres, project sentinel, schema in migrations/) record every attempt and post balanced, append only journal entries. See README.
+- Phase 3 done: db.py, attempts.py, ledger.py (Supabase Postgres, project sentinel, schema in sentinel/migrations/) record every attempt and post balanced, append only journal entries. See docs/how-it-works.md.
 - Phase 4 done: guard.py evaluate(agent, quote, history) is pure; thresholds in policy.json; pytest is the answer key.
 - Refactor done (no behavior change): split db into db/attempts/ledger, demo.py runs buy/surge/scam, pinned requirements, ruff + mypy clean.
 - Phase 5 done: mcp_server.py (FastMCP 4, stdio + Streamable HTTP) exposes pay and payment_status; identity via agents.token_hash (auth.py); results.py wording; urls.py SSRF guard; attempt_results stores paid bodies (migration 006). No approve tool, by design.
 - Phase 6 dropped (no approve or deny page). Instead: owner.py + ledger_app.py (FastAPI, Jinja2, owner password SENTINEL_OWNER_PASSWORD) show agents, sellers, payments, journal, trial balance; forms approve or block sellers and set agent limits; /payments.csv exports the log. Migration 007 closed out old pending rows.
+- Repo layout done: sentinel/ (installable package, pip install -e ".[dev]"), demo/ (sellers, run, fund), tests/, docs/how-it-works.md. .env is loaded by absolute path (sentinel.ENV_FILE) so Claude Desktop can launch the server from any cwd. README is a Claude Desktop quickstart.
 - Not built yet: month end flags, QuickBooks export.
 
 ## Rules
@@ -30,11 +31,12 @@ Sentinel is an MCP server that holds the wallet so the agent never does. Every p
 - Keep a FEEDBACK.md log: what broke, what we tried, workaround, what Coinbase should add.
 
 ## Run
-- uvicorn sellers:app --port 4000
-- python demo.py buy|surge|scam
-- python mcp_server.py [--transport http]; python auth.py issue research-agent --env-file .env
-- uvicorn ledger_app:create_app --factory --port 5000 (needs SENTINEL_OWNER_PASSWORD, 12+ chars)
-- pytest -v; ruff check .; mypy *.py
+- uvicorn demo.sellers:app --port 4000
+- python -m demo.run buy|surge|scam
+- python -m sentinel.mcp_server [--transport http]; python -m sentinel.auth issue research-agent --env-file .env
+- python -m sentinel.db migrate
+- uvicorn sentinel.ledger_app:create_app --factory --port 5000 (needs SENTINEL_OWNER_PASSWORD, 12+ chars)
+- pytest -v; ruff check .; mypy sentinel demo tests
 
 ## Preferences
 - No hyphens in prose responses. Direct, practical, concise. Lead with the point.

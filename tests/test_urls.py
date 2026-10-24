@@ -1,7 +1,7 @@
 """Tests for the URL safety check. No real DNS: resolve() is patched where a host name is involved."""
 import pytest
 
-import urls
+from sentinel import urls
 
 
 def test_plain_public_https_url_is_allowed(monkeypatch):

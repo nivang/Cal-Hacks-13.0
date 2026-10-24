@@ -9,7 +9,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel
 
-import payments
+from sentinel import payments
 
 Status = Literal["SETTLED", "BLOCKED", "PROCESSING", "FAILED", "FREE", "NOT_FOUND"]
 MAX_BODY_CHARS = 100_000

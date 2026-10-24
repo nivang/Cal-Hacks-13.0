@@ -7,7 +7,7 @@ did not happen as well as what did. Sits between payments.py (writes attempts) a
 import json
 from typing import Any
 
-from db import Connection, agent_id, insert, usdc
+from sentinel.db import Connection, agent_id, insert, usdc
 
 LIVE_STATUSES = ["settled", "approved"]  # attempts that count as spent or in flight
 ATOMIC = "* 1000000"  # SQL: whole USDC (numeric) to integer atomic units

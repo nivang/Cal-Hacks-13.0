@@ -7,16 +7,12 @@ validation, and the BLOCKED / SETTLED / FREE / FAILED results.
 from contextlib import contextmanager
 
 import pytest
+from conftest import ASSET, DATACO, NETWORK, SCAMMER
 from fastmcp import Client
 
-import attempts
-import auth
-import ledger
-import mcp_server
-import payments
-from conftest import ASSET, DATACO, NETWORK, SCAMMER
-from guard import Quote
-from payments import PayResult
+from sentinel import attempts, auth, ledger, mcp_server, payments
+from sentinel.guard import Quote
+from sentinel.payments import PayResult
 
 REASON = "Need 2026 email open-rate benchmarks for the Q3 report the owner asked for; DataCo is named in the brief."
 URL = "http://seller.test/benchmarks/email"

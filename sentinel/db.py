@@ -168,9 +168,11 @@ def agent_id(conn: Connection, name: str) -> int:
 if __name__ == "__main__":
     from dotenv import load_dotenv
 
-    load_dotenv()
+    from sentinel import ENV_FILE
+
+    load_dotenv(ENV_FILE)
     if sys.argv[1:] != ["migrate"]:
-        sys.exit("usage: python db.py migrate   (builds the tables on an empty database)")
+        sys.exit("usage: python -m sentinel.db migrate (builds the tables on an empty database)")
     with connection() as c:
         apply_migrations(c)
         init(c)

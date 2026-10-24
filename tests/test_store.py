@@ -1,11 +1,8 @@
 """Tests for the attempt log and the ledger: the lock, history lookups, balanced and append only books."""
 import pytest
-
-import attempts
-import db
-import guard
-import ledger
 from conftest import ASSET, DATACO, NETWORK
+
+from sentinel import attempts, db, guard, ledger
 
 Q = {"url": "http://x/a", "pay_to": DATACO, "amount": 500_000, "asset": ASSET, "network": NETWORK, "timeout_s": 300}
 

@@ -8,7 +8,7 @@ payment log. Used by payments.py after a payment settles. Amounts are integer at
 import hashlib
 from typing import Any
 
-from db import Connection, account_id, insert, transaction, usdc
+from sentinel.db import Connection, account_id, insert, transaction, usdc
 
 CASH = "1010"
 OWNER_CONTRIBUTIONS = "3000"
