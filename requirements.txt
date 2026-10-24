@@ -7,3 +7,5 @@ python-dotenv==1.2.4
 psycopg[binary,pool]==3.3.6
 psycopg-pool==3.3.3
 fastmcp==4.1.0
+Jinja2==3.1.6
+python-multipart==0.0.32

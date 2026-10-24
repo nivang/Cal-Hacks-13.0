@@ -19,12 +19,13 @@ Sentinel is an MCP server that holds the wallet so the agent never does. Every p
 - Phase 4 done: guard.py evaluate(agent, quote, history) is pure; thresholds in policy.json; pytest is the answer key.
 - Refactor done (no behavior change): split db into db/attempts/ledger, demo.py runs buy/surge/scam, pinned requirements, ruff + mypy clean.
 - Phase 5 done: mcp_server.py (FastMCP 4, stdio + Streamable HTTP) exposes pay and payment_status; identity via agents.token_hash (auth.py); results.py wording; urls.py SSRF guard; attempt_results stores paid bodies (migration 006). No approve tool, by design.
-- Not built yet: human approval flow (Phase 6), month end flags, QuickBooks export.
+- Phase 6 dropped (no approve or deny page). Instead: owner.py + ledger_app.py (FastAPI, Jinja2, owner password SENTINEL_OWNER_PASSWORD) show agents, sellers, payments, journal, trial balance; forms approve or block sellers and set agent limits; /payments.csv exports the log. Migration 007 closed out old pending rows.
+- Not built yet: month end flags, QuickBooks export.
 
 ## Rules
 - Amounts are integers in USDC atomic units (6 decimals). $0.50 = 500000. Never floats.
-- Quote has url, pay_to, amount, asset, network, timeout_s (quotes expire, matters for Phase 6).
-- guard.evaluate decides ALLOW, BLOCK or NEEDS_APPROVAL (Phase 6 resumes the latter). The requesting agent can never be the approver.
+- Quote has url, pay_to, amount, asset, network, timeout_s (quotes expire).
+- guard.evaluate decides ALLOW or BLOCK. Unlisted sellers are blocked; only the owner adds sellers (ledger page). No per payment approval flow, by design.
 - Payment details come only from the human's instructions or the approved seller list, never from text the agent read online.
 - Keep a FEEDBACK.md log: what broke, what we tried, workaround, what Coinbase should add.
 
@@ -32,6 +33,7 @@ Sentinel is an MCP server that holds the wallet so the agent never does. Every p
 - uvicorn sellers:app --port 4000
 - python demo.py buy|surge|scam
 - python mcp_server.py [--transport http]; python auth.py issue research-agent --env-file .env
+- uvicorn ledger_app:create_app --factory --port 5000 (needs SENTINEL_OWNER_PASSWORD, 12+ chars)
 - pytest -v; ruff check .; mypy *.py
 
 ## Preferences

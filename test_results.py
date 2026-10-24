@@ -46,12 +46,6 @@ def test_duplicate_block_points_at_the_earlier_payment():
     assert r.related_request_id == 7 and "payment_status(7)" in r.message and "Do not retry" not in r.message
 
 
-def test_pending_result_says_wait_and_not_to_resubmit():
-    r = results.pending(5, "seller", "The seller 0xabc is not on the approved list.")
-    assert (r.status, r.request_id) == ("PENDING", 5)
-    assert "owner approval" in r.message and "payment_status(5)" in r.message and "Do not submit" in r.message
-
-
 def test_failed_with_tx_tells_the_agent_not_to_pay_again():
     r = results.failed(8, "0xdead")
     assert r.status == "FAILED" and "Do not repay" in r.message and r.explorer_url and r.tx_hash == "0xdead"
@@ -72,9 +66,7 @@ def test_attempt_rows_map_to_every_status():
     assert results.from_attempt(row("settled", tx_hash="0xabc"), "data").body == "data"
     blocked = results.from_attempt(row("blocked", rule_fired="cap: Over the limit."), None)
     assert (blocked.status, blocked.rule) == ("BLOCKED", "cap") and "Over the limit." in blocked.message
-    assert results.from_attempt(row("pending", rule_fired="seller: Not approved."), None).status == "PENDING"
     assert results.from_attempt(row("approved"), None).status == "PROCESSING"
-    assert results.from_attempt(row("denied"), None).status == "DENIED"
     assert results.from_attempt(row("failed"), None).status == "FAILED"
 
 
@@ -87,6 +79,6 @@ def test_reasons_without_a_final_period_still_read_as_sentences():
     assert results.sentence("is not an approved seller") == "is not an approved seller."
     assert results.sentence("Already done.") == "Already done."
     assert results.sentence("") == ""
-    msg = results.pending(6, "seller", "0xabc is not an approved seller").message
-    assert "approved seller. Check payment_status(6)" in msg
+    msg = results.blocked(6, "seller", "0xabc is not an approved seller").message
+    assert "approved seller. Do not retry" in msg
     assert "Blocked. Too high. Do not retry" in results.blocked(1, "cap", "Too high").message

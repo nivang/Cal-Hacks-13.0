@@ -1,8 +1,8 @@
-"""Deterministic payment policy: decides ALLOW, BLOCK or NEEDS_APPROVAL for one quote.
+"""Deterministic payment policy: decides ALLOW or BLOCK for one quote.
 
 evaluate() is pure, so the same inputs always give the same decision. payments.py calls it before
 anything is signed, and test_guard.py is its answer key. Rules run in order and the first to fire wins:
-  1. seller      unlisted or pending seller -> NEEDS_APPROVAL, blocked seller -> BLOCK
+  1. seller      any seller the owner has not approved (unlisted or blocked) -> BLOCK
   2. cap         amount above the agent's per payment cap -> BLOCK
   3. budget      rolling spend + amount above the weekly budget -> BLOCK
   4. price_jump  amount above 2x the median of the seller's last 5 settled -> BLOCK
@@ -14,7 +14,7 @@ import json
 from dataclasses import dataclass
 from pathlib import Path
 
-ALLOW, BLOCK, NEEDS_APPROVAL = "ALLOW", "BLOCK", "NEEDS_APPROVAL"
+ALLOW, BLOCK = "ALLOW", "BLOCK"
 
 POLICY: dict[str, int] = json.loads((Path(__file__).parent / "policy.json").read_text())
 
@@ -44,7 +44,7 @@ class Agent:
 class History:
     """Ledger facts about this quote, gathered by attempts.load_history."""
 
-    seller_status: str | None  # approved, pending, blocked, or None if the seller is not listed
+    seller_status: str | None  # approved, blocked, or None if the seller is not listed
     week_spend: int  # settled plus in flight spend inside the budget window
     seller_settled: tuple[int, ...] = ()  # this seller's most recent settled amounts, newest first
     duplicate: bool = False  # a matching attempt exists inside the duplicate window
@@ -53,7 +53,7 @@ class History:
 
 @dataclass(frozen=True)
 class Decision:
-    """The guard's verdict: ALLOW, BLOCK or NEEDS_APPROVAL, which rule decided, and a plain English reason.
+    """The guard's verdict: ALLOW or BLOCK, which rule decided, and a plain English reason.
 
     related_id is the earlier attempt a duplicate block refers to, if any.
     """
@@ -76,11 +76,11 @@ def evaluate(agent: Agent, quote: Quote, history: History, policy: dict[str, int
     """
     if history.seller_status == "blocked":
         return Decision(BLOCK, "seller", f"The seller {quote.pay_to} is on the owner's blocked list.")
-    # Unknown sellers pause for a human instead of blocking, so a new legitimate seller can be approved.
+    # Only the owner adds sellers, so anything not approved stops here, however convincing the page was.
     if history.seller_status != "approved":
         return Decision(
-            NEEDS_APPROVAL, "seller",
-            f"The seller {quote.pay_to} is not on the approved list, so the owner has to approve it first.",
+            BLOCK, "seller",
+            f"The seller {quote.pay_to} is not on the owner's approved list. Only the owner can add sellers.",
         )
 
     if quote.amount > agent.per_payment_cap:

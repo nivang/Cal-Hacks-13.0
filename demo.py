@@ -2,7 +2,7 @@
 
     python demo.py buy     clean $0.50 purchase from approved DataCo: ALLOW, settles on Base Sepolia
     python demo.py surge   DataCo suddenly quotes 4x the usual price: BLOCK (price_jump)
-    python demo.py scam    a quote from an unlisted seller, as an injected page would push: NEEDS_APPROVAL
+    python demo.py scam    a quote from an unlisted seller, as an injected page would push: BLOCK (seller)
 
 Also seeds the approved sellers and the opening balance on first run. Real testnet payments, no simulation.
 """
@@ -16,7 +16,7 @@ from dotenv import load_dotenv
 
 import db
 import ledger
-from payments import NETWORK, USDC_BASE_SEPOLIA, NeedsApproval, PaymentRejected, pay_for
+from payments import NETWORK, USDC_BASE_SEPOLIA, PaymentRejected, pay_for
 
 SELLERS_URL = "http://localhost:4000"
 USDC_BALANCE_OF = "0x70a08231"  # ERC20 balanceOf(address) selector
@@ -69,8 +69,6 @@ async def run(scenario: str) -> None:
             print(f"https://sepolia.basescan.org/tx/{result.tx_hash}")
         except PaymentRejected as e:
             print(f"BLOCKED  {e}")
-        except NeedsApproval as e:
-            print(f"NEEDS APPROVAL  {e}")
         finally:
             if scenario == "surge":
                 await set_price("/benchmarks/email", "$0.50")

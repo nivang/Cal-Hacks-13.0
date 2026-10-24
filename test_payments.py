@@ -49,12 +49,13 @@ def test_authorize_blocks_over_cap_and_still_writes_a_row(conn):
     assert "$15.00" in e.value.detail
 
 
-def test_authorize_pauses_unlisted_seller_for_approval_and_signs_nothing(conn):
-    with pytest.raises(payments.NeedsApproval) as e:
+def test_authorize_blocks_an_unlisted_seller_and_signs_nothing(conn):
+    with pytest.raises(payments.PaymentRejected) as e:
         payments.authorize(conn, "research-agent", None, quote(amount=9_000_000, pay_to=SCAMMER, url="http://x/premium"))
     row = conn.execute("SELECT id, status, decision FROM payment_attempts").fetchone()
-    assert (row["status"], row["decision"]) == ("pending", "NEEDS_APPROVAL")
+    assert (row["status"], row["decision"]) == ("blocked", "BLOCK")
     assert e.value.attempt_id == row["id"] and e.value.rule == "seller"
+    assert "Only the owner can add sellers" in e.value.detail
 
 
 def test_authorize_blocks_a_second_identical_payment_in_flight(conn):
@@ -72,11 +73,11 @@ def test_authorize_blocks_a_price_surge_after_a_settled_purchase(conn):
     assert "4.0x" in e.value.detail
 
 
-def test_repeating_a_paused_request_keeps_one_pending_row_and_returns_its_id(conn):
+def test_repeating_an_unlisted_seller_logs_each_block_and_takes_no_lock(conn):
     ids = []
     for _ in range(2):
-        with pytest.raises(payments.NeedsApproval) as e:
+        with pytest.raises(payments.PaymentRejected) as e:
             payments.authorize(conn, "research-agent", None, quote(amount=9_000_000, pay_to=SCAMMER, url="http://x/premium"))
         ids.append(e.value.attempt_id)
-    assert conn.execute("SELECT COUNT(*) AS n FROM payment_attempts WHERE status = 'pending'").fetchone()["n"] == 1
-    assert ids[0] == ids[1] is not None
+    assert conn.execute("SELECT COUNT(*) AS n FROM payment_attempts WHERE status = 'blocked'").fetchone()["n"] == 2
+    assert ids[0] != ids[1] and all(e.value.rule == "seller" for _ in ids)

@@ -1,7 +1,7 @@
 """Answer key for the guard. Each planted case maps to one rule; the rest are edge cases."""
 import pytest
 
-from guard import ALLOW, BLOCK, NEEDS_APPROVAL, Agent, History, Quote, evaluate
+from guard import ALLOW, BLOCK, Agent, History, Quote, evaluate
 
 USDC = 1_000_000
 DATACO = "0x290E84b17Ce32cF9403f5D0218cB50ccdcc94781"
@@ -18,9 +18,9 @@ def history(**overrides) -> History:
     return History(**{**base, **overrides})
 
 
-def test_1_seller_unknown_scammer_needs_approval():
+def test_1_seller_unknown_scammer_blocks():
     d = evaluate(AGENT, quote(9 * USDC, SCAMMER), history(seller_status=None))
-    assert (d.decision, d.rule) == (NEEDS_APPROVAL, "seller")
+    assert (d.decision, d.rule) == (BLOCK, "seller")
 
 
 def test_2_cap_15_vs_10_blocks():
@@ -56,17 +56,20 @@ def test_first_purchase_has_no_history_and_is_trusted():
     assert evaluate(AGENT, quote(5 * USDC), history(seller_settled=())).decision == ALLOW
 
 
-def test_blocked_seller_is_blocked_not_escalated():
-    assert evaluate(AGENT, quote(500_000), history(seller_status="blocked")).decision == BLOCK
+def test_blocked_seller_is_blocked():
+    d = evaluate(AGENT, quote(500_000), history(seller_status="blocked"))
+    assert (d.decision, d.rule) == (BLOCK, "seller") and "blocked list" in d.detail
 
 
-def test_pending_seller_needs_approval():
-    assert evaluate(AGENT, quote(500_000), history(seller_status="pending")).decision == NEEDS_APPROVAL
+def test_pending_seller_is_not_approved_so_it_blocks():
+    # Older rows may still say pending; only "approved" lets money move.
+    d = evaluate(AGENT, quote(500_000), history(seller_status="pending"))
+    assert (d.decision, d.rule) == (BLOCK, "seller")
 
 
 def test_seller_rule_runs_before_cap():
-    # The $9 scam quote is under the $10 cap anyway; a $15 one from an unknown seller still escalates, not blocks.
-    assert evaluate(AGENT, quote(15 * USDC, SCAMMER), history(seller_status=None)).decision == NEEDS_APPROVAL
+    # A $15 quote from an unknown seller is reported as a seller problem, not a cap problem.
+    assert evaluate(AGENT, quote(15 * USDC, SCAMMER), history(seller_status=None)).rule == "seller"
 
 
 def test_amount_exactly_at_cap_and_budget_is_allowed():

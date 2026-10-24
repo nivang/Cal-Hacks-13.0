@@ -54,14 +54,6 @@ class PaymentRejected(Exception):
         self.attempt_id, self.related_id = attempt_id, related_id
 
 
-class NeedsApproval(Exception):
-    """The guard paused the payment for a human. Nothing was signed; a pending attempt row exists (attempt_id)."""
-
-    def __init__(self, rule: str, detail: str, attempt_id: int | None = None):
-        super().__init__(f"{rule}: {detail}")
-        self.rule, self.detail, self.attempt_id = rule, detail, attempt_id
-
-
 class PaymentFailed(Exception):
     """The payment was approved but did not complete.
 
@@ -96,10 +88,9 @@ def build_quote(url: str, requirement: Any) -> guard.Quote:
 
 
 def authorize(conn: db.Connection, agent: str, reason: str | None, quote: guard.Quote) -> int:
-    """Run the guard and record the attempt. Returns the approved attempt id, or raises.
+    """Run the guard and record the attempt. Returns the approved attempt id, or raises PaymentRejected.
 
-    BLOCK raises PaymentRejected and NEEDS_APPROVAL raises NeedsApproval. Both leave a row in the log
-    so the ledger shows what did not happen, and both carry that row's id.
+    A block leaves a row in the log so the ledger shows what did not happen, and the exception carries its id.
     """
     quote_dict = asdict(quote)
     history = guard.History(**attempts.load_history(conn, agent, quote_dict, guard.POLICY))
@@ -111,17 +102,6 @@ def authorize(conn: db.Connection, agent: str, reason: str | None, quote: guard.
             conn, agent, quote.url, reason, quote_dict, "blocked", decision.decision, rule
         )
         raise PaymentRejected(decision.rule, decision.detail, blocked_id, decision.related_id)
-    if decision.decision == guard.NEEDS_APPROVAL:
-        pending_id: int | None
-        try:
-            with db.transaction(conn):
-                pending_id = attempts.record_attempt(
-                    conn, agent, quote.url, reason, quote_dict, "pending", decision.decision, rule
-                )
-        except db.UniqueViolation:
-            # The same request is already waiting for a human: do not log a second pending row, reuse its id.
-            pending_id = attempts.find_live_id(conn, agent, quote_dict)
-        raise NeedsApproval(decision.rule, decision.detail, pending_id)
     try:
         with db.transaction(conn):  # own savepoint, so a lock clash does not poison an outer transaction
             return attempts.record_attempt(
@@ -141,8 +121,8 @@ async def pay_for(url: str, account: Any, agent: str = "research-agent", reason:
     """Fetch url, paying the seller if it returns 402 and the guard allows it.
 
     account is the CDP account that signs. Returns the response and, if paid, the tx hash. Raises
-    PaymentRejected or NeedsApproval when the guard stops the payment, and PaymentFailed when an
-    approved payment does not complete.
+    PaymentRejected when the guard stops the payment, and PaymentFailed when an approved payment does
+    not complete.
     """
     with db.connection() as conn:
         return await _pay_with(conn, url, account, agent, reason)

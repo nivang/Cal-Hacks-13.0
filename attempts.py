@@ -1,6 +1,6 @@
 """Payment attempt log and the history lookups the guard needs.
 
-Every payment request is written here, including blocked and paused ones, so the ledger shows what
+Every payment request is written here, including blocked ones, so the ledger shows what
 did not happen as well as what did. Sits between payments.py (writes attempts) and guard.py
 (reads the facts load_history returns). Amounts go in and out as integer atomic units.
 """
@@ -9,7 +9,7 @@ from typing import Any
 
 from db import Connection, agent_id, insert, usdc
 
-LIVE_STATUSES = ["settled", "approved", "pending"]  # attempts that count as spent or in flight
+LIVE_STATUSES = ["settled", "approved"]  # attempts that count as spent or in flight
 ATOMIC = "* 1000000"  # SQL: whole USDC (numeric) to integer atomic units
 
 
@@ -19,14 +19,14 @@ def record_attempt(
     url: str,
     reason: str | None = None,
     quote: dict[str, Any] | None = None,
-    status: str = "pending",
+    status: str = "blocked",  # fail closed: only an explicit "approved" takes the lock and can settle
     decision: str | None = None,
     rule_fired: str | None = None,
 ) -> int:
     """Insert one payment attempt row and return its id.
 
-    A row with status approved or pending takes the in flight lock for its dedupe key, so a second
-    identical insert raises db.UniqueViolation. Blocked rows never take the lock.
+    A row with status approved takes the in flight lock for its dedupe key, so a second identical insert
+    raises db.UniqueViolation. Blocked rows never take the lock.
     """
     dedupe_key = quote and f"{agent}|{quote['pay_to'].lower()}|{url}|{quote['amount']}"
     return insert(
@@ -63,18 +63,13 @@ def load_history(conn: Connection, agent: str, quote: dict[str, Any], policy: di
     """Read the ledger facts guard.evaluate needs for this agent and quote.
 
     Returns seller_status, week_spend, seller_settled, duplicate and duplicate_of as a dict that builds
-    guard.History. Spend counts settled and in flight attempts so pending money is not double spent.
+    guard.History. Spend counts settled and in flight attempts so money on its way out is not double spent.
     Time windows are computed by the database clock.
     """
     aid = agent_id(conn, agent)
     seller = conn.execute(
         "SELECT status FROM sellers WHERE lower(pay_to) = lower(%s) AND network = %s AND lower(asset) = lower(%s)",
         (quote["pay_to"], quote["network"], quote["asset"]),
-    ).fetchone()
-    week_spend = conn.execute(
-        f"SELECT (COALESCE(SUM(amount), 0) {ATOMIC})::bigint AS total FROM payment_attempts"
-        " WHERE agent_id = %s AND created_at >= now() - make_interval(days => %s) AND status = ANY(%s)",
-        (aid, policy["budget_window_days"], LIVE_STATUSES),
     ).fetchone()
     settled = conn.execute(
         f"SELECT (amount {ATOMIC})::bigint AS amount FROM payment_attempts"
@@ -89,20 +84,30 @@ def load_history(conn: Connection, agent: str, quote: dict[str, Any], policy: di
     ).fetchone()
     return {
         "seller_status": seller["status"] if seller else None,
-        "week_spend": week_spend["total"] if week_spend else 0,
+        "week_spend": week_spend(conn, aid, policy["budget_window_days"]),
         "seller_settled": tuple(r["amount"] for r in settled),
         "duplicate": duplicate is not None,
         "duplicate_of": duplicate["id"] if duplicate else None,
     }
 
 
+def week_spend(conn: Connection, aid: int, days: int) -> int:
+    """Return what this agent (by id) has spent or has in flight over the last days, in atomic units."""
+    row = conn.execute(
+        f"SELECT (COALESCE(SUM(amount), 0) {ATOMIC})::bigint AS total FROM payment_attempts"
+        " WHERE agent_id = %s AND created_at >= now() - make_interval(days => %s) AND status = ANY(%s)",
+        (aid, days, LIVE_STATUSES),
+    ).fetchone()
+    return int(row["total"]) if row else 0
+
+
 def find_live_id(conn: Connection, agent: str, quote: dict[str, Any]) -> int | None:
-    """Return the id of the live (pending or approved) attempt holding the in flight lock for this payment.
+    """Return the id of the live (approved, not yet settled) attempt holding the in flight lock for this payment.
 
     Lets a repeated request get the original request id back instead of a new row.
     """
     row = conn.execute(
-        "SELECT id FROM payment_attempts WHERE status IN ('pending', 'approved') AND dedupe_key = %s",
+        "SELECT id FROM payment_attempts WHERE status = 'approved' AND dedupe_key = %s",
         (f"{agent}|{quote['pay_to'].lower()}|{quote['url']}|{quote['amount']}",),
     ).fetchone()
     return row["id"] if row else None

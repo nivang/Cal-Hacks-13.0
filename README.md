@@ -9,11 +9,13 @@ Sentinel holds the wallet so the agent never does. Every payment request passes 
 | File | Job |
 |---|---|
 | `mcp_server.py` | The MCP server an agent talks to: tools `pay` and `payment_status`, agent identity, wallet |
+| `ledger_app.py` | The owner's ledger page: books, seller list, agent limits, payments CSV. Password protected |
+| `owner.py` | What only the owner can do (approve or block sellers, set limits) and the ledger queries |
 | `results.py` | The one result shape the tools return, and the plain English for each outcome |
 | `auth.py` | Agent bearer tokens: issue, rotate, verify (stored only as a hash) |
 | `urls.py` | Refuses unsafe URLs (file://, private or metadata addresses) before anything is fetched |
 | `payments.py` | The x402 flow: ask for a price, build a quote, run the guard, sign, pay, record |
-| `guard.py` | Pure policy: ALLOW, BLOCK or NEEDS_APPROVAL for one quote |
+| `guard.py` | Pure policy: ALLOW or BLOCK for one quote |
 | `policy.json` | Guard thresholds (price jump multiplier and window, duplicate window, budget window) |
 | `attempts.py` | Attempt log and the history lookups the guard reads |
 | `ledger.py` | Balanced, append only journal and trial balance |
@@ -39,18 +41,28 @@ You need a CDP account, an API key and a wallet secret from https://portal.cdp.c
     uvicorn sellers:app --port 4000      # terminal 1: test sellers
     python demo.py buy                   # terminal 2: clean $0.50 purchase, ALLOW, settles onchain
     python demo.py surge                 # DataCo quotes 4x the usual price: BLOCK
-    python demo.py scam                  # unlisted seller, as an injected page would push: NEEDS_APPROVAL
+    python demo.py scam                  # unlisted seller, as an injected page would push: BLOCK (seller)
 
-Each run prints the outcome and the trial balance. Blocked and paused attempts still write a row.
+Each run prints the outcome and the trial balance. Blocked attempts still write a row.
+
+## Ledger page
+
+The owner's view of the books, and the only place the seller list and agent limits change:
+
+    uvicorn ledger_app:create_app --factory --port 5000      # then open http://127.0.0.1:5000
+
+Set `SENTINEL_OWNER_PASSWORD` (12+ characters) in `.env` first; the app refuses to start without it. It shows each agent's spend against its weekly budget (with a form to change the cap and budget), the approved sellers (approve a new address, block or re-approve one), every payment attempt (agent, reason, seller, price, decision, rule, status, tx link), the journal and the trial balance. **Download payments CSV** exports one row per attempt for the accountant.
+
+It runs as its own process, separate from the MCP server, and the agent never holds the password, so the agent can ask to pay but cannot change who it may pay. Reasons and URLs come from the agent and are escaped on the page; CSV cells that a spreadsheet would run as a formula get a leading apostrophe.
 
 ## MCP server
 
 The agent never holds the wallet. It connects to Sentinel over MCP and has two tools:
 
-- `pay(url, reason)`: buy a paywalled URL. `reason` must be specific (20 to 500 characters); the owner reads it next to the seller's address when approving. Returns one of `SETTLED` (body, amount, tx hash), `BLOCKED` (the rule and a plain English reason), `PENDING` (request id, waiting for the owner), `FREE`, or `FAILED`.
+- `pay(url, reason)`: buy a paywalled URL. `reason` must be specific (20 to 500 characters); the owner reads it in the ledger next to the seller and the price. Returns one of `SETTLED` (body, amount, tx hash), `BLOCKED` (the rule and a plain English reason), `FREE`, or `FAILED`.
 - `payment_status(request_id)`: the current state of one of the agent's own requests, including the paid body once it has settled.
 
-There is no approve tool on purpose: the agent that asks can never be the one that approves.
+There is no tool to add sellers or change limits on purpose: only the owner does that, on the ledger page. A seller that is not on the list is blocked, not queued for approval.
 
 Each agent has its own bearer token. Create one (it is written to `.env` and never printed):
 
@@ -85,11 +97,11 @@ Notes: the payment path makes blocking database calls inside async code, which i
     ruff check .
     mypy *.py
 
-`test_guard.py` is the answer key for the guard: six planted cases (unknown seller, cap, budget, price jump, duplicate, clean) plus edge cases. `test_store.py` and `test_payments.py` cover the attempt log, the in flight lock and the books. `test_pay_flow.py` runs the whole payment flow against a fake seller and covers every way an approved payment can fail. `test_mcp_server.py` calls the tools through an in memory MCP client and checks each result the agent can see, agent identity and the HTTP 401s.
+`test_guard.py` is the answer key for the guard: six planted cases (unknown seller, cap, budget, price jump, duplicate, clean) plus edge cases. `test_store.py` and `test_payments.py` cover the attempt log, the in flight lock and the books. `test_pay_flow.py` runs the whole payment flow against a fake seller and covers every way an approved payment can fail. `test_mcp_server.py` calls the tools through an in memory MCP client and checks each result the agent can see, agent identity and the HTTP 401s. `test_owner.py` covers the seller list and limits the guard obeys, the ledger queries and the CSV. `test_ledger_app.py` covers the password gate, the forms, escaping and the CSV download.
 
 ## Guard
 
-`guard.evaluate(agent, quote, history)` returns `{decision, rule, detail}`. Rules run in order and the first to fire wins: seller (unlisted or pending needs approval, blocked is blocked), per payment cap, rolling weekly budget, price jump (more than 2x the median of the seller's last 5 settled), duplicate (same agent, payTo, url and amount within 10 min), then ALLOW.
+`guard.evaluate(agent, quote, history)` returns `{decision, rule, detail}`. Rules run in order and the first to fire wins: seller (anything the owner has not approved is blocked), per payment cap, rolling weekly budget, price jump (more than 2x the median of the seller's last 5 settled), duplicate (same agent, payTo, url and amount within 10 min), then ALLOW.
 
 - The first purchase from a seller has no history, so its price is trusted and becomes the baseline.
 - A unique index on live attempts means two simultaneous identical calls cannot both pass.
@@ -105,7 +117,7 @@ State lives in Supabase Postgres. The code works in integer USDC atomic units (6
 
 ### Append only
 
-The journal and approvals tables cannot be edited, deleted or truncated. Postgres triggers reject it for every role. Every journal entry must also balance (debits equal credits, above zero) or the commit is rejected by a deferred constraint trigger. A correction is a new reversing entry (`ledger.reverse_entry`) that swaps debits and credits and points at the original. History stays intact, which is what makes the books auditable.
+The journal, approvals and stored results tables cannot be edited, deleted or truncated. Postgres triggers reject it for every role. Every journal entry must also balance (debits equal credits, above zero) or the commit is rejected by a deferred constraint trigger. A correction is a new reversing entry (`ledger.reverse_entry`) that swaps debits and credits and points at the original. History stays intact, which is what makes the books auditable.
 
 ### Chart of accounts
 
@@ -132,6 +144,8 @@ To let someone view the data, set the claim on their auth user:
 
     update auth.users set raw_app_meta_data = raw_app_meta_data || '{"role": "dashboard_viewer"}' where email = '...';
 
-## Not built yet
+## Not built (by design)
 
-The human approval step (a paused payment stays PENDING; nothing resumes it yet), month end flags and the QuickBooks export.
+No per payment human approval. The owner approves sellers, not payments: an unlisted seller is blocked outright, and the owner adds it on the ledger page if it is legitimate. The `approvals` table and the `pending` / `denied` attempt statuses remain in the schema unused (migration 007 closed out the old pending rows).
+
+Not built yet: month end flags and the QuickBooks export.
