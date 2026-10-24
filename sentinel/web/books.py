@@ -8,6 +8,7 @@ A user adds, blocks and re-approves only their own rows, so no user can open a s
 operator block. Pure functions on a connection, tested like owner.py. Amounts are integer atomic units; the pages
 format them with the usdc filter. Never floats.
 """
+import hashlib
 import os
 from collections.abc import Mapping
 from typing import Any
@@ -23,6 +24,10 @@ SELLER_LIMIT = 200  # the most personal seller rows one user may keep
 JOURNAL_LIMIT = 100
 RANK = {"blocked": 0, "approved": 1}  # a lower rank wins; anything else (pending) ranks last
 DEMO_SELLERS = (("DataCo", "SELLER_A_ADDRESS"), ("InsightLab", "SELLER_B_ADDRESS"))  # never seller C, the scammer
+# The demo marketplace's PocketWiFi seller (demo/sellers.py) is paid at a wallet that has never been used, derived from
+# a fixed phrase so the marketplace and the Rules card agree. Approving it shows the "no activity" warning; paying it
+# is held (unused_wallet). Once one payment to it is allowed and settles, it has activity and stops being fresh.
+DEMO_FRESH_WALLET = "0x" + hashlib.sha256(b"sentinel demo: a wallet that has never been used").hexdigest()[:40]
 # The journal entries of one agent: the entries of its settled payments and the reversals of those entries.
 ENTRY_SCOPE = (
     "(e.attempt_id IN (SELECT id FROM payment_attempts WHERE agent_id = %(aid)s)"
@@ -228,18 +233,21 @@ def has_live_grant(conn: Connection, user_id: str) -> bool:
 def demo_sellers(
     conn: Connection, agent_id: int, dev_mode: bool, env: Mapping[str, str] | None = None,
 ) -> list[dict[str, str]]:
-    """The local demo sellers (DataCo, InsightLab) this agent has not approved yet, for the dev only Rules card.
+    """The local demo sellers (DataCo, InsightLab, PocketWiFi) this agent has not approved yet, for the dev only Rules
+    card.
 
-    Empty outside dev mode. The addresses come from the environment at request time (SELLER_A_ADDRESS and
-    SELLER_B_ADDRESS); the scammer's address is never listed. An entry is hidden once the agent approves it.
+    Empty outside dev mode. DataCo and InsightLab come from the environment at request time (SELLER_A_ADDRESS and
+    SELLER_B_ADDRESS); PocketWiFi is DEMO_FRESH_WALLET, a wallet with no history, so approving it shows the warning.
+    The scammer's address is never listed. An entry is hidden once the agent approves it.
     """
     if not dev_mode:
         return []
     source = os.environ if env is None else env
     approved = {s["pay_to"].lower() for s in list_sellers(conn, agent_id) if s["status"] == "approved"}
     found = []
-    for name, var in DEMO_SELLERS:
-        address = (source.get(var) or "").strip()
+    candidates = [(name, (source.get(var) or "").strip()) for name, var in DEMO_SELLERS]
+    candidates.append(("PocketWiFi (new wallet)", DEMO_FRESH_WALLET))
+    for name, address in candidates:
         if owner.ADDRESS.fullmatch(address) and address.lower() not in approved:
             found.append({"name": name, "pay_to": address})
     return found

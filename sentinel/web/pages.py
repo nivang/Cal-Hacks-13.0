@@ -55,7 +55,8 @@ RULE_LABELS = {
     "lookalike": "Lookalike address", "payee_changed": "Payee swapped",
     "injection": "Seller tried to instruct the agent", "unlisted_url": "URL not from the catalog",
     "bait_switch": "Bait and switch",
-    "listing_changed": "Sells something other than listed",
+    "listing_changed": "Sells something other than listed", "flagged_wallet": "Wallet flagged as a scam",
+    "unused_wallet": "Wallet has no history",
 }
 ADDRESS = re.compile(r"0x[0-9a-fA-F]{40}")
 

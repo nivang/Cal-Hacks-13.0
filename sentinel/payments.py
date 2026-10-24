@@ -11,7 +11,7 @@ allows it: review_intent runs intent.py's tiers (rules, then the judge's fast ch
 the payment or hold it for the owner (PaymentHeld). Without a task (the command line demo) only the guard runs.
 """
 import logging
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from typing import Any
 
 import httpx
@@ -21,7 +21,7 @@ from x402.http import x402HTTPClient
 from x402.mechanisms.evm import ClientEvmSigner
 from x402.mechanisms.evm.exact import ExactEvmScheme
 
-from sentinel import attempts, db, guard, intent, judge, ledger, mandates
+from sentinel import attempts, chain, db, guard, intent, judge, ledger, mandates
 
 log = logging.getLogger("sentinel.payments")
 
@@ -123,10 +123,18 @@ def build_quote(url: str, requirement: Any) -> guard.Quote:
     )
 
 
-def decide(conn: db.Connection, agent: str, quote: guard.Quote) -> guard.Decision:
-    """Run the guard on this quote with the ledger facts it needs."""
-    history = guard.History(**attempts.load_history(conn, agent, asdict(quote), guard.POLICY))
+def decide(
+    conn: db.Connection, agent: str, quote: guard.Quote, profile: chain.WalletProfile | None = None,
+) -> guard.Decision:
+    """Run the guard on this quote with the ledger facts it needs (and the payee's wallet profile, when known)."""
+    history = guard.History(**attempts.load_history(conn, agent, asdict(quote), guard.POLICY),
+                            payee_flagged=bool(profile and profile.flagged))
     return guard.evaluate(guard.Agent(**attempts.load_agent(conn, agent)), quote, history)
+
+
+async def payee_profile(conn: db.Connection, quote: guard.Quote) -> chain.WalletProfile | None:
+    """What Base Sepolia's explorer says about the payee (cached for an hour), or None when it cannot be read."""
+    return await chain.cached_profile(conn, quote.pay_to)
 
 
 def record(
@@ -185,15 +193,17 @@ async def authorize_task(
     seller: intent.Seller | None = None,
 ) -> int:
     """The guard first; when it allows and there is a task, the intent review; then record. Returns the attempt id."""
-    decision = decide(conn, agent, quote)
+    profile = await payee_profile(conn, quote) if task is not None else None
+    decision = decide(conn, agent, quote, profile)
     review = None
     if decision.decision == guard.ALLOW and task is not None:
-        review = await review_intent(conn, agent, quote, reason or "", task, seller or intent.Seller())
+        review = await review_intent(conn, agent, quote, reason or "", task, seller or intent.Seller(), profile)
     return record(conn, agent, reason, quote, decision, review)
 
 
 async def review_intent(
     conn: db.Connection, agent: str, quote: guard.Quote, reason: str, task: Task, seller: intent.Seller,
+    profile: chain.WalletProfile | None = None,
 ) -> Review:
     """Check one guard approved payment against its task: tier 0 rules, then the cached or fresh fast check, then
     the judge. A judge failure holds the payment (intent.unavailable), never pays."""
@@ -208,6 +218,8 @@ async def review_intent(
     mandate = mandates.to_mandate(row)
     payment = intent.Payment(quote, reason, task.found_at, seller)
     session = mandates.session_facts(conn, mandate.id, aid, quote, policy)
+    if profile is not None and profile.unused:
+        session = replace(session, payee_unused=True)
 
     verdict = intent.tier0(mandate, payment, session, guard.Agent(**agent_row), policy)
     if verdict is None:
@@ -300,12 +312,13 @@ async def preview(conn: db.Connection, agent: str, url: str, reason: str, task: 
                      {"mandate_id": task.mandate_id, "found_at": task.found_at, "seller_description": description})
         return Preview(url, guard.BLOCK, e.rule, e.detail, seller=seller)
     quote = build_quote(url, requirement)
-    decision = decide(conn, agent, quote)
+    profile = await payee_profile(conn, quote)
+    decision = decide(conn, agent, quote, profile)
     if decision.decision == guard.BLOCK:
         _log_preview(conn, agent, url, reason, quote, guard.BLOCK, f"{decision.rule}: {decision.detail}",
                      {"mandate_id": task.mandate_id, "found_at": task.found_at, "seller_description": description})
         return Preview(url, guard.BLOCK, decision.rule, decision.detail, quote.amount, quote.pay_to, seller)
-    review = await review_intent(conn, agent, quote, reason, task, seller)
+    review = await review_intent(conn, agent, quote, reason, task, seller, profile)
     verdict = review.verdict
     outcome = {intent.ALLOW: OK, intent.BLOCK: guard.BLOCK}.get(verdict.decision, HELD_FOR_OWNER)
     if outcome != OK:

@@ -935,7 +935,7 @@ async def test_find_services_shows_the_agent_only_what_it_may_buy_and_logs_the_r
     conn, make_server, alice, fake_judge, market,
 ):
     fake_judge.fit = {"/crypto": "off_task"}
-    task_id = (await start(make_server()))["task_id"]
+    task_id = (await start(make_server(), budget_usd="1"))["task_id"]  # the $0.60 guide is over half
     r = await call(make_server(), "find_services", task_id=task_id, query="Tokyo flights")
     assert r["status"] == "OK" and "do not look for them or mention them" in r["message"]
     assert [(s["name"], s["verdict"], s["price_usdc"]) for s in r["services"]] == [("Flights", "OK", "0.25")]
@@ -958,7 +958,7 @@ async def test_logged_searches_do_not_count_as_payments_for_the_rate_and_drift_r
                                                                                     fake_judge, market):
     extra = [f"/x{n}" for n in range(5)]
     fake_judge.fit = {path: "off_task" for path in extra}
-    task_id = (await start(make_server()))["task_id"]
+    task_id = (await start(make_server(), budget_usd="1"))["task_id"]  # the $0.60 guide is over half
     for path in extra:
         MARKET[path] = (DATACO, 100_000, path, "Something off task.")
     try:
@@ -974,7 +974,7 @@ async def test_logged_searches_do_not_count_as_payments_for_the_rate_and_drift_r
 
 @pytest.mark.anyio
 async def test_a_held_search_result_can_be_allowed_once_and_then_bought(conn, make_server, alice, market):
-    task_id = (await start(make_server()))["task_id"]
+    task_id = (await start(make_server(), budget_usd="1"))["task_id"]  # the $0.60 guide is over half
     await call(make_server(), "find_services", task_id=task_id, query="guide")
     held = conn.execute("SELECT id FROM payment_attempts WHERE status = 'escalated'").fetchone()["id"]
     mandates.allow_once(conn, held, db.agent_id(conn, alice.agent), alice.user_id)
@@ -1196,3 +1196,30 @@ async def test_apify_actor_says_when_the_store_cannot_be_reached(make_server, al
     r = await call(make_server(discover_fetch=Directory(actor=httpx.ConnectError("down"))), "apify_actor",
                    actor="compass/crawler-google-places")
     assert r["status"] == "FAILED" and "down" not in r["message"]
+
+
+# The payee's wallet history at payment time
+
+
+@pytest.mark.anyio
+async def test_a_payee_flagged_by_the_explorer_is_blocked_at_payment(conn, make_server, alice, fake_chain):
+    fake_chain.flagged.add(DATACO.lower())
+    r = await call(make_server(), "pay", url=URL, reason=REASON)
+    assert r["status"] == "BLOCKED" and r["rule"] == "flagged_wallet"
+
+
+@pytest.mark.anyio
+async def test_a_payee_with_no_activity_is_held_for_the_owner(conn, make_server, alice, fake_chain):
+    fake_chain.unused.add(DATACO.lower())
+    r = await call(make_server(), "pay", url=URL, reason=REASON)
+    assert r["status"] == "ESCALATED" and r["rule"] == "unused_wallet"
+
+
+@pytest.mark.anyio
+async def test_the_wallet_profile_is_cached_so_the_explorer_is_asked_once_an_hour(conn, make_server, alice,
+                                                                                 fake_chain):
+    await call(make_server(), "pay", url="http://seller.test/one", reason=REASON)
+    await call(make_server(), "pay", url="http://seller.test/two", reason=REASON)
+    assert fake_chain.asked == [DATACO]
+    cached = conn.execute("SELECT profile FROM wallet_profiles WHERE address = %s", (DATACO.lower(),)).fetchone()
+    assert cached["profile"]["token_transfers"] == 120

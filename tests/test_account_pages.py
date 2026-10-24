@@ -801,8 +801,9 @@ async def test_a_chain_that_cannot_be_read_still_asks_for_the_second_click(brows
 async def test_a_wallet_with_history_is_approved_at_once_and_blocking_never_checks(browser, mailer, conn, fake_chain):
     client = await signed_in(browser, mailer)
     assert (await add_seller(client, "NewCo", SELLER)).status_code == 303
+    token = await csrf(client, "/account/rules")  # the Rules page itself shows each seller's wallet history
     fake_chain.asked.clear()
-    assert (await add_seller(client, "NewCo", SELLER, status="blocked")).status_code == 303
+    assert (await add_seller(client, "NewCo", SELLER, status="blocked", token=token)).status_code == 303
     assert fake_chain.asked == []
 
 
@@ -822,3 +823,36 @@ async def test_payments_are_grouped_by_task_with_counts_and_loose_ones_last(brow
     assert headings == [f"Task {second}: Write the Q3 email report.", f"Task {first}: Write the Q3 email report.",
                         "Not under a task"]
     assert page.count("0 paid · 0 blocked · 1 held") == 2 and "Needs your confirmation" in page
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("kind, text", [
+    ("flagged", "flags this wallet as a scam"), ("new", "It is new: 120 token transfers"),
+])
+async def test_approving_a_flagged_or_new_wallet_warns(browser, mailer, conn, fake_chain, kind, text):
+    client = await signed_in(browser, mailer)
+    getattr(fake_chain, kind).add(SELLER.lower())
+    response = await add_seller(client, "NewCo", SELLER)
+    assert response.status_code == 200 and text in response.text
+
+
+@pytest.mark.anyio
+async def test_the_rules_page_shows_each_sellers_wallet_history(browser, mailer, conn, fake_chain):
+    client = await signed_in(browser, mailer)
+    fake_chain.new.add(SELLER.lower())
+    await client.post("/account/rules/sellers", data={
+        "csrf": await csrf(client, "/account/rules"), "name": "NewCo", "pay_to": SELLER, "status": "approved",
+        "confirm": "1",
+    })
+    page = (await client.get("/account/rules")).text
+    assert "Wallet history" in page and "120 token transfers, 5 transactions sent, first seen 2 hours ago" in page
+
+
+@pytest.mark.anyio
+async def test_the_demo_card_offers_a_fresh_wallet_and_approving_it_warns(browser, mailer, conn, fake_chain):
+    fake_chain.unused.add(books.DEMO_FRESH_WALLET)
+    client = await signed_in(browser, mailer)
+    page = (await client.get("/account/rules")).text
+    assert "PocketWiFi (new wallet)" in page and books.DEMO_FRESH_WALLET in page
+    response = await add_seller(client, "PocketWiFi (new wallet)", books.DEMO_FRESH_WALLET)
+    assert response.status_code == 200 and "no activity at all on Base Sepolia" in response.text

@@ -576,6 +576,14 @@ def create_app(
             return books.list_sellers(conn, aid), books.demo_sellers(conn, aid, settings.dev_mode)
 
         sellers, demo = await run_db(data) if aid is not None else ([], [])
+
+        async def wallet(seller: dict[str, Any]) -> None:
+            with connect() as conn:  # cached for an hour, so the page is quick after the first look
+                profile = await chain.cached_profile(conn, seller["pay_to"])
+            seller["wallet"] = profile.summary() if profile else "could not check"
+            seller["wallet_warn"] = bool(profile and (profile.flagged or profile.unused or profile.is_new()))
+
+        await asyncio.gather(*(wallet(s) for s in sellers))
         typed = typed or {}
         done = request.query_params.get("done")
         context = {
@@ -746,11 +754,17 @@ def create_app(
             warnings.append(f"It looks like {imitated} (same start and end, different middle). Scammers make "
                             "lookalike addresses so a payment goes to the wrong wallet.")
         try:
-            if (await chain.wallet_history(address)).unused:
-                warnings.append("It has never sent a transaction and holds no ETH or USDC on Base Sepolia, so it may "
-                                "have just been created. Real sellers usually have a history.")
+            profile = await chain.wallet_profile(address)
         except chain.ChainError:
             warnings.append("Sentinel could not check this wallet's history on Base Sepolia right now.")
+            return warnings
+        if profile.flagged:
+            warnings.append("The Base Sepolia explorer flags this wallet as a scam.")
+        elif profile.unused:
+            warnings.append("It has no activity at all on Base Sepolia, so it may have just been created. Real "
+                            "sellers usually have a history.")
+        elif profile.is_new():
+            warnings.append(f"It is new: {profile.summary()}. Scam sellers often use fresh wallets.")
         return warnings
 
     async def task_action(request: Request, action: Callable[[db.Connection, Mapping[str, Any], Mapping[str, Any],
