@@ -791,6 +791,62 @@ async def test_resend_does_not_retry_client_errors(settings, sleeps, status):
     assert "secret detail" not in str(info.value) and "re_secret_key" not in str(info.value)
 
 
+REFUSAL_CASES = [
+    (403, "validation_error", "You can only send testing emails to your own email address.",
+     "the resend.dev test sender only delivers to the email that owns the Resend account"),
+    (403, "validation_error", "The sentinel.example domain is not verified. Please verify it.",
+     "the MAIL_FROM domain is not verified in Resend"),
+    (403, "restricted_api_key", "API key is not active", "the Resend API key is not active"),
+    (403, "suspended_api_key", "This API key is suspended", "the Resend API key is suspended"),
+    (401, "validation_error", "API key is invalid", "the Resend API key is invalid"),
+    (401, "restricted_api_key", "This API key is restricted to only send emails.", "the Resend API key is restricted"),
+]
+
+
+def resend_answering(handler) -> mailing.ResendMailer:
+    """A ResendMailer whose transport answers every request with handler."""
+    return mailing.ResendMailer("re_secret_key", "Sentinel <x@y.example>", transport=httpx.MockTransport(handler))
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("status, name, message, reason", REFUSAL_CASES)
+async def test_a_known_resend_refusal_is_named_in_our_own_words(settings, sleeps, status, name, message, reason):
+    def refuse(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(status, json={"name": name, "message": message})
+
+    mailer_under_test = resend_answering(refuse)
+    with pytest.raises(mailing.MailError) as info:
+        await mailer_under_test.send(sample_message(settings))
+    assert str(info.value) == f"Resend answered {status}: {reason}"
+
+
+@pytest.mark.anyio
+async def test_an_unknown_refusal_names_only_the_short_error_code_and_never_resends_text(settings, sleeps):
+    def refuse(request: httpx.Request) -> httpx.Response:
+        body = {"name": "validation_error", "message": "Invalid `to` field: leaked@person.example"}
+        return httpx.Response(422, json=body)
+
+    mailer_under_test = resend_answering(refuse)
+    with pytest.raises(mailing.MailError) as info:
+        await mailer_under_test.send(sample_message(settings))
+    assert str(info.value) == "Resend answered 422: validation_error"
+    assert "leaked@person.example" not in str(info.value)
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    "payload", [{"name": "Not A Code!!", "message": "x"}, {"name": 7}, ["not", "a", "dict"], "plain text"]
+)
+async def test_an_odd_refusal_body_adds_nothing_to_the_error(settings, sleeps, payload):
+    def refuse(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(403, json=payload)
+
+    mailer_under_test = resend_answering(refuse)
+    with pytest.raises(mailing.MailError) as info:
+        await mailer_under_test.send(sample_message(settings))
+    assert str(info.value) == "Resend answered 403"
+
+
 def test_settings_repr_hides_the_secrets(https_settings):
     text = repr(https_settings) + str(https_settings)
     assert https_settings.session_secret.decode() not in text

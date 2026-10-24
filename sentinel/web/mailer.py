@@ -3,12 +3,14 @@
 app.py builds the message with sign_in_message and sends it through the Mailer that make_mailer picked (tests pass a
 recording one). ResendMailer posts to Resend's API with an Idempotency-Key of "magic-link/<magic_links.id>", so a
 retried request never sends two emails, and retries network errors, 429 and 5xx a couple of times. Its errors name
-only the HTTP status (or "network error"): never the response body, the address or the API key. ConsoleMailer is for
+only the HTTP status (or "network error") and, for the refusals an operator can fix, one fixed sentence of our own
+wording: never the response body, the address or the API key. ConsoleMailer is for
 dev mode only (load_settings allows missing mail settings only on localhost) and is the one place a link is printed.
 """
 import asyncio
 import html
 import importlib.metadata
+import re
 import sys
 from dataclasses import dataclass
 from typing import Protocol, TextIO
@@ -54,6 +56,34 @@ class MailError(Exception):
     """Sending failed. The message names the HTTP status (or "network error") only."""
 
 
+# What Resend's message says (matched, never logged: it can echo an address) -> our own sentence for the operator.
+REFUSALS = (
+    ("testing emails to your own email address",
+     "the resend.dev test sender only delivers to the email that owns the Resend account"),
+    ("domain is not verified", "the MAIL_FROM domain is not verified in Resend"),
+    ("API key is not active", "the Resend API key is not active"),
+    ("API key is suspended", "the Resend API key is suspended"),
+    ("API key is invalid", "the Resend API key is invalid"),
+    ("restricted to only send", "the Resend API key is restricted"),
+)
+
+
+def refusal_reason(response: httpx.Response) -> str | None:
+    """A fixed sentence for a refusal the operator can fix, else Resend's short error code, else None.
+
+    Never returns text from the response: a message can contain the recipient's address.
+    """
+    try:
+        data = response.json()
+        message, name = str(data.get("message", "")), data.get("name")
+    except (ValueError, AttributeError):
+        return None
+    for needle, reason in REFUSALS:
+        if needle in message:
+            return reason
+    return name if isinstance(name, str) and re.fullmatch(r"[a-z_]{1,40}", name) else None
+
+
 class ResendMailer:
     """Sends mail through Resend's HTTP API, retrying network errors, 429 and 5xx with backoff."""
 
@@ -95,7 +125,7 @@ class ResendMailer:
             "text": message.text,
             "html": message.html,
         }
-        failure = "network error"
+        failure, reason = "network error", None
         async with httpx.AsyncClient(transport=self._transport, timeout=self._timeout_s) as client:
             for attempt in range(self._retries + 1):
                 if attempt:
@@ -107,12 +137,12 @@ class ResendMailer:
                     continue
                 if response.is_success:
                     return
-                failure = str(response.status_code)
+                failure, reason = str(response.status_code), refusal_reason(response)
                 if response.status_code != 429 and response.status_code < 500:
                     break  # a request Resend refuses will not pass on a retry
         if failure == "network error":
             raise MailError("Resend could not be reached (network error)")
-        raise MailError(f"Resend answered {failure}")
+        raise MailError(f"Resend answered {failure}" + (f": {reason}" if reason else ""))
 
 
 class ConsoleMailer:
