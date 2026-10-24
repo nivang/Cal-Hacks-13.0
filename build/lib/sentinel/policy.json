@@ -1,6 +1,0 @@
-{
-  "price_jump_multiplier": 2,
-  "price_jump_window": 5,
-  "duplicate_window_s": 600,
-  "budget_window_days": 7
-}
