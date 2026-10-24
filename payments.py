@@ -5,7 +5,6 @@ signs with the Sentinel wallet and pays. Every outcome is written to the attempt
 payment is posted to the ledger. Payment details (payTo, amount) come from the seller's quote and are
 authorized by the approved seller list, never by text the agent read online.
 """
-import sqlite3
 from dataclasses import asdict, dataclass
 from typing import Any
 
@@ -64,7 +63,7 @@ def build_quote(url: str, requirement: Any) -> guard.Quote:
     )
 
 
-def authorize(conn: sqlite3.Connection, agent: str, reason: str | None, quote: guard.Quote) -> int:
+def authorize(conn: db.Connection, agent: str, reason: str | None, quote: guard.Quote) -> int:
     """Run the guard and record the attempt. Returns the approved attempt id, or raises.
 
     BLOCK raises PaymentRejected and NEEDS_APPROVAL raises NeedsApproval. Both leave a row in the log
@@ -80,13 +79,17 @@ def authorize(conn: sqlite3.Connection, agent: str, reason: str | None, quote: g
         raise PaymentRejected(rule)
     if decision.decision == guard.NEEDS_APPROVAL:
         try:
-            attempts.record_attempt(conn, agent, quote.url, reason, quote_dict, "pending", decision.decision, rule)
-        except sqlite3.IntegrityError:
+            with db.transaction(conn):
+                attempts.record_attempt(conn, agent, quote.url, reason, quote_dict, "pending", decision.decision, rule)
+        except db.UniqueViolation:
             pass  # the same request is already waiting for a human, so do not log a second pending row
         raise NeedsApproval(rule)
     try:
-        return attempts.record_attempt(conn, agent, quote.url, reason, quote_dict, "approved", decision.decision, rule)
-    except sqlite3.IntegrityError:
+        with db.transaction(conn):  # own savepoint, so a lock clash does not poison an outer transaction
+            return attempts.record_attempt(
+                conn, agent, quote.url, reason, quote_dict, "approved", decision.decision, rule
+            )
+    except db.UniqueViolation:
         # Another call already holds the in flight lock for this exact payment.
         rule = "duplicate: identical payment already in flight"
         attempts.record_attempt(conn, agent, quote.url, reason, quote_dict, "blocked", guard.BLOCK, rule)
@@ -99,8 +102,12 @@ async def pay_for(url: str, account: Any, agent: str = "research-agent", reason:
     account is the CDP account that signs. Returns the response and, if paid, the tx hash. Raises
     PaymentRejected or NeedsApproval when the guard stops the payment.
     """
-    conn = db.connect()
-    db.init(conn)
+    with db.connection() as conn:
+        return await _pay_with(conn, url, account, agent, reason)
+
+
+async def _pay_with(conn: db.Connection, url: str, account: Any, agent: str, reason: str | None) -> PayResult:
+    """The payment flow itself, on a borrowed connection. Split out so pay_for can manage the pool."""
     client = x402Client()
     client.register(NETWORK, ExactEvmScheme(EthAccountSigner(EvmLocalAccount(account))))
     http = x402HTTPClient(client)

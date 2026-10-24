@@ -8,7 +8,6 @@ Also seeds the approved sellers and the opening balance on first run. Real testn
 """
 import asyncio
 import os
-import sqlite3
 import sys
 
 import httpx
@@ -36,7 +35,7 @@ async def usdc_balance(address: str) -> int:
     return int(r.json()["result"], 16)
 
 
-async def bootstrap_books(conn: sqlite3.Connection, wallet_address: str) -> None:
+async def bootstrap_books(conn: db.Connection, wallet_address: str) -> None:
     """Seed the approved sellers from env and book the wallet's current USDC as owner funding, once."""
     approved = {"DataCo": "SELLER_A_ADDRESS", "InsightLab": "SELLER_B_ADDRESS"}
     db.seed_sellers(conn, [
@@ -59,9 +58,9 @@ async def run(scenario: str) -> None:
     paths = {"buy": "/benchmarks/email", "surge": "/benchmarks/email", "scam": "/premium"}
     async with CdpClient() as cdp:
         account = await cdp.evm.get_or_create_account(name="sentinel")
-        conn = db.connect()
-        db.init(conn)
-        await bootstrap_books(conn, account.address)
+        with db.connection() as conn:
+            db.init(conn)
+            await bootstrap_books(conn, account.address)
         if scenario == "surge":
             await set_price("/benchmarks/email", "$2.00")
         try:
@@ -76,12 +75,16 @@ async def run(scenario: str) -> None:
             if scenario == "surge":
                 await set_price("/benchmarks/email", "$0.50")
 
-    for row in ledger.trial_balance(conn):
-        print(f"{row['code']} {row['name']:<30} Dr {row['debit']:>9} Cr {row['credit']:>9}")
+    with db.connection() as conn:
+        for row in ledger.trial_balance(conn):
+            print(f"{row['code']} {row['name']:<30} Dr {row['debit']:>9} Cr {row['credit']:>9}")
 
 
 if __name__ == "__main__":
     load_dotenv()
     if len(sys.argv) != 2 or sys.argv[1] not in ("buy", "surge", "scam"):
         sys.exit(__doc__)
-    asyncio.run(run(sys.argv[1]))
+    try:
+        asyncio.run(run(sys.argv[1]))
+    finally:
+        db.close_pool()

@@ -9,13 +9,13 @@ Sentinel is an MCP server that holds the wallet so the agent never does. Every p
 - Network: Base Sepolia (eip155:84532), USDC, CDP facilitator
 - Buyer: CDP server wallet account named "sentinel" (0xE9497e03fC13E38A8dBA969470A832f30749Da4A)
 - Sellers: CDP accounts seller-a (DataCo), seller-b (InsightLab), seller-c (scammer)
-- Secrets live in .env (gitignored): CDP_API_KEY_ID, CDP_API_KEY_SECRET, CDP_WALLET_SECRET, SELLER_A_ADDRESS, SELLER_B_ADDRESS, SELLER_C_ADDRESS. Never print or commit them.
+- Secrets live in .env (gitignored): DATABASE_URL, CDP_API_KEY_ID, CDP_API_KEY_SECRET, CDP_WALLET_SECRET, SELLER_A_ADDRESS, SELLER_B_ADDRESS, SELLER_C_ADDRESS. Never print or commit them.
 
 ## Status
 - Phase 0 done: keys, wallets, buyer funded (about 9.5 USDC left, CDP faucet is rate limited, use faucet.circle.com)
 - Phase 1 done: sellers.py serves /benchmarks/email ($0.50, seller-a), /reports/social ($1.00, seller-b), /premium ($9.00, seller-c) and /article (trap page) on port 4000. POST /admin/price {"path","price"} flips price live without restart (verified).
 - Phase 2 done: payments.py runs the manual x402 flow and settled on Base Sepolia.
-- Phase 3 done: db.py, attempts.py, ledger.py (SQLite sentinel.db) record every attempt and post balanced, append only journal entries. See README.
+- Phase 3 done: db.py, attempts.py, ledger.py (Supabase Postgres, project sentinel, schema in migrations/) record every attempt and post balanced, append only journal entries. See README.
 - Phase 4 done: guard.py evaluate(agent, quote, history) is pure; thresholds in policy.json; pytest is the answer key.
 - Refactor done (no behavior change): split db into db/attempts/ledger, demo.py runs buy/surge/scam, pinned requirements, ruff + mypy clean.
 - Not built yet: MCP server tools, human approval flow, month end flags, QuickBooks export.
