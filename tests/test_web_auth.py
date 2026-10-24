@@ -23,7 +23,18 @@ from conftest import BROWSER_IP, TEST_BASE_URL, access_token_for, form_value, si
 from fastmcp.utilities.asgi_transport import run_asgi_lifespan
 
 from sentinel import db
-from sentinel.web import ConfigError, Settings, auth, dev_mode, is_loopback, load_settings, missing_env, users
+from sentinel.web import (
+    LINK_LIMIT_FACTOR_VAR,
+    ConfigError,
+    Settings,
+    auth,
+    dev_mode,
+    is_loopback,
+    link_limit_factor,
+    load_settings,
+    missing_env,
+    users,
+)
 from sentinel.web import app as web_app
 from sentinel.web import mailer as mailing
 from sentinel.web import ratelimit as rl
@@ -1622,3 +1633,39 @@ async def test_the_alias_redirect_is_off_outside_localhost(https_settings, conne
         client = make()
         client.base_url = httpx.URL("https://127.0.0.1:8000")  # another name for the same machine, no redirect
         assert (await client.get("/signin")).status_code == 200
+
+
+# The testing switch: SENTINEL_LINK_LIMIT_FACTOR multiplies the sign in link limits
+
+
+def test_the_testing_factor_is_a_whole_number_from_2_to_1000_and_anything_else_means_the_real_limits():
+    read = lambda value: link_limit_factor({LINK_LIMIT_FACTOR_VAR: value})  # noqa: E731
+    assert [read(v) for v in ("2", " 50 ", "1000")] == [2, 50, 1000]
+    assert [read(v) for v in ("", "1", "0", "-3", "abc", "3.5", "1001", "٣")] == [1] * 8
+    assert link_limit_factor({}) == 1
+
+
+def test_the_testing_factor_multiplies_the_link_limits(conn, settings, monkeypatch):
+    monkeypatch.setenv(LINK_LIMIT_FACTOR_VAR, "5")
+    for _ in range(15):  # 3 per 15 minutes, times 5
+        request_link(conn, settings, "tester@example.com")
+    with pytest.raises(rl.RateLimited):
+        request_link(conn, settings, "tester@example.com")
+    monkeypatch.delenv(LINK_LIMIT_FACTOR_VAR)  # switched off again: the real limit applies to the rows already there
+    with pytest.raises(rl.RateLimited):
+        request_link(conn, settings, "tester@example.com")
+
+
+def test_a_mistyped_testing_factor_leaves_the_real_limits_in_force(conn, settings, monkeypatch):
+    monkeypatch.setenv(LINK_LIMIT_FACTOR_VAR, "lots")
+    for _ in range(3):
+        request_link(conn, settings, "tester@example.com")
+    with pytest.raises(rl.RateLimited):
+        request_link(conn, settings, "tester@example.com")
+
+
+def test_the_testing_factor_warns_at_startup_so_it_is_not_left_on():
+    loaded = load_settings(dev_env(SENTINEL_LINK_LIMIT_FACTOR="20"), "127.0.0.1")
+    assert len(loaded.warnings) == 1 and "SENTINEL_LINK_LIMIT_FACTOR=20" in loaded.warnings[0]
+    assert "testing" in loaded.warnings[0]
+    assert load_settings(dev_env(), "127.0.0.1").warnings == ()
