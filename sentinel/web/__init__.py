@@ -22,6 +22,15 @@ TOKEN_PURPOSES = frozenset(
     {"magic-link", "auth-code", "access-token", "refresh-token", "refresh-rotation", "client-secret", "ip"}
 )
 LOOPBACK_HOSTS = frozenset({"localhost", "127.0.0.1", "::1", "[::1]"})  # matches mcp's validate_issuer_url
+LINK_LIMIT_FACTOR_VAR = "SENTINEL_LINK_LIMIT_FACTOR"
+MAX_LINK_LIMIT_FACTOR = 1000
+
+
+def link_limit_factor(env: Mapping[str, str]) -> int:
+    """The testing multiplier for every sign in link limit: 1 (the real limits) unless the variable is a whole number
+    from 2 to 1000. Anything else, including a typo, leaves the real limits in force."""
+    raw = (env.get(LINK_LIMIT_FACTOR_VAR) or "").strip()
+    return int(raw) if raw.isascii() and raw.isdigit() and 1 < int(raw) <= MAX_LINK_LIMIT_FACTOR else 1
 
 MIN_SECRET_LENGTH = 32
 REQUIRED_ENV = ("DATABASE_URL", "PUBLIC_BASE_URL", "SESSION_SECRET", "TOKEN_HASH_SECRET")
@@ -204,6 +213,13 @@ def load_settings(env: Mapping[str, str], bind_host: str) -> Settings:
             "FORWARDED_ALLOW_IPS is not set: behind a proxy every request seems to come from the proxy, so the per "
             "IP rate limits become site wide and the Anthropic registration exemption never matches. Set it to your "
             "proxy's address."
+        )
+
+    factor = link_limit_factor(env)
+    if factor > 1:
+        warnings.append(
+            f"{LINK_LIMIT_FACTOR_VAR}={factor} multiplies every sign in link limit by {factor}. That is for testing "
+            "only: remove it before real users sign up."
         )
 
     if problems or base_url is None:

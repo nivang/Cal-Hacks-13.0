@@ -15,11 +15,12 @@ else cannot use up the budget claude.ai users need (and the reverse).
 """
 import ipaddress
 import math
+import os
 
 import psycopg
 
 from sentinel.db import Connection
-from sentinel.web import Settings
+from sentinel.web import Settings, link_limit_factor
 from sentinel.web.auth import digest
 
 ANTHROPIC_EGRESS = ipaddress.ip_network("160.79.104.0/21")  # every claude.ai user registers from here
@@ -129,18 +130,21 @@ def _wait(conn: Connection, table: str, condition: str, values: tuple[str, ...],
 def check_link_limits(conn: Connection, *, limit_key: str, ip_hash: str) -> None:
     """Refuse a new sign in link when its address, its IP or the whole site has sent too many.
 
-    3 per 15 minutes and 10 per day per limit_key, 60 per hour per ip_hash, 300 per hour overall. Call inside the
+    3 per 15 minutes and 10 per day per limit_key, 60 per hour per ip_hash, 300 per hour overall (all multiplied by
+    SENTINEL_LINK_LIMIT_FACTOR when a tester sets it, 1 otherwise). Call inside the
     same db.transaction as auth.issue_link. Raises RateLimited with the longest wait among the limits reached.
     """
     _require_transaction(conn)
     _lock(conn, "link-ip", ip_hash)
     _lock(conn, "link-address", limit_key)
     _lock(conn, "link-all", "")  # last, so the overall count is exact too
+    factor = link_limit_factor(os.environ)  # 1 unless a tester raised it (see web.LINK_LIMIT_FACTOR_VAR)
     waits = [
-        _wait(conn, "magic_links", "limit_key = %s", (limit_key,), interval, n) for interval, n in LINKS_PER_ADDRESS
+        _wait(conn, "magic_links", "limit_key = %s", (limit_key,), interval, n * factor)
+        for interval, n in LINKS_PER_ADDRESS
     ]
-    waits.append(_wait(conn, "magic_links", "ip_hash = %s", (ip_hash,), *LINKS_PER_IP))
-    waits.append(_wait(conn, "magic_links", "", (), *LINKS_OVERALL))
+    waits.append(_wait(conn, "magic_links", "ip_hash = %s", (ip_hash,), LINKS_PER_IP[0], LINKS_PER_IP[1] * factor))
+    waits.append(_wait(conn, "magic_links", "", (), LINKS_OVERALL[0], LINKS_OVERALL[1] * factor))
     if max(waits) > 0:
         raise RateLimited(max(waits))
 
