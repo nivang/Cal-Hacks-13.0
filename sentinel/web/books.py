@@ -12,7 +12,7 @@ import os
 from collections.abc import Mapping
 from typing import Any
 
-from sentinel import attempts, guard, owner
+from sentinel import attempts, guard, mandates, owner
 from sentinel.db import Connection
 from sentinel.payments import NETWORK, USDC_BASE_SEPOLIA
 
@@ -121,6 +121,40 @@ def upsert_seller(conn: Connection, agent_id: int, name: str, pay_to: str, statu
 def list_payments(conn: Connection, agent_id: int, limit: int = PAYMENT_LIMIT) -> list[dict[str, Any]]:
     """This agent's newest payments (atomic units), seller name from the lists that apply, rule split from detail."""
     return owner.list_attempts(conn, limit, agent_id)
+
+
+def payments_by_task(conn: Connection, agent_id: int, limit: int = PAYMENT_LIMIT) -> list[dict[str, Any]]:
+    """This agent's newest payments grouped by the task they ran under, the task with the newest payment first.
+
+    Each group: task (the mandates.list_for_agent row, or None for payments made outside a task), state (provisional,
+    confirmed, revoked or ended), the rows (newest first) and counts of paid, blocked, held and found while searching.
+    """
+    rows = list_payments(conn, agent_id, limit)
+    tasks = {t["id"]: t for t in mandates.list_for_agent(conn, agent_id, limit)}
+    groups: dict[int | None, dict[str, Any]] = {}
+    for row in rows:  # newest first, so groups come out in the order of their newest payment
+        task_id = row.get("task_id")
+        group = groups.get(task_id)
+        if group is None:
+            task = tasks.get(task_id) if task_id is not None else None
+            if task_id is not None and task is None:  # an older task than the list reaches
+                task = mandates.get(conn, task_id, agent_id)
+                if task is not None:
+                    task = {**task, "spent": mandates.spend(conn, task_id)}
+            state = None
+            if task is not None:
+                state = "ended" if task["expired"] and task["status"] != "revoked" else task["status"]
+            group = groups[task_id] = {"task_id": task_id, "task": task, "state": state, "rows": [],
+                                       "paid": 0, "blocked": 0, "held": 0, "searched": 0}
+        group["rows"].append(row)
+        group["paid"] += row["status"] == "settled"
+        group["blocked"] += row["status"] == "blocked"
+        group["held"] += row["status"] == "escalated"
+        group["searched"] += bool(row.get("found_while_searching"))
+    ordered = [g for key, g in groups.items() if key is not None]
+    if None in groups:
+        ordered.append(groups[None])  # payments outside any task last
+    return ordered
 
 
 def recent_payments(conn: Connection, agent_id: int, count: int = 5) -> list[dict[str, Any]]:

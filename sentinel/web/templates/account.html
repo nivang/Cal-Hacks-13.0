@@ -5,6 +5,13 @@
 {{ banners(false, "", error) }}
 <h1 class="text-2xl font-semibold tracking-tight">Your account</h1>
 <p class="mt-1 break-all text-stone-600">{{ email }}</p>
+{% if waiting and (waiting.tasks or waiting.held) %}
+<p class="mt-4 rounded-md border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900" role="status">
+  {% if waiting.held %}{{ waiting.held }} payment{{ "s" if waiting.held != 1 }} held for you.{% endif %}
+  {% if waiting.tasks %}{{ waiting.tasks }} task{{ "s" if waiting.tasks != 1 }} waiting for you to confirm.{% endif %}
+  <a href="/account/tasks" class="font-medium underline">Open Tasks</a>
+</p>
+{% endif %}
 
 <div class="mt-6 grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
   <section class="min-w-0 {{ card }}" aria-labelledby="spent-h">

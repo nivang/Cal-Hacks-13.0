@@ -47,6 +47,15 @@ RULE_LABELS = {
     "seller": "Seller not approved", "cap": "Over your per payment cap", "budget": "Over your weekly budget",
     "price_jump": "Price jumped", "duplicate": "Duplicate payment", "url": "Unsafe URL",
     "payment_option": "No supported payment option",
+    "no_task": "No task", "no_mandate": "Task ended", "mandate_budget": "Over the task's budget",
+    "rate": "Too many payments", "loop": "Bought again and again", "split": "Possibly split purchase",
+    "per_call": "Pricier than the task expects", "drift": "Drifting from the task", "off_task": "Not part of the task",
+    "judge": "Judged against the task", "judge_unavailable": "Could not check the task",
+    "big_share": "Large share of the task's budget", "long_window": "Payment window too long",
+    "lookalike": "Lookalike address", "payee_changed": "Payee swapped",
+    "injection": "Seller tried to instruct the agent", "unlisted_url": "URL not from the catalog",
+    "bait_switch": "Bait and switch",
+    "listing_changed": "Sells something other than listed",
 }
 ADDRESS = re.compile(r"0x[0-9a-fA-F]{40}")
 
@@ -54,9 +63,9 @@ ADDRESS = re.compile(r"0x[0-9a-fA-F]{40}")
 def why(payment: Mapping[str, Any]) -> tuple[str, str]:
     """The Payments page's Why cell as (label, detail): plain English, empty for a settled payment.
 
-    A blocked or denied payment gets a friendly label for the guard's rule and the guard's own sentence as detail.
-    A failed one says it did not complete (or, with a tx hash, that it was paid but not recorded); an approved or
-    pending one is in progress.
+    A blocked or denied payment gets a friendly label for the guard's (or intent binding's) rule and its own sentence
+    as detail. A held (escalated) one says it waits for the owner. A failed one says it did not complete (or, with a
+    tx hash, that it was paid but not recorded); an approved or pending one is in progress.
     """
     status = payment.get("status")
     if status in ("blocked", "denied"):
@@ -69,6 +78,9 @@ def why(payment: Mapping[str, Any]) -> tuple[str, str]:
         return "Payment did not complete", ""
     if status in ("approved", "pending"):
         return "In progress", ""
+    if status == "escalated":
+        rule = (payment.get("rule") or "").strip()
+        return f"Held for you: {RULE_LABELS.get(rule, 'needs your decision').lower()}", (payment.get("detail") or "")
     return "", ""
 
 

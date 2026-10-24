@@ -51,6 +51,7 @@ def dev_env(**extra: str) -> dict[str, str]:
         "PUBLIC_BASE_URL": TEST_BASE_URL,
         "SESSION_SECRET": SESSION_SECRET,
         "TOKEN_HASH_SECRET": TOKEN_SECRET,
+        "ANTHROPIC_API_KEY": "sk-ant-test",
     }
     env.update(extra)
     return env
@@ -211,10 +212,13 @@ def test_every_problem_is_reported_at_once():
 
 def test_missing_env_names_every_missing_variable():
     assert missing_env({}, "0.0.0.0") == [
-        "DATABASE_URL", "PUBLIC_BASE_URL", "SESSION_SECRET", "TOKEN_HASH_SECRET", "RESEND_API_KEY", "MAIL_FROM",
+        "DATABASE_URL", "PUBLIC_BASE_URL", "SESSION_SECRET", "TOKEN_HASH_SECRET", "ANTHROPIC_API_KEY",
+        "RESEND_API_KEY", "MAIL_FROM",
     ]
     # With PUBLIC_BASE_URL missing, dev mode is judged from the bind host alone.
-    assert missing_env({}, "127.0.0.1") == ["DATABASE_URL", "PUBLIC_BASE_URL", "SESSION_SECRET", "TOKEN_HASH_SECRET"]
+    assert missing_env({}, "127.0.0.1") == [
+        "DATABASE_URL", "PUBLIC_BASE_URL", "SESSION_SECRET", "TOKEN_HASH_SECRET", "ANTHROPIC_API_KEY",
+    ]
     assert missing_env(dev_env(), "127.0.0.1") == []
     assert missing_env(dev_env(), "0.0.0.0") == ["RESEND_API_KEY", "MAIL_FROM"]
     assert missing_env(dev_env(RESEND_API_KEY="re_test_key"), "127.0.0.1") == ["MAIL_FROM"]

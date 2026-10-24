@@ -17,7 +17,7 @@
     </div>
     <nav aria-label="Account" class="-mb-px max-w-full overflow-x-auto">
       <ul class="flex min-w-max gap-1 text-sm">
-        {% for key, label, href in [("overview", "Overview", "/account"), ("payments", "Payments", "/account/payments"), ("rules", "Rules", "/account/rules"), ("books", "Books", "/account/books")] %}
+        {% for key, label, href in [("overview", "Overview", "/account"), ("payments", "Payments", "/account/payments"), ("tasks", "Tasks", "/account/tasks"), ("rules", "Rules", "/account/rules"), ("books", "Books", "/account/books")] %}
         <li>
           {% if key == tab %}
           <a href="{{ href }}" aria-current="page" class="block border-b-2 border-stone-900 px-3 py-2 font-semibold text-stone-900">{{ label }}</a>

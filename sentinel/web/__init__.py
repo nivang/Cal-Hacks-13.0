@@ -33,7 +33,7 @@ def link_limit_factor(env: Mapping[str, str]) -> int:
     return int(raw) if raw.isascii() and raw.isdigit() and 1 < int(raw) <= MAX_LINK_LIMIT_FACTOR else 1
 
 MIN_SECRET_LENGTH = 32
-REQUIRED_ENV = ("DATABASE_URL", "PUBLIC_BASE_URL", "SESSION_SECRET", "TOKEN_HASH_SECRET")
+REQUIRED_ENV = ("DATABASE_URL", "PUBLIC_BASE_URL", "SESSION_SECRET", "TOKEN_HASH_SECRET", "ANTHROPIC_API_KEY")
 MAIL_ENV = ("RESEND_API_KEY", "MAIL_FROM")
 DEFAULT_PORTS = {"http": 80, "https": 443}
 
@@ -114,7 +114,8 @@ def _value(env: Mapping[str, str], name: str) -> str | None:
 def missing_env(env: Mapping[str, str], bind_host: str) -> list[str]:
     """Name every required variable that is unset or empty, in a stable order.
 
-    Always DATABASE_URL, PUBLIC_BASE_URL, SESSION_SECRET and TOKEN_HASH_SECRET. RESEND_API_KEY and MAIL_FROM too
+    Always DATABASE_URL, PUBLIC_BASE_URL, SESSION_SECRET, TOKEN_HASH_SECRET and ANTHROPIC_API_KEY (judge.py reads
+    tasks and judges payments with Claude). RESEND_API_KEY and MAIL_FROM too
     unless in dev mode (with PUBLIC_BASE_URL missing, dev mode is judged from the bind host alone), and MAIL_FROM
     whenever RESEND_API_KEY is set. The wallet vars are added by mcp_server.main() from wallets.required_env().
     """

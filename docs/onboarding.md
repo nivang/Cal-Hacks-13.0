@@ -61,7 +61,7 @@ Transport **Streamable HTTP**, URL `http://localhost:8000/mcp`, then use the OAu
 
 ```bash
 source .venv/bin/activate
-cp .env.example .env    # fill in the CDP keys, DATABASE_URL, the two secrets; PUBLIC_BASE_URL=http://localhost:8000
+cp .env.example .env    # the CDP keys, DATABASE_URL, ANTHROPIC_API_KEY, the two secrets; PUBLIC_BASE_URL=http://localhost:8000
 python -m sentinel.db migrate
 python -m sentinel.mcp_server                 # site, OAuth and MCP on http://127.0.0.1:8000
 ```
@@ -78,6 +78,7 @@ Open the site at the host named in `PUBLIC_BASE_URL` (`localhost` and `127.0.0.1
 - Do not open sign up to untrusted users until the `pay` fetch hardening lands (next change; see [Known limits](how-it-works.md#known-limits)).
 - Public HTTPS with an IPv4 record (DNS A). Allow Anthropic's egress range `160.79.104.0/21` through any firewall: claude.ai connects and registers from there.
 - `FORWARDED_ALLOW_IPS` set to the proxy's address, so client IPs and the per IP limits are real (`*` lets anyone spoof an IP; unset, every request seems to come from the proxy, so the per IP limits become site wide and the Anthropic registration exemption never matches; both only warn at startup). Strip query strings in the proxy's logs: sign in links and consent requests travel in them. Sentinel already strips them from its own access log.
+- `ANTHROPIC_API_KEY` for the intent judge (Claude Haiku 5.5). Without it the server will not start; if the API is down, payments under a task are held for the owner, never paid.
 - A Resend domain, with `RESEND_API_KEY` and `MAIL_FROM` on it. Give each deployment and database its own Resend key (the idempotency keys are per link id, which repeats across databases).
 - Run `python -m sentinel.db migrate` before starting a new version; the server refuses to start while migrations are pending.
 - Several replicas are fine: sessions, links, codes, tokens and the rate limits all live in Postgres. The in flight payment limits (2 per user, 6 overall) are per process.

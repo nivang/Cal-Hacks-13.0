@@ -5,10 +5,11 @@ inside a transaction that is rolled back at the end, so tests cannot see each ot
 ledger tables (which reject deletes by design) are never left dirty. Needs DATABASE_URL in .env.
 
 The rest serves the web, OAuth and MCP tests: dev mode settings with test secrets, a recording mailer, a fake wallet
-registered as wallets.WALLETS["fake"] (so the real open_user_wallet runs in front of it), a pay function that runs the
-real guard and ledger on the test connection, the whole app (web/app.py) under its lifespan, and a browser factory
-with one cookie jar and one client IP per simulated user. Plain helper functions (pkce, sign_in, register,
-connect_flow, call_tool, provision_user, access_token_for) are imported by the tests like ASSET.
+registered as wallets.WALLETS["fake"] (so the real open_user_wallet runs in front of it), a fake judge (no model
+calls), a pay function that runs the real guard, intent review and ledger on the test connection, the whole app
+(web/app.py) under its lifespan, and a browser factory with one cookie jar and one client IP per simulated user.
+call_tool starts a task first when a pay call names none, as an agent does. Plain helper functions (pkce, sign_in,
+register, connect_flow, call_tool, provision_user, access_token_for) are imported by the tests like ASSET.
 """
 import hashlib
 import os
@@ -29,7 +30,7 @@ from fastapi import FastAPI
 from fastmcp.utilities.asgi_transport import run_asgi_lifespan
 from psycopg.types.json import Jsonb
 
-from sentinel import ENV_FILE, db, ledger, payments, wallets
+from sentinel import ENV_FILE, chain, db, judge, ledger, payments, wallets
 from sentinel.guard import Quote
 from sentinel.payments import PayResult
 from sentinel.web import Settings, auth, load_settings, oauth, users
@@ -46,6 +47,7 @@ TEST_BASE_URL = "http://localhost:8000"  # dev mode, bind host 127.0.0.1
 CLAUDE_CALLBACK = "https://claude.ai/api/mcp/auth_callback"
 BROWSER_IP = "203.0.113.10"
 PAID_BODY = b'{"vendor":"DataCo","open_rate":0.214}'
+TASK = "Write the Q3 email marketing report; buy the 2026 email open-rate benchmarks from DataCo."
 
 
 @pytest.fixture(scope="session")
@@ -87,6 +89,31 @@ def anyio_backend(request: pytest.FixtureRequest) -> str:
 def allow_local_urls(monkeypatch: pytest.MonkeyPatch) -> None:
     """Test seller hosts do not resolve, so skip the public address check (tests about it delenv this)."""
     monkeypatch.setenv("SENTINEL_ALLOW_LOCAL_URLS", "1")
+
+
+class FakeChain:
+    """Stands in for chain.wallet_history: every wallet has a history unless the test marks it unused or down."""
+
+    def __init__(self) -> None:
+        self.unused: set[str] = set()
+        self.down = False
+        self.asked: list[str] = []
+
+    async def history(self, address: str) -> chain.WalletHistory:
+        self.asked.append(address)
+        if self.down:
+            raise chain.ChainError("RPC down")
+        if address.lower() in self.unused:
+            return chain.WalletHistory(0, 0, 0)
+        return chain.WalletHistory(tx_count=3, eth=10**15, usdc=1_000_000)
+
+
+@pytest.fixture(autouse=True)
+def fake_chain(monkeypatch: pytest.MonkeyPatch) -> FakeChain:
+    """No test reads Base Sepolia: wallet_history answers from FakeChain."""
+    fake = FakeChain()
+    monkeypatch.setattr(chain, "wallet_history", fake.history)
+    return fake
 
 
 @pytest.fixture
@@ -175,6 +202,59 @@ class FakeWallets:
         yield SimpleNamespace(address=fake_wallet_address("other " + name if self.mismatch else name))
 
 
+class FakeJudge:
+    """A Judge with no model behind it. Records every case it was shown.
+
+    Knobs: fit (tier 1 verdict, or a dict of URL substring -> verdict, default fits), decision (tier 2 verdict),
+    draft (fields to override in the mandate draft), and fail_extract / fail_classify / fail_decide (raise JudgeError).
+    """
+
+    def __init__(self) -> None:
+        """Everything fits; nothing fails."""
+        self.fit: str | dict[str, str] = "fits"
+        self.decision = "allow"
+        self.draft: dict[str, Any] = {}
+        self.fail_extract = self.fail_classify = self.fail_decide = False
+        self.tasks: list[str] = []
+        self.classified: list[dict[str, Any]] = []
+        self.decided: list[dict[str, Any]] = []
+
+    async def extract(self, task: str) -> judge.MandateDraft:
+        """A fixed mandate for any task, with the draft knob applied."""
+        self.tasks.append(task)
+        if self.fail_extract:
+            raise judge.JudgeError("extract failed")
+        fields: dict[str, Any] = {
+            "goal": "Write the Q3 email marketing report.", "expected_types": ["email benchmarks", "market data"],
+            "out_of_scope": ["crypto trading signals"], "budget_cents": None, "per_call_cents": None,
+        }
+        return judge.MandateDraft(**{**fields, **self.draft})
+
+    async def classify(self, case: dict[str, Any]) -> judge.FitOpinion:
+        """Tier 1 from the fit knob."""
+        self.classified.append(case)
+        if self.fail_classify:
+            raise judge.JudgeError("classify failed")
+        verdict = self.fit
+        if isinstance(verdict, dict):
+            url = case["payment"]["url"]
+            verdict = next((v for k, v in verdict.items() if k in url), "fits")
+        return judge.FitOpinion(verdict=verdict, reason=f"Tier 1 says {verdict}.")  # type: ignore[arg-type]
+
+    async def decide(self, case: dict[str, Any]) -> judge.JudgeOpinion:
+        """Tier 2 from the decision knob."""
+        self.decided.append(case)
+        if self.fail_decide:
+            raise judge.JudgeError("decide failed")
+        return judge.JudgeOpinion(verdict=self.decision, reason=f"The judge says {self.decision}.")  # type: ignore[arg-type]
+
+
+@pytest.fixture
+def fake_judge() -> FakeJudge:
+    """A fresh fake judge."""
+    return FakeJudge()
+
+
 @pytest.fixture
 def fake_wallets(monkeypatch: pytest.MonkeyPatch) -> FakeWallets:
     """Register FakeWallets as the selected wallet, so wallets.open_user_wallet runs for real in front of it."""
@@ -185,25 +265,29 @@ def fake_wallets(monkeypatch: pytest.MonkeyPatch) -> FakeWallets:
 
 
 class PaySpy:
-    """A pay function with the real guard and ledger on the test connection but no network: authorize, then settle.
+    """A pay function with the real guard, intent review and ledger on the test connection but no network.
 
-    calls records (url, signer, agent, reason). Knobs: amount (atomic units), pay_to and body set the quote and
-    what the seller returns.
+    calls records (url, signer, agent, reason); tasks records the task each call ran under. Knobs: amount (atomic
+    units), pay_to and body set the quote and what the seller returns.
     """
 
     def __init__(self, conn: db.Connection) -> None:
         """Pay DataCo $0.50 for a small JSON body unless the test changes the knobs."""
         self.conn = conn
         self.calls: list[tuple[str, Any, str, str | None]] = []
+        self.tasks: list[payments.Task | None] = []
         self.amount = 500_000
         self.pay_to = DATACO
         self.body = PAID_BODY
 
-    async def __call__(self, url: str, signer: Any, *, agent: str, reason: str | None = None) -> PayResult:
+    async def __call__(
+        self, url: str, signer: Any, *, agent: str, reason: str | None = None, task: payments.Task | None = None,
+    ) -> PayResult:
         """Same signature as payments.pay_for."""
         self.calls.append((url, signer, agent, reason))
+        self.tasks.append(task)
         quote = Quote(url, self.pay_to, self.amount, ASSET, NETWORK, 300)
-        attempt_id = payments.authorize(self.conn, agent, reason, quote)
+        attempt_id = await payments.authorize_task(self.conn, agent, reason, quote, task)
         tx = f"0xtx{attempt_id}"
         ledger.settle_attempt(self.conn, attempt_id, tx, self.body, "application/json")
         return PayResult(200, self.body.decode(), tx, quote, attempt_id, True, "application/json")
@@ -218,12 +302,12 @@ def pay_spy(conn: db.Connection) -> PaySpy:
 @pytest.fixture
 async def app(
     settings: Settings, connect: Callable[[], Any], mailer: RecordingMailer, fake_wallets: FakeWallets,
-    pay_spy: PaySpy,
+    pay_spy: PaySpy, fake_judge: FakeJudge,
 ) -> AsyncIterator[FastAPI]:
     """The whole app (site, OAuth, /mcp) on the test connection, with its lifespan running."""
     from sentinel.web.app import create_app
 
-    application = create_app(settings, connect=connect, mailer=mailer, pay_fn=pay_spy)
+    application = create_app(settings, connect=connect, mailer=mailer, pay_fn=pay_spy, judge_=fake_judge)
 
     async def with_lifespan_state(scope: Any, receive: Any, send: Any) -> None:
         """Give the lifespan scope a "state" dict, as uvicorn does (combine_lifespans yields one)."""
@@ -385,7 +469,12 @@ async def call_tool(
     client: httpx.AsyncClient, access_token: str, tool: str, arguments: dict[str, Any]
 ) -> dict[str, Any]:
     """Call one MCP tool over HTTP (JSON-RPC tools/call to /mcp with the bearer token) and return its structured
-    result. A tool error (no structured content) returns the raw result: {"isError": True, "content": [...]}."""
+    result. A tool error (no structured content) returns the raw result: {"isError": True, "content": [...]}.
+    A pay call without a task_id first starts a task with TASK, as an agent would."""
+    if tool == "pay" and "task_id" not in arguments:
+        started = await call_tool(client, access_token, "start_task", {"task": TASK})
+        if started.get("task_id"):
+            arguments = {"task_id": started["task_id"], **arguments}
     response = await client.post(
         "/mcp",
         json={"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": tool, "arguments": arguments}},
