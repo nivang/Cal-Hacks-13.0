@@ -1,0 +1,85 @@
+"""Answer key for the guard. Each planted case maps to one rule; the rest are edge cases."""
+import pytest
+
+from guard import ALLOW, BLOCK, NEEDS_APPROVAL, Agent, History, Quote, evaluate
+
+USDC = 1_000_000
+DATACO = "0x290E84b17Ce32cF9403f5D0218cB50ccdcc94781"
+SCAMMER = "0xSca000000000000000000000000000000000dead"
+AGENT = Agent("research-agent", per_payment_cap=10 * USDC, weekly_budget=50 * USDC)
+
+
+def quote(amount: int, pay_to: str = DATACO) -> Quote:
+    return Quote("http://x/a", pay_to, amount, "0xusdc", "eip155:84532", 300)
+
+
+def history(**overrides) -> History:
+    base = dict(seller_status="approved", week_spend=0, seller_settled=(), duplicate=False)
+    return History(**{**base, **overrides})
+
+
+def test_1_seller_unknown_scammer_needs_approval():
+    d = evaluate(AGENT, quote(9 * USDC, SCAMMER), history(seller_status=None))
+    assert (d.decision, d.rule) == (NEEDS_APPROVAL, "seller")
+
+
+def test_2_cap_15_vs_10_blocks():
+    d = evaluate(AGENT, quote(15 * USDC), history())
+    assert (d.decision, d.rule) == (BLOCK, "cap")
+
+
+def test_3_budget_49_80_spent_plus_0_50_blocks():
+    d = evaluate(AGENT, quote(500_000), history(week_spend=49_800_000))
+    assert (d.decision, d.rule) == (BLOCK, "budget")
+
+
+def test_4_price_jump_2_00_vs_0_50_history_blocks():
+    d = evaluate(AGENT, quote(2 * USDC), history(seller_settled=(500_000,) * 5))
+    assert (d.decision, d.rule) == (BLOCK, "price_jump")
+
+
+def test_5_duplicate_repeat_of_settled_call_blocks():
+    d = evaluate(AGENT, quote(500_000), history(seller_settled=(500_000,), duplicate=True))
+    assert (d.decision, d.rule) == (BLOCK, "duplicate")
+
+
+def test_6_clean_dataco_0_50_allows():
+    d = evaluate(AGENT, quote(500_000), history(seller_settled=(500_000,) * 3))
+    assert (d.decision, d.rule) == (ALLOW, "clean")
+
+
+def test_price_jump_exactly_2x_is_allowed():
+    assert evaluate(AGENT, quote(USDC), history(seller_settled=(500_000,) * 5)).decision == ALLOW
+
+
+def test_first_purchase_has_no_history_and_is_trusted():
+    assert evaluate(AGENT, quote(5 * USDC), history(seller_settled=())).decision == ALLOW
+
+
+def test_blocked_seller_is_blocked_not_escalated():
+    assert evaluate(AGENT, quote(500_000), history(seller_status="blocked")).decision == BLOCK
+
+
+def test_pending_seller_needs_approval():
+    assert evaluate(AGENT, quote(500_000), history(seller_status="pending")).decision == NEEDS_APPROVAL
+
+
+def test_seller_rule_runs_before_cap():
+    # The $9 scam quote is under the $10 cap anyway; a $15 one from an unknown seller still escalates, not blocks.
+    assert evaluate(AGENT, quote(15 * USDC, SCAMMER), history(seller_status=None)).decision == NEEDS_APPROVAL
+
+
+def test_amount_exactly_at_cap_and_budget_is_allowed():
+    d = evaluate(AGENT, quote(10 * USDC), history(week_spend=40 * USDC))
+    assert d.decision == ALLOW
+
+
+def test_median_uses_middle_of_even_history():
+    # history 0.40 and 0.60 has median 0.50, so 1.00 is exactly 2x and passes, 1.01 does not.
+    assert evaluate(AGENT, quote(USDC), history(seller_settled=(400_000, 600_000))).decision == ALLOW
+    assert evaluate(AGENT, quote(1_010_000), history(seller_settled=(400_000, 600_000))).rule == "price_jump"
+
+
+@pytest.mark.parametrize("amount", [1, 499_999])
+def test_cheaper_than_history_is_fine(amount):
+    assert evaluate(AGENT, quote(amount), history(seller_settled=(500_000,) * 5)).decision == ALLOW

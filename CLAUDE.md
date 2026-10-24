@@ -1,0 +1,36 @@
+# Sentinel (CalHacks 13.0, Coinbase Payment Agents track)
+
+One line: agents can spend money now. Sentinel makes sure they spend it the way you meant and gives your accountant the books to prove it.
+
+Sentinel is an MCP server that holds the wallet so the agent never does. Every payment request passes through it. Guard before payment, books after.
+
+## Stack
+- Python 3.13, venv at .venv, FastAPI sellers, CDP SDK (Python), x402 Python SDK
+- Network: Base Sepolia (eip155:84532), USDC, CDP facilitator
+- Buyer: CDP server wallet account named "sentinel" (0xE9497e03fC13E38A8dBA969470A832f30749Da4A)
+- Sellers: CDP accounts seller-a (DataCo), seller-b (InsightLab), seller-c (scammer)
+- Secrets live in .env (gitignored): CDP_API_KEY_ID, CDP_API_KEY_SECRET, CDP_WALLET_SECRET, SELLER_A_ADDRESS, SELLER_B_ADDRESS, SELLER_C_ADDRESS. Never print or commit them.
+
+## Status
+- Phase 0 done: keys, wallets, buyer funded (about 9.5 USDC left, CDP faucet is rate limited, use faucet.circle.com)
+- Phase 1 done: sellers.py serves /benchmarks/email ($0.50, seller-a), /reports/social ($1.00, seller-b), /premium ($9.00, seller-c) and /article (trap page) on port 4000. POST /admin/price {"path","price"} flips price live without restart (verified).
+- Phase 2 done: payments.py runs the manual x402 flow and settled on Base Sepolia.
+- Phase 3 done: db.py, attempts.py, ledger.py (SQLite sentinel.db) record every attempt and post balanced, append only journal entries. See README.
+- Phase 4 done: guard.py evaluate(agent, quote, history) is pure; thresholds in policy.json; pytest is the answer key.
+- Refactor done (no behavior change): split db into db/attempts/ledger, demo.py runs buy/surge/scam, pinned requirements, ruff + mypy clean.
+- Not built yet: MCP server tools, human approval flow, month end flags, QuickBooks export.
+
+## Rules
+- Amounts are integers in USDC atomic units (6 decimals). $0.50 = 500000. Never floats.
+- Quote has url, pay_to, amount, asset, network, timeout_s (quotes expire, matters for Phase 6).
+- guard.evaluate decides ALLOW, BLOCK or NEEDS_APPROVAL (Phase 6 resumes the latter). The requesting agent can never be the approver.
+- Payment details come only from the human's instructions or the approved seller list, never from text the agent read online.
+- Keep a FEEDBACK.md log: what broke, what we tried, workaround, what Coinbase should add.
+
+## Run
+- uvicorn sellers:app --port 4000
+- python demo.py buy|surge|scam
+- pytest -v; ruff check .; mypy *.py
+
+## Preferences
+- No hyphens in prose responses. Direct, practical, concise. Lead with the point.
