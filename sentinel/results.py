@@ -228,15 +228,20 @@ def discovered(query: str, found: discovery.Found) -> DiscoverResult:
         )
     ready = sum(1 for x in found.listings if x.payable and x.seller_status == "approved")
     needs_owner = sum(1 for x in found.listings if x.payable and x.seller_status == "unlisted")
+    on_credit = sum(1 for x in found.listings if x.pay_with == "apify_credit")
     parts = [f"Found {len(found.listings)} listings."]
     if ready:
-        parts.append(f"{ready} are from sellers the owner approved: buy one with pay(url, reason).")
+        parts.append(f"{ready} are from sellers the owner approved: start_task first, then use "
+                     "pay(task_id, url, reason). The task and payment checks still apply.")
     if needs_owner:
         parts.append(
             f"{needs_owner} are payable but the seller is not approved yet, so pay() would be BLOCKED. Ask the owner "
             "to approve the seller (its name and pay_to) on the Rules page of their Sentinel account first."
         )
-    if not ready and not needs_owner:
+    if on_credit:
+        parts.append(f"{on_credit} are Apify Actors that run on the owner's Apify credit: call apify_actor(actor) for "
+                     "pricing and inputs.")
+    if not ready and not needs_owner and not on_credit:
         parts.append("None can be paid by Sentinel (it pays Base Sepolia USDC only); share them with the owner.")
     parts.append(LISTINGS_UNTRUSTED)
     return DiscoverResult(status="OK", query=query, listings=found.listings, sources=found.sources,

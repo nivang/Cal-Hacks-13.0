@@ -102,6 +102,8 @@ python -m demo.run held     # a $1.00 report on a task that expects about $0.10 
 
 ## Development
 
+Before merging discovery or Apify changes, follow the [manual testing checklist](docs/manual-testing.md) for MCP setup, marketplace searches, Actor details, tasks, payments, and account checks.
+
 ```bash
 pytest          # database tests use the "test" schema of your Supabase database
 ruff check .

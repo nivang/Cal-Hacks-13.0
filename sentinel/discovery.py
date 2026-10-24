@@ -43,6 +43,8 @@ MAX_NAME = 80
 DEFAULT_LIMIT, MAX_LIMIT = 10, 25
 NETWORK_LABELS = {"base": BASE_MAINNET, "base-sepolia": NETWORK, "base sepolia": NETWORK}
 BROWSE_ONLY = "Browse only: this listing does not offer Base Sepolia USDC, the only option Sentinel pays."
+APIFY_CREDIT_NOTE = ("Runs on the owner's Apify credit, not x402. Call apify_actor(actor) for its pricing and the "
+                     "inputs it needs. Sentinel cannot start Actor runs yet: tell the owner which Actor and input fit.")
 APIFY_NOTE = ("Browse only: Apify Actors are paid through an Apify prepaid token (Base mainnet), not per call, so "
               "pay() cannot buy them. Tell the owner if this Actor fits the task.")
 
@@ -65,6 +67,8 @@ class Listing(BaseModel):
     example_url: str | None = None  # url with those example inputs filled in; change the values to fit the task
     payable: bool = False
     seller_status: SellerStatus | None = None  # only for payable listings: what pay() will find on the seller lists
+    actor: str | None = None  # Apify only: the Actor id ("username/name") for apify_actor
+    pay_with: Literal["x402", "apify_credit"] | None = None  # how it would be paid; None when it cannot be
     note: str | None = None
 
 
@@ -164,6 +168,8 @@ def from_cdp(data: Any) -> list[Listing]:
             payable=bool(testnet and testnet.get("payTo") and method == "GET"),
             query_params=params, example_url=example,
         )
+        if listing.payable:
+            listing.pay_with = "x402"
         try:
             amount = int(offer["amount"]) if offer and str(offer.get("amount", "")).isdigit() else None
         except (TypeError, ValueError):
@@ -213,33 +219,66 @@ def from_payapi(data: Any) -> list[Listing]:
     return found
 
 
-def from_apify(data: Any) -> list[Listing]:
-    """Apify Store Actors that accept agentic payments, priced by their primary pay per event charge (free tier)."""
+def from_apify(data: Any, credit: bool = False) -> list[Listing]:
+    """Apify Store Actors, priced by their primary pay per event charge (free tier price).
+
+    Without credit (no APIFY_TOKEN) only Actors whitelisted for agentic payments are kept, as browse only, since they
+    need an x402 prepaid token on Base mainnet. With credit every Actor the owner's Apify account can run is kept and
+    marked pay_with apify_credit, except monthly rentals (they need a subscription) and deprecated Actors.
+    """
     found = []
     for actor in ((data or {}).get("data") or {}).get("items") or []:
-        if not isinstance(actor, dict) or not actor.get("isWhiteListedForAgenticPayments"):
+        if not isinstance(actor, dict):
+            continue
+        pricing = actor.get("currentPricingInfo") or {}
+        model = pricing.get("pricingModel") if isinstance(pricing, dict) else None
+        if credit and (model == "FLAT_PRICE_PER_MONTH" or actor.get("isDeprecated")):
+            continue
+        if not credit and not actor.get("isWhiteListedForAgenticPayments"):
             continue
         url = actor.get("url") or f"https://apify.com/{actor.get('username')}/{actor.get('name')}"
         if not is_http_url(url):
             continue
-        amount, event = None, None
-        events = (((actor.get("currentPricingInfo") or {}).get("pricingPerEvent") or {}).get("actorChargeEvents")
-                  or {})
-        for charge in events.values() if isinstance(events, dict) else []:
-            if isinstance(charge, dict) and charge.get("isPrimaryEvent"):
-                tiers = charge.get("eventTieredPricingUsd") or {}
-                price = (tiers.get("FREE") or {}).get("tieredEventPriceUsd") if isinstance(tiers, dict) else None
-                if price is None:
-                    price = charge.get("eventPriceUsd")
-                amount, event = to_atomic(price) if price is not None else None, clean(charge.get("eventTitle"), 60)
-                break
-        note = APIFY_NOTE + (f" Price is per {event.lower()}." if event else "")
+        amount, event = primary_event_price(pricing)
+        if credit and model == "FREE":
+            amount = 0
+        owner, name = actor.get("username"), actor.get("name")
+        actor_id = f"{owner}/{name}" if owner and name else None
+        if credit:
+            per = (f" Price is per {event.lower()}, plus a small per run start fee." if event
+                   else " Free Actor: only the run's compute is charged, usually well under $0.01 for a small run."
+                   if model == "FREE" else "")
+            note = APIFY_CREDIT_NOTE + per
+        else:
+            note = APIFY_NOTE + (f" Price is per {event.lower()}." if event else "")
         listing = Listing(
             source="apify", name=clean(actor.get("title") or actor.get("name"), MAX_NAME),
-            description=clean(actor.get("description")), url=url, method="POST", network=BASE_MAINNET, note=note,
+            description=clean(actor.get("description")), url=url, method="POST",
+            network=None if credit else BASE_MAINNET, actor=actor_id,
+            pay_with="apify_credit" if credit else None, note=note,
         )
         found.append(priced(listing, amount))
     return found
+
+
+def primary_event_price(pricing: Any) -> tuple[int | None, str | None]:
+    """The primary pay per event charge of an Apify pricing record: (atomic units at the free tier, event title)."""
+    if not isinstance(pricing, dict):
+        return None, None
+    events = (pricing.get("pricingPerEvent") or {}).get("actorChargeEvents")
+    for charge in events.values() if isinstance(events, dict) else []:
+        if isinstance(charge, dict) and charge.get("isPrimaryEvent"):
+            return event_price(charge), clean(charge.get("eventTitle"), 60) or None
+    return None, None
+
+
+def event_price(charge: dict[str, Any]) -> int | None:
+    """One Apify charge event's price in atomic units: the FREE plan tier when tiered, else the flat price."""
+    tiers = charge.get("eventTieredPricingUsd")
+    price = (tiers.get("FREE") or {}).get("tieredEventPriceUsd") if isinstance(tiers, dict) else None
+    if price is None:
+        price = charge.get("eventPriceUsd")
+    return to_atomic(price) if price is not None else None
 
 
 # Fetching
@@ -248,11 +287,15 @@ def from_apify(data: Any) -> list[Listing]:
 Fetch = Callable[[str, dict[str, Any]], Awaitable[Any]]
 
 
-def http_fetcher(client: httpx.AsyncClient) -> Fetch:
-    """A fetch function on one client: GET with params, JSON back, raising on errors or an oversized answer."""
+def http_fetcher(client: httpx.AsyncClient, headers_for: Callable[[str], dict[str, str]] | None = None) -> Fetch:
+    """A fetch function on one client: GET with params, JSON back, raising on errors or an oversized answer.
+
+    headers_for adds per URL headers (apify.headers_for sends the owner's token to api.apify.com and nowhere else).
+    """
 
     async def fetch(url: str, params: dict[str, Any]) -> Any:
-        async with client.stream("GET", url, params=params, headers={"Accept": "application/json"}) as response:
+        headers = {"Accept": "application/json", **(headers_for(url) if headers_for else {})}
+        async with client.stream("GET", url, params=params, headers=headers) as response:
             response.raise_for_status()
             body = bytearray()
             async for chunk in response.aiter_bytes():
@@ -265,7 +308,7 @@ def http_fetcher(client: httpx.AsyncClient) -> Fetch:
 
 
 async def from_source(source: str, fetch: Fetch, query: str, limit: int, max_amount: int | None,
-                      payable_only: bool) -> list[Listing]:
+                      payable_only: bool, apify_credit: bool = False) -> list[Listing]:
     """Ask one source and normalize its answer. Raises on any failure; search() turns that into a source error."""
     if source == "cdp":
         params: dict[str, Any] = {"query": query, "limit": min(limit, 20)}
@@ -282,8 +325,9 @@ async def from_source(source: str, fetch: Fetch, query: str, limit: int, max_amo
     if source == "payapi":
         return from_payapi(await fetch(PAYAPI_URL, {"q": query, "limit": limit}))
     if source == "apify":
-        # Only some Actors are whitelisted for agentic payments, so ask for more and keep those.
-        return from_apify(await fetch(APIFY_URL, {"search": query, "limit": min(limit * 3, 50)}))
+        # Without credit only some Actors (whitelisted for agentic payments) are kept, so ask for more.
+        wanted = limit + 10 if apify_credit else min(limit * 3, 50)
+        return from_apify(await fetch(APIFY_URL, {"search": query, "limit": wanted}), credit=apify_credit)
     raise ValueError(f"unknown source {source}")
 
 
@@ -334,17 +378,20 @@ async def search(
     payable_only: bool = False,
     sources: tuple[str, ...] = SOURCES,
     seller_status: Callable[[list[str]], Awaitable[dict[str, SellerStatus]]] | None = None,
+    apify_credit: bool = False,
 ) -> Found:
     """Search every source at once and return up to limit listings, best first.
 
     max_amount drops anything priced above it (atomic units); unpriced listings are kept only when there is no max.
     payable_only skips the browse only sources. seller_status maps payable payTo addresses (lower case) to what the
-    seller lists say, so the agent knows before paying whether pay() will be blocked.
+    seller lists say, so the agent knows before paying whether pay() will be blocked. apify_credit (the owner set
+    APIFY_TOKEN) lists every runnable Apify Actor instead of only the x402 whitelisted ones.
     """
     limit = max(1, min(limit, MAX_LIMIT))
-    asked = ("cdp",) if payable_only else sources
+    asked = tuple(s for s in sources if s == "cdp") if payable_only else sources
     outcomes = await asyncio.gather(
-        *(asyncio.wait_for(from_source(s, fetch, query, limit, max_amount, payable_only), TIMEOUT_S) for s in asked),
+        *(asyncio.wait_for(from_source(s, fetch, query, limit, max_amount, payable_only, apify_credit), TIMEOUT_S)
+          for s in asked),
         return_exceptions=True,
     )
     listings: list[Listing] = []

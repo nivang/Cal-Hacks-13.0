@@ -6,10 +6,11 @@ Sentinel holds the wallet so the agent never does. Every payment request passes 
 
 | Path | Job |
 |---|---|
-| `sentinel/mcp_server.py` | The MCP tools `start_task`, `find_services`, `quote`, `pay` and `payment_status` and `discover`: identity from the OAuth token, the user's own wallet per call, in flight limits. `main()` checks env, settings and migrations, then serves the whole app |
+| `sentinel/mcp_server.py` | The MCP tools `start_task`, `find_services`, `quote`, `pay` and `payment_status`, `discover` and `apify_actor`: identity from the OAuth token, the user's own wallet per call, in flight limits. `main()` checks env, settings and migrations, then serves the whole app |
 | `sentinel/ledger_app.py` | The operator's ledger page (port 5001): every agent's books, the operator's seller list, limits, payments CSV. Password protected |
 | `sentinel/owner.py` | The operator's actions (the operator seller list, set limits, `parse_usd`) and the ledger queries, also used per agent by the account pages |
 | `sentinel/discovery.py` | Market discovery: searches the CDP x402 Bazaar, agentic.market, payapi.market and the Apify Store at once and returns one ranked list. Pays nothing |
+| `sentinel/apify.py` | Apify Actor details for `apify_actor`: pricing, input fields and an example input. Sends `APIFY_TOKEN` to api.apify.com only. Runs nothing |
 | `sentinel/results.py` | The one result shape the tools return, and the plain English for each outcome |
 | `sentinel/urls.py` | Refuses unsafe URLs (file://, private or metadata addresses) before anything is fetched |
 | `sentinel/payments.py` | The x402 flow: ask for a price, build a quote, run the guard, then the intent review under a task, sign, pay, record |
@@ -51,6 +52,8 @@ Sentinel holds the wallet so the agent never does. Every payment request passes 
 - `quote(task_id, url, purpose?)`: the same preview for one URL.
 - `payment_status(request_id)`: the current state of one of the agent's own requests, including the paid body once it has settled.
 - `discover(query, max_price_usdc?, payable_only?, limit?)`: search public x402 marketplaces for a service that fits the task. Pays and records nothing. Each listing has a name, description, url, price and `payable` (true only for Base Sepolia USDC GET endpoints, which only the CDP Bazaar lists with a payTo). Payable listings also carry `seller_status`: `approved`, `unlisted` (pay would be BLOCKED until the user approves the seller on their Rules page) or `blocked`. Everything from agentic.market, payapi.market and Apify is Base mainnet, so it is browse only; Apify Actors are paid through a prepaid token, not per call. Results put approved sellers first, then unlisted payable ones, then browse only listings with the directories taking turns, then blocked. Each directory gets 8 seconds and 2 MB; one that fails is named in `sources` and the rest still answer. Descriptions are cut to 280 characters and stripped of markup, since they are third party advertising. One search per user and four per process at a time.
+
+Apify: with `APIFY_TOKEN` set (the owner's Apify account, for example the CalHacks credit), `discover` lists every Apify Store Actor except monthly rentals and deprecated ones, each with its `actor` id, its primary per event price and `pay_with: apify_credit`; `source: "apify"` searches only the Store. Without the token only the Actors whitelisted for x402 agent payments appear, browse only. `apify_actor(actor)` returns one Actor's pricing model and charge events (free plan prices), the smallest run spending limit it accepts, users, rating and 30 day success rate, its input fields (required first) and an example input (the author's, or one built from the schema's prefilled values when the author's uses fields the schema no longer has). Actor ids are checked before any request, so the agent cannot reach other Apify API paths. Sentinel does not start Actor runs yet.
 
 Discovery never authorizes anything: a listing's payTo is only used to show `seller_status`. `pay` still fetches a fresh quote from the seller and the guard still blocks any seller the user has not approved, so a fake listing cannot move money.
 

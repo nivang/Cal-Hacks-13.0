@@ -48,7 +48,7 @@ from conftest import (
 )
 from conftest import fake_wallet_address as address_for
 
-from sentinel import attempts, db, guard, ledger, mcp_server, payments, wallets
+from sentinel import attempts, db, guard, ledger, mandates, mcp_server, payments, wallets
 from sentinel.guard import Quote
 from sentinel.payments import PayResult
 from sentinel.web import users
@@ -275,8 +275,8 @@ def test_the_database_refuses_two_users_sharing_a_wallet_or_an_agent(conn):
 
 def test_one_agents_settled_prices_do_not_move_another_agents_price_baseline(conn):
     other, _, _ = new_agent(conn)
-    for i in range(3):
-        settle(conn, "research-agent", url=f"http://x/{i}")  # research-agent's baseline for DataCo: $0.50
+    for _ in range(3):
+        settle(conn, "research-agent", url="http://x/surge")  # this product's baseline for research-agent: $0.50
     surge = Quote("http://x/surge", DATACO, 2_000_000, ASSET, NETWORK, 300)
 
     assert attempts.load_history(conn, other, asdict(surge), guard.POLICY)["seller_settled"] == ()
@@ -620,6 +620,15 @@ def pay_args(path, reason=REASON):
     return {"url": f"http://seller.test/{path}", "reason": reason}
 
 
+async def confirmed_task(conn, client, identity):
+    """Give wallet-isolation tests a real owner-confirmed task, so provisional holds do not mask the checks."""
+    started = await call_tool(client, identity.access_token, "start_task", {"task": TASK})
+    agent = users.agent_name(identity.user_id)
+    mandates.confirm(conn, started["task_id"], db.agent_id(conn, agent), 5_000_000,
+                     attempts.load_agent(conn, agent)["weekly_budget"])
+    return started["task_id"]
+
+
 def cash_code(conn, user_id):
     """The code of the cash account the user's agent is credited from."""
     return conn.execute(
@@ -663,7 +672,8 @@ async def test_two_users_signed_in_through_the_site_pay_from_their_own_signers_i
 
     a = await call_tool(ann_client, ann.access_token, "pay", pay_args("a"))
     pay_spy.amount = 1_000_000
-    b = await call_tool(bo_client, bo.access_token, "pay", pay_args("b"))
+    bo_task = await confirmed_task(conn, bo_client, bo)
+    b = await call_tool(bo_client, bo.access_token, "pay", {**pay_args("b"), "task_id": bo_task})
     assert a["status"] == b["status"] == "SETTLED"
 
     assert [call[2] for call in pay_spy.calls] == [users.agent_name(ann.user_id), users.agent_name(bo.user_id)]
@@ -698,29 +708,32 @@ async def test_users_do_not_share_a_budget_over_http(conn, browser, mailer, fake
     conn.execute(
         "UPDATE agents SET weekly_budget = %s WHERE name = %s", (db.usdc(750_000), users.agent_name(ann.user_id))
     )
+    pay_spy.amount = 250_000  # below half the task budget, so the task's big_share rule does not mask this check
     assert (await call_tool(ann_client, ann.access_token, "pay", pay_args("a")))["status"] == "SETTLED"
+    pay_spy.amount = 750_000
     over = await call_tool(ann_client, ann.access_token, "pay", pay_args("b"))
     assert over["status"] == "BLOCKED" and over["rule"] == "budget"
+    pay_spy.amount = 500_000
     for path in ("a", "b"):  # Bo's budget is untouched by Ann's spend
         assert (await call_tool(bo_client, bo.access_token, "pay", pay_args(path)))["status"] == "SETTLED"
-    assert users.account_view(conn, ann.user_id)["week_spend"] == 500_000
+    assert users.account_view(conn, ann.user_id)["week_spend"] == 250_000
     assert users.account_view(conn, bo.user_id)["week_spend"] == 1_000_000
 
 
 @pytest.mark.anyio
-async def test_users_cannot_move_each_others_price_baseline_over_http(browser, mailer, fake_wallets, pay_spy,
-                                                                      monkeypatch):
-    # Each pay starts its own task; let a new task spend $2.00 before confirmation, so only the guard decides here.
-    monkeypatch.setitem(guard.POLICY, "intent_provisional_budget", 5_000_000)
+async def test_users_cannot_move_each_others_price_baseline_over_http(conn, browser, mailer, fake_wallets, pay_spy):
     ann_client, ann = await connected(browser, mailer, "ann@example.com", ANN_IP)
     bo_client, bo = await connected(browser, mailer, "bo@example.com", BO_IP)
-    for path in ("a", "b", "c"):  # Ann's baseline for DataCo: $0.50
-        assert (await call_tool(ann_client, ann.access_token, "pay", pay_args(path)))["status"] == "SETTLED"
+    ann_task = await confirmed_task(conn, ann_client, ann)
+    bo_task = await confirmed_task(conn, bo_client, bo)
+    ann_args = {**pay_args("a"), "task_id": ann_task}
+    bo_args = {**pay_args("a"), "task_id": bo_task}
+    assert (await call_tool(ann_client, ann.access_token, "pay", ann_args))["status"] == "SETTLED"
 
     pay_spy.amount = 2_000_000
-    for path in ("d", "e"):  # Bo has no baseline of his own, so $2.00 is no jump for him, then becomes his baseline
-        assert (await call_tool(bo_client, bo.access_token, "pay", pay_args(path)))["status"] == "SETTLED"
-    surge = await call_tool(ann_client, ann.access_token, "pay", pay_args("f"))
+    # Use the same product URL: main scopes the price baseline by both user and product now.
+    assert (await call_tool(bo_client, bo.access_token, "pay", bo_args))["status"] == "SETTLED"
+    surge = await call_tool(ann_client, ann.access_token, "pay", ann_args)
     assert surge["status"] == "BLOCKED" and surge["rule"] == "price_jump"
 
 

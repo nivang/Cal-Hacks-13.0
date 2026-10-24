@@ -64,6 +64,7 @@ def test_history_flags_duplicate_and_baseline_after_settlement(conn):
     assert h == {
         "seller_status": "approved", "week_spend": 500_000, "seller_settled": (500_000,),
         "duplicate": True, "duplicate_of": attempt_id,
+        "lookalike_of": None, "url_paid_to": (DATACO,),
     }
 
 
