@@ -9,8 +9,11 @@ from types import SimpleNamespace
 import httpx
 import pytest
 from conftest import ASSET, DATACO, NETWORK
+from x402 import NoMatchingRequirementsError, x402Client
+from x402.mechanisms.evm.exact import ExactEvmScheme
+from x402.schemas import PaymentRequired, PaymentRequirements
 
-from sentinel import attempts, ledger, payments
+from sentinel import attempts, ledger, payments, results
 
 URL = "http://seller.test/benchmarks/email"
 REQUIREMENT = SimpleNamespace(network=NETWORK, asset=ASSET, amount="500000", pay_to=DATACO, max_timeout_seconds=300)
@@ -20,11 +23,14 @@ class FakeX402Client:
     """Stands in for x402Client. fail_signing makes create_payment_payload raise."""
 
     fail_signing = False
+    payload_error = None
 
     def register(self, *_args):
         pass
 
     async def create_payment_payload(self, _payment_required):
+        if self.payload_error:
+            raise self.payload_error
         if self.fail_signing:
             raise RuntimeError("signing exploded")
         return "payload"
@@ -54,7 +60,7 @@ class FakeHTTPClient:
 @pytest.fixture
 def seller(monkeypatch):
     """Patch the x402 pieces and the HTTP client; returns a dict to configure the fake seller per test."""
-    config = {"paywalled": True, "paid_status": 200, "paid_body": b'{"vendor":"DataCo"}'}
+    config = {"paywalled": True, "paid_status": 200, "paid_body": b'{"vendor":"DataCo"}', "paid_requests": []}
     fake_client = FakeX402Client()
     FakeHTTPClient.settle_hash, FakeHTTPClient.accepts = "0xtx", [REQUIREMENT]
 
@@ -62,6 +68,7 @@ def seller(monkeypatch):
         if not config["paywalled"]:
             return httpx.Response(200, content=b"free page")
         if "PAYMENT-SIGNATURE" in request.headers:
+            config["paid_requests"].append(request)
             if config.get("cancel_send"):
                 raise asyncio.CancelledError  # the call is cancelled while the payment is being sent
             return httpx.Response(config["paid_status"], content=config["paid_body"],
@@ -180,3 +187,59 @@ async def test_guard_block_is_raised_before_anything_is_signed(conn, seller):
     with pytest.raises(payments.PaymentRejected) as e:
         await pay(conn)
     assert e.value.rule == "cap"
+
+
+@pytest.mark.anyio
+async def test_real_x402_spend_cap_is_blocked_before_signing_and_persisted(conn, seller, monkeypatch):
+    """Exercise the actual SDK default cap; neither Coinbase nor the seller receives a payment."""
+    from unittest.mock import Mock
+
+    requirement = PaymentRequirements(
+        scheme="exact", network=NETWORK, asset=ASSET, amount="9000000", pay_to=DATACO,
+        max_timeout_seconds=300,
+    )
+    required = PaymentRequired(accepts=[requirement])
+    monkeypatch.setattr(FakeHTTPClient, "get_payment_required_response", lambda *_: required)
+    monkeypatch.setattr(payments, "x402Client", x402Client)
+    monkeypatch.setattr(payments, "ExactEvmScheme", ExactEvmScheme)
+    signer = Mock()
+    signer.address = DATACO
+
+    with pytest.raises(payments.PaymentRejected) as error:
+        await pay(conn, signer)
+
+    rejected = error.value
+    assert rejected.rule == "x402_cap"
+    assert "$1 per-payment cap" in rejected.detail
+    signer.sign_typed_data.assert_not_called()
+    assert seller["paid_requests"] == []
+    row = attempts.get_attempt(conn, rejected.attempt_id, "research-agent")
+    assert row is not None and row["status"] == "blocked" and row["decision"] == "BLOCK"
+    assert row["amount"] == 9_000_000 and row["tx_hash"] is None
+    assert results.from_attempt(row, None) == results.blocked(rejected.attempt_id, rejected.rule, rejected.detail)
+    assert conn.execute("SELECT COUNT(*) AS n FROM payment_attempts").fetchone()["n"] == 1
+    assert conn.execute("SELECT COUNT(*) AS n FROM journal_entries").fetchone()["n"] == 0
+
+    # Repeat the refusal: a blocked request must not hold a payment lock or count against the budget.
+    with pytest.raises(payments.PaymentRejected) as retry:
+        await pay(conn, signer)
+    assert retry.value.rule == "x402_cap"
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("message", [
+    "No payment requirements match registered schemes",
+    "All requirements filtered out by policies",
+    "All payment requirements were rejected by spend_controls.allowed_assets max_amount_per_payment",
+])
+async def test_other_x402_selection_errors_are_blocked_without_claiming_a_dollar_cap(conn, seller, message):
+    seller["client"].payload_error = NoMatchingRequirementsError(message)
+    with pytest.raises(payments.PaymentRejected) as error:
+        await pay(conn)
+    assert error.value.rule == "payment_option" and "$1" not in error.value.detail
+    assert seller["paid_requests"] == []
+    row = attempts.get_attempt(conn, error.value.attempt_id, "research-agent")
+    assert row is not None and row["status"] == "blocked" and row["decision"] == "BLOCK"
+    assert results.from_attempt(row, None).rule == "payment_option"
+    seller["client"].payload_error = None
+    assert (await pay(conn)).settled  # the refused attempt released its lock

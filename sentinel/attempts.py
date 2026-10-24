@@ -47,6 +47,14 @@ def set_attempt_status(conn: Connection, attempt_id: int, status: str) -> None:
     conn.execute("UPDATE payment_attempts SET status = %s WHERE id = %s", (status, attempt_id))
 
 
+def block_attempt(conn: Connection, attempt_id: int, rule: str, detail: str) -> None:
+    """Record a client refusal before signing, including its reason, and release the in flight lock."""
+    conn.execute(
+        "UPDATE payment_attempts SET status = 'blocked', decision = 'BLOCK', rule_fired = %s WHERE id = %s",
+        (f"{rule}: {detail}", attempt_id),
+    )
+
+
 def load_agent(conn: Connection, name: str) -> dict[str, Any]:
     """Return the agent's name, per payment cap and weekly budget (atomic units) as a dict that builds guard.Agent."""
     row = conn.execute(
@@ -97,6 +105,21 @@ def load_history(conn: Connection, agent: str, quote: dict[str, Any], policy: di
         "duplicate": duplicate is not None,
         "duplicate_of": duplicate["id"] if duplicate else None,
     }
+
+
+def seller_statuses(conn: Connection, agent: str, pay_tos: list[str], network: str, asset: str) -> dict[str, str]:
+    """What the seller lists say about each address for this agent, keyed by lower case address.
+
+    Same precedence as load_history: any applicable blocked row wins, then approved; addresses on no list, or only
+    pending, are left out, so the caller treats them as unlisted.
+    """
+    rows = conn.execute(
+        "SELECT lower(pay_to) AS pay_to, bool_or(status = 'blocked') AS blocked, bool_or(status = 'approved') AS ok"
+        " FROM sellers WHERE lower(pay_to) = ANY(%s) AND network = %s AND lower(asset) = lower(%s)"
+        " AND (agent_id IS NULL OR agent_id = %s) GROUP BY lower(pay_to)",
+        ([p.lower() for p in pay_tos], network, asset, agent_id(conn, agent)),
+    ).fetchall()
+    return {r["pay_to"]: "blocked" if r["blocked"] else "approved" for r in rows if r["blocked"] or r["ok"]}
 
 
 def week_spend(conn: Connection, aid: int, days: int) -> int:

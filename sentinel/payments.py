@@ -10,7 +10,8 @@ from dataclasses import asdict, dataclass
 from typing import Any
 
 import httpx
-from x402 import x402Client
+from x402 import NoMatchingRequirementsError, x402Client
+from x402.client_base import DEFAULT_MAX_AMOUNT_PER_PAYMENT
 from x402.http import x402HTTPClient
 from x402.mechanisms.evm import ClientEvmSigner
 from x402.mechanisms.evm.exact import ExactEvmScheme
@@ -155,8 +156,24 @@ async def _pay_with(
         try:
             # Sign only the requirement we vetted, not whatever else the seller listed.
             narrowed = payment_required.model_copy(update={"accepts": [requirement]})
-            payload = await client.create_payment_payload(narrowed)
+            try:
+                payload = await client.create_payment_payload(narrowed)
+            except NoMatchingRequirementsError as e:
+                # Selection and spend controls run before signing. Keep the SDK's advice about disabling
+                # safeguards out of the tool response, and persist the same block payment_status will show.
+                rule = "payment_option"
+                detail = "The x402 client could not accept the seller's payment option. Nothing was signed or sent."
+                if "spend_controls.max_amount_per_payment" in str(e):
+                    rule = "x402_cap"
+                    detail = (
+                        f"The seller's price exceeds the x402 client's {DEFAULT_MAX_AMOUNT_PER_PAYMENT} "
+                        "per-payment cap. Nothing was signed or sent."
+                    )
+                attempts.block_attempt(conn, attempt_id, rule, detail)
+                raise PaymentRejected(rule, detail, attempt_id) from e
             paid = await session.get(url, headers=http.encode_payment_signature_header(payload))
+        except PaymentRejected:
+            raise
         except BaseException as e:
             # Also on cancellation (a BaseException), so a dropped call never leaves the attempt approved.
             attempts.set_attempt_status(conn, attempt_id, "failed")  # releases the in flight lock

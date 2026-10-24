@@ -1901,7 +1901,7 @@ async def test_a_real_fastmcp_client_lists_and_calls_the_tools(app, browser, mai
     )
     async with Client(transport) as mcp:
         tools = await mcp.list_tools()
-        assert sorted(tool.name for tool in tools) == ["pay", "payment_status"]
+        assert sorted(tool.name for tool in tools) == ["discover", "pay", "payment_status"]
         result = await mcp.call_tool("pay", {"url": PAY_URL, "reason": REASON})
     assert result.structured_content is not None
     assert result.structured_content["status"] == "SETTLED"
