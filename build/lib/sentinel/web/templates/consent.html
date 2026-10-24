@@ -1,0 +1,50 @@
+{% extends "base.html" %}
+{% block title %}Connect an app · Sentinel{% endblock %}
+{% block content %}
+<h1 class="text-2xl font-semibold tracking-tight">Connect an app to your Sentinel wallet?</h1>
+<p class="mt-4 text-stone-700">If you allow it, this app can ask Sentinel to pay approved sellers from your wallet,
+  within your limits. Approval sends you back to:</p>
+<p class="mt-3 break-all rounded-md border border-stone-200 bg-white px-4 py-3 font-mono text-2xl font-semibold">{{ redirect_display }}</p>
+{% if not trusted %}
+<div class="mt-4 rounded-md border border-amber-300 bg-amber-50 p-4 text-sm text-amber-900" role="alert">
+  <p class="font-semibold">Caution</p>
+  <p class="mt-1">This is not Claude or an app on your own computer. Only continue if you know and trust
+    <span class="font-mono">{{ redirect_display }}</span>.</p>
+</div>
+{% endif %}
+{% if client_name %}
+<p class="mt-4 text-sm text-stone-600">Name the app gave itself (not checked by Sentinel):
+  <bdi class="font-medium text-stone-900">{{ client_name }}</bdi></p>
+{% endif %}
+<p class="mt-4 font-medium">Only continue if you just clicked Connect in your AI app.</p>
+<dl class="mt-6 space-y-2 rounded-md border border-stone-200 bg-white p-4 text-sm">
+  <div><dt class="inline text-stone-600">Signed in as</dt> <dd class="inline break-all font-medium">{{ email }}</dd></div>
+  <div><dt class="inline text-stone-600">Wallet</dt>
+    {% if wallet %}<dd class="inline break-all font-mono"><a href="{{ basescan_url }}" class="underline" rel="noreferrer">{{ wallet }}</a></dd>
+    {% else %}<dd class="inline">not ready yet</dd>{% endif %}</div>
+</dl>
+<p class="mt-3 text-sm text-stone-600">Fund the wallet with Base Sepolia USDC from
+  <a href="{{ faucet_url }}" class="underline" rel="noreferrer">faucet.circle.com</a>.</p>
+{% if wallet %}
+<form method="post" action="/oauth/consent" class="mt-6 flex gap-3">
+  <input type="hidden" name="req" value="{{ req }}">
+  <input type="hidden" name="csrf" value="{{ csrf }}">
+  <button type="submit" name="action" value="allow" class="rounded-md bg-stone-900 px-4 py-2 font-medium text-white">Allow</button>
+  <button type="submit" name="action" value="deny" class="rounded-md border border-stone-300 bg-white px-4 py-2 font-medium">Deny</button>
+</form>
+{% else %}
+<div class="mt-6 rounded-md border border-stone-200 bg-white p-4 text-sm">
+  <p>Your wallet could not be created yet, so no app can be connected. Try again:</p>
+  <form method="post" action="/account/wallet" class="mt-3">
+    <input type="hidden" name="csrf" value="{{ account_csrf }}">
+    <input type="hidden" name="next" value="{{ retry_next }}">
+    <button type="submit" class="rounded-md bg-stone-900 px-4 py-2 font-medium text-white">Create my wallet</button>
+  </form>
+  <form method="post" action="/oauth/consent" class="mt-3">
+    <input type="hidden" name="req" value="{{ req }}">
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <button type="submit" name="action" value="deny" class="rounded-md border border-stone-300 bg-white px-4 py-2 font-medium">Deny</button>
+  </form>
+</div>
+{% endif %}
+{% endblock %}

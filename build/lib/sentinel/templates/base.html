@@ -1,0 +1,52 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Sentinel ledger</title>
+<style>
+  :root { --bg: #f7f7f5; --card: #fff; --ink: #1c1c1c; --muted: #6b6b6b; --line: #e3e3df; --accent: #1f4fd1;
+          --ok: #1d7a46; --bad: #b42318; --warn: #9a6700; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #141414; --card: #1d1d1d; --ink: #ececec; --muted: #9a9a9a; --line: #333; --accent: #7aa2ff;
+            --ok: #4cc38a; --bad: #ff7b72; --warn: #e3b341; }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--ink); font: 14px/1.45 system-ui, -apple-system, sans-serif; }
+  main { max-width: 1200px; margin: 0 auto; padding: 24px 16px 64px; }
+  header { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+  h1 { font-size: 20px; margin: 0; }
+  h2 { font-size: 15px; margin: 0 0 10px; }
+  section { background: var(--card); border: 1px solid var(--line); border-radius: 8px; padding: 16px; margin-top: 16px; }
+  .scroll { overflow-x: auto; }
+  table { border-collapse: collapse; width: 100%; }
+  th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--line); vertical-align: top; }
+  th { color: var(--muted); font-weight: 600; font-size: 12px; white-space: nowrap; }
+  td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
+  .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; }
+  .muted { color: var(--muted); }
+  .tag { display: inline-block; padding: 1px 6px; border-radius: 4px; font-size: 12px; font-weight: 600; }
+  .ALLOW, .settled, .approved { color: var(--ok); }
+  .BLOCK, .blocked, .failed { color: var(--bad); }
+  .error { background: color-mix(in srgb, var(--bad) 12%, transparent); color: var(--bad); border-radius: 6px;
+           padding: 10px 12px; margin-top: 16px; }
+  form.inline { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; margin: 0; }
+  input { font: inherit; padding: 5px 8px; border: 1px solid var(--line); border-radius: 6px; background: var(--bg);
+          color: var(--ink); }
+  input.money { width: 90px; }
+  input.addr { width: 380px; max-width: 100%; }
+  button, a.button { font: inherit; padding: 5px 10px; border-radius: 6px; border: 1px solid var(--line);
+                     background: var(--card); color: var(--ink); cursor: pointer; text-decoration: none; }
+  button.primary, a.button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+  a { color: var(--accent); }
+  .bar { height: 6px; background: var(--line); border-radius: 3px; overflow: hidden; min-width: 120px; }
+  .bar > span { display: block; height: 100%; background: var(--accent); }
+  .reason { max-width: 320px; }
+</style>
+</head>
+<body>
+<main>
+{% block body %}{% endblock %}
+</main>
+</body>
+</html>

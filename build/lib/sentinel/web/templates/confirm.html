@@ -1,0 +1,13 @@
+{% extends "base.html" %}
+{% block title %}Confirm sign in · Sentinel{% endblock %}
+{% block content %}
+<h1 class="text-2xl font-semibold tracking-tight">Confirm sign in</h1>
+<p class="mt-4 text-stone-700">You are about to sign in to Sentinel.</p>
+<form method="post" action="/auth/verify" class="mt-6">
+  <input type="hidden" name="token" value="{{ token }}">
+  <button type="submit" class="rounded-md bg-stone-900 px-4 py-2 font-medium text-white">
+    Sign in as <span class="break-all">{{ email }}</span>
+  </button>
+</form>
+<p class="mt-6 text-sm text-stone-600">Did not ask to sign in? Close this page; nothing happens.</p>
+{% endblock %}
