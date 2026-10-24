@@ -62,7 +62,7 @@ def load_agent(conn: Connection, name: str) -> dict[str, Any]:
 def load_history(conn: Connection, agent: str, quote: dict[str, Any], policy: dict[str, int]) -> dict[str, Any]:
     """Read the ledger facts guard.evaluate needs for this agent and quote.
 
-    Returns seller_status, week_spend, seller_settled and duplicate as a dict that builds
+    Returns seller_status, week_spend, seller_settled, duplicate and duplicate_of as a dict that builds
     guard.History. Spend counts settled and in flight attempts so pending money is not double spent.
     Time windows are computed by the database clock.
     """
@@ -82,8 +82,9 @@ def load_history(conn: Connection, agent: str, quote: dict[str, Any], policy: di
         (quote["pay_to"], policy["price_jump_window"]),
     ).fetchall()
     duplicate = conn.execute(
-        "SELECT 1 AS hit FROM payment_attempts WHERE agent_id = %s AND lower(pay_to) = lower(%s) AND url = %s"
-        " AND amount = %s AND created_at >= now() - make_interval(secs => %s) AND status = ANY(%s) LIMIT 1",
+        "SELECT id FROM payment_attempts WHERE agent_id = %s AND lower(pay_to) = lower(%s) AND url = %s"
+        " AND amount = %s AND created_at >= now() - make_interval(secs => %s) AND status = ANY(%s)"
+        " ORDER BY id DESC LIMIT 1",
         (aid, quote["pay_to"], quote["url"], usdc(quote["amount"]), policy["duplicate_window_s"], LIVE_STATUSES),
     ).fetchone()
     return {
@@ -91,4 +92,35 @@ def load_history(conn: Connection, agent: str, quote: dict[str, Any], policy: di
         "week_spend": week_spend["total"] if week_spend else 0,
         "seller_settled": tuple(r["amount"] for r in settled),
         "duplicate": duplicate is not None,
+        "duplicate_of": duplicate["id"] if duplicate else None,
     }
+
+
+def find_live_id(conn: Connection, agent: str, quote: dict[str, Any]) -> int | None:
+    """Return the id of the live (pending or approved) attempt holding the in flight lock for this payment.
+
+    Lets a repeated request get the original request id back instead of a new row.
+    """
+    row = conn.execute(
+        "SELECT id FROM payment_attempts WHERE status IN ('pending', 'approved') AND dedupe_key = %s",
+        (f"{agent}|{quote['pay_to'].lower()}|{quote['url']}|{quote['amount']}",),
+    ).fetchone()
+    return row["id"] if row else None
+
+
+def get_attempt(conn: Connection, attempt_id: int, agent: str) -> dict[str, Any] | None:
+    """Return one attempt as a dict, or None if it does not exist or belongs to another agent.
+
+    Scoped to the calling agent so one agent can never read another's payments. Amount is in atomic units.
+    """
+    return conn.execute(
+        f"SELECT a.id, a.status, a.url, a.pay_to, (a.amount {ATOMIC})::bigint AS amount, a.decision, a.rule_fired,"
+        " a.tx_hash, a.reason FROM payment_attempts a WHERE a.id = %s AND a.agent_id = %s",
+        (attempt_id, agent_id(conn, agent)),
+    ).fetchone()
+
+
+def load_result(conn: Connection, attempt_id: int) -> str | None:
+    """Return the stored body of a settled attempt, or None if nothing was stored."""
+    row = conn.execute("SELECT body FROM attempt_results WHERE attempt_id = %s", (attempt_id,)).fetchone()
+    return row["body"] if row else None

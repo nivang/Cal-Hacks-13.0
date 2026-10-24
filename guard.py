@@ -48,15 +48,20 @@ class History:
     week_spend: int  # settled plus in flight spend inside the budget window
     seller_settled: tuple[int, ...] = ()  # this seller's most recent settled amounts, newest first
     duplicate: bool = False  # a matching attempt exists inside the duplicate window
+    duplicate_of: int | None = None  # id of that earlier attempt, so the caller can be pointed at it
 
 
 @dataclass(frozen=True)
 class Decision:
-    """The guard's verdict: ALLOW, BLOCK or NEEDS_APPROVAL, which rule decided, and a readable reason."""
+    """The guard's verdict: ALLOW, BLOCK or NEEDS_APPROVAL, which rule decided, and a plain English reason.
+
+    related_id is the earlier attempt a duplicate block refers to, if any.
+    """
 
     decision: str
     rule: str
     detail: str
+    related_id: int | None = None
 
 
 def usd(atomic: int) -> str:
@@ -65,20 +70,31 @@ def usd(atomic: int) -> str:
 
 
 def evaluate(agent: Agent, quote: Quote, history: History, policy: dict[str, int] = POLICY) -> Decision:
-    """Return the decision for this agent paying this quote, given what the ledger already holds."""
+    """Return the decision for this agent paying this quote, given what the ledger already holds.
+
+    detail is written for the owner and for the agent that asked, so it avoids jargon and rule names.
+    """
     if history.seller_status == "blocked":
-        return Decision(BLOCK, "seller", f"{quote.pay_to} is on the blocked list")
+        return Decision(BLOCK, "seller", f"The seller {quote.pay_to} is on the owner's blocked list.")
     # Unknown sellers pause for a human instead of blocking, so a new legitimate seller can be approved.
     if history.seller_status != "approved":
-        return Decision(NEEDS_APPROVAL, "seller", f"{quote.pay_to} is not an approved seller")
+        return Decision(
+            NEEDS_APPROVAL, "seller",
+            f"The seller {quote.pay_to} is not on the approved list, so the owner has to approve it first.",
+        )
 
     if quote.amount > agent.per_payment_cap:
-        return Decision(BLOCK, "cap", f"{usd(quote.amount)} exceeds per payment cap {usd(agent.per_payment_cap)}")
+        return Decision(
+            BLOCK, "cap",
+            f"{usd(quote.amount)} is over this agent's limit of {usd(agent.per_payment_cap)} per payment.",
+        )
 
     if history.week_spend + quote.amount > agent.weekly_budget:
+        days = policy["budget_window_days"]
         return Decision(
             BLOCK, "budget",
-            f"{usd(history.week_spend)} spent + {usd(quote.amount)} exceeds weekly budget {usd(agent.weekly_budget)}",
+            f"{usd(history.week_spend)} was already spent in the last {days} days, so adding {usd(quote.amount)} "
+            f"would go over the {usd(agent.weekly_budget)} budget.",
         )
 
     recent = sorted(history.seller_settled[: policy["price_jump_window"]])
@@ -86,14 +102,21 @@ def evaluate(agent: Agent, quote: Quote, history: History, policy: dict[str, int
         # Twice the median, so the comparison stays in integers even when the median falls between two prices.
         twice_median = recent[len(recent) // 2] + recent[(len(recent) - 1) // 2]
         if quote.amount * 2 > policy["price_jump_multiplier"] * twice_median:
+            ratio = quote.amount * 2 / twice_median  # display only
             return Decision(
                 BLOCK, "price_jump",
-                f"{usd(quote.amount)} is more than {policy['price_jump_multiplier']}x the median "
-                f"{usd(twice_median // 2)} of the last {len(recent)} settled",
+                f"This seller's price is {ratio:.1f}x its usual ({usd(quote.amount)} vs a typical "
+                f"{usd(twice_median // 2)}). More than {policy['price_jump_multiplier']}x is not allowed.",
             )
 
     if history.duplicate:
         minutes = policy["duplicate_window_s"] // 60
-        return Decision(BLOCK, "duplicate", f"same payTo, url and amount already attempted in the last {minutes} min")
+        earlier = f" (request {history.duplicate_of})" if history.duplicate_of else ""
+        return Decision(
+            BLOCK, "duplicate",
+            f"This exact payment (same seller, URL and amount) was already made or is in progress{earlier} "
+            f"within the last {minutes} minutes.",
+            related_id=history.duplicate_of,
+        )
 
-    return Decision(ALLOW, "clean", "all rules passed")
+    return Decision(ALLOW, "clean", "All checks passed.")

@@ -26,6 +26,15 @@ def sha256_hex(data: bytes | str) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
+def as_text(body: bytes | str) -> str:
+    """Decode a response body for storage. Postgres text cannot hold NUL bytes, so they are replaced.
+
+    The hash is taken over the raw bytes, so this never weakens the proof of what was received.
+    """
+    text = body if isinstance(body, str) else body.decode("utf-8", errors="replace")
+    return text.replace("\x00", "\ufffd")
+
+
 def post_entry(
     conn: Connection,
     memo: str,
@@ -55,12 +64,19 @@ def post_entry(
     return entry_id
 
 
-def settle_attempt(conn: Connection, attempt_id: int, tx_hash: str, response_body: bytes | str) -> int:
+def settle_attempt(
+    conn: Connection,
+    attempt_id: int,
+    tx_hash: str,
+    response_body: bytes | str,
+    content_type: str | None = None,
+) -> int:
     """Mark an approved attempt settled and post Dr expense / Cr USDC Cash in one transaction.
 
-    Stores the tx hash and the response hash. Returns the journal entry id. Only approved attempts
-    can settle, so a blocked or failed attempt can never reach the books. The row is locked while we
-    work so two settlers cannot both book the same payment.
+    Stores the tx hash, the response hash and the body itself (write once, in attempt_results) so the
+    agent can collect what it paid for later. All of it commits together or not at all. Returns the
+    journal entry id. Only approved attempts can settle, so a blocked or failed attempt can never reach
+    the books. The row is locked while we work so two settlers cannot both book the same payment.
     """
     with transaction(conn):
         row = conn.execute(
@@ -76,6 +92,10 @@ def settle_attempt(conn: Connection, attempt_id: int, tx_hash: str, response_bod
             "UPDATE payment_attempts SET status = 'settled', tx_hash = %s, response_hash = %s, settled_at = now()"
             " WHERE id = %s",
             (tx_hash, sha256_hex(response_body), attempt_id),
+        )
+        conn.execute(
+            "INSERT INTO attempt_results (attempt_id, body, content_type) VALUES (%s, %s, %s)",
+            (attempt_id, as_text(response_body), content_type),
         )
         return post_entry(
             conn,

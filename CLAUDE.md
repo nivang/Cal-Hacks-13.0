@@ -9,7 +9,7 @@ Sentinel is an MCP server that holds the wallet so the agent never does. Every p
 - Network: Base Sepolia (eip155:84532), USDC, CDP facilitator
 - Buyer: CDP server wallet account named "sentinel" (0xE9497e03fC13E38A8dBA969470A832f30749Da4A)
 - Sellers: CDP accounts seller-a (DataCo), seller-b (InsightLab), seller-c (scammer)
-- Secrets live in .env (gitignored): DATABASE_URL, CDP_API_KEY_ID, CDP_API_KEY_SECRET, CDP_WALLET_SECRET, SELLER_A_ADDRESS, SELLER_B_ADDRESS, SELLER_C_ADDRESS. Never print or commit them.
+- Secrets live in .env (gitignored): SENTINEL_AGENT_TOKEN, DATABASE_URL, CDP_API_KEY_ID, CDP_API_KEY_SECRET, CDP_WALLET_SECRET, SELLER_A_ADDRESS, SELLER_B_ADDRESS, SELLER_C_ADDRESS. Never print or commit them.
 
 ## Status
 - Phase 0 done: keys, wallets, buyer funded (about 9.5 USDC left, CDP faucet is rate limited, use faucet.circle.com)
@@ -18,7 +18,8 @@ Sentinel is an MCP server that holds the wallet so the agent never does. Every p
 - Phase 3 done: db.py, attempts.py, ledger.py (Supabase Postgres, project sentinel, schema in migrations/) record every attempt and post balanced, append only journal entries. See README.
 - Phase 4 done: guard.py evaluate(agent, quote, history) is pure; thresholds in policy.json; pytest is the answer key.
 - Refactor done (no behavior change): split db into db/attempts/ledger, demo.py runs buy/surge/scam, pinned requirements, ruff + mypy clean.
-- Not built yet: MCP server tools, human approval flow, month end flags, QuickBooks export.
+- Phase 5 done: mcp_server.py (FastMCP 4, stdio + Streamable HTTP) exposes pay and payment_status; identity via agents.token_hash (auth.py); results.py wording; urls.py SSRF guard; attempt_results stores paid bodies (migration 006). No approve tool, by design.
+- Not built yet: human approval flow (Phase 6), month end flags, QuickBooks export.
 
 ## Rules
 - Amounts are integers in USDC atomic units (6 decimals). $0.50 = 500000. Never floats.
@@ -30,6 +31,7 @@ Sentinel is an MCP server that holds the wallet so the agent never does. Every p
 ## Run
 - uvicorn sellers:app --port 4000
 - python demo.py buy|surge|scam
+- python mcp_server.py [--transport http]; python auth.py issue research-agent --env-file .env
 - pytest -v; ruff check .; mypy *.py
 
 ## Preferences

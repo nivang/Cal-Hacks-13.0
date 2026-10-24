@@ -83,3 +83,23 @@ def test_median_uses_middle_of_even_history():
 @pytest.mark.parametrize("amount", [1, 499_999])
 def test_cheaper_than_history_is_fine(amount):
     assert evaluate(AGENT, quote(amount), history(seller_settled=(500_000,) * 5)).decision == ALLOW
+
+
+# Messages are shown to the owner and to the agent, so they must be plain English with the numbers in them.
+
+def test_price_jump_message_states_the_multiple():
+    d = evaluate(AGENT, quote(2 * USDC), history(seller_settled=(500_000,) * 5))
+    assert "4.0x" in d.detail and "$2.00" in d.detail and "$0.50" in d.detail
+
+
+def test_cap_budget_and_seller_messages_name_the_numbers():
+    assert "$15.00" in evaluate(AGENT, quote(15 * USDC), history()).detail
+    assert "$10.00" in evaluate(AGENT, quote(15 * USDC), history()).detail
+    assert "$49.80" in evaluate(AGENT, quote(500_000), history(week_spend=49_800_000)).detail
+    assert SCAMMER in evaluate(AGENT, quote(USDC, SCAMMER), history(seller_status=None)).detail
+
+
+def test_duplicate_message_points_at_the_earlier_request():
+    d = evaluate(AGENT, quote(500_000), history(duplicate=True, duplicate_of=7))
+    assert d.related_id == 7 and "request 7" in d.detail
+    assert evaluate(AGENT, quote(500_000), history(duplicate=True)).related_id is None

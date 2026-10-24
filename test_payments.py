@@ -41,33 +41,42 @@ def test_authorize_allows_a_clean_quote_and_records_approved(conn):
 
 
 def test_authorize_blocks_over_cap_and_still_writes_a_row(conn):
-    with pytest.raises(payments.PaymentRejected, match="cap"):
+    with pytest.raises(payments.PaymentRejected, match="cap") as e:
         payments.authorize(conn, "research-agent", None, quote(amount=15_000_000))
-    assert conn.execute("SELECT status, rule_fired FROM payment_attempts").fetchone()["status"] == "blocked"
+    row = conn.execute("SELECT id, status FROM payment_attempts").fetchone()
+    assert row["status"] == "blocked"
+    assert (e.value.rule, e.value.attempt_id) == ("cap", row["id"])
+    assert "$15.00" in e.value.detail
 
 
 def test_authorize_pauses_unlisted_seller_for_approval_and_signs_nothing(conn):
-    with pytest.raises(payments.NeedsApproval):
+    with pytest.raises(payments.NeedsApproval) as e:
         payments.authorize(conn, "research-agent", None, quote(amount=9_000_000, pay_to=SCAMMER, url="http://x/premium"))
-    row = conn.execute("SELECT status, decision FROM payment_attempts").fetchone()
+    row = conn.execute("SELECT id, status, decision FROM payment_attempts").fetchone()
     assert (row["status"], row["decision"]) == ("pending", "NEEDS_APPROVAL")
+    assert e.value.attempt_id == row["id"] and e.value.rule == "seller"
 
 
 def test_authorize_blocks_a_second_identical_payment_in_flight(conn):
-    payments.authorize(conn, "research-agent", None, quote())
-    with pytest.raises(payments.PaymentRejected, match="duplicate"):
+    first = payments.authorize(conn, "research-agent", None, quote())
+    with pytest.raises(payments.PaymentRejected, match="duplicate") as e:
         payments.authorize(conn, "research-agent", None, quote())
     assert conn.execute("SELECT COUNT(*) AS n FROM payment_attempts WHERE status = 'blocked'").fetchone()["n"] == 1
+    assert e.value.related_id == first and e.value.attempt_id != first
 
 
 def test_authorize_blocks_a_price_surge_after_a_settled_purchase(conn):
     ledger.settle_attempt(conn, payments.authorize(conn, "research-agent", None, quote()), "0xtx", b"body")
-    with pytest.raises(payments.PaymentRejected, match="price_jump"):
+    with pytest.raises(payments.PaymentRejected, match="price_jump") as e:
         payments.authorize(conn, "research-agent", None, quote(amount=2_000_000))
+    assert "4.0x" in e.value.detail
 
 
-def test_repeating_a_paused_request_keeps_one_pending_row(conn):
+def test_repeating_a_paused_request_keeps_one_pending_row_and_returns_its_id(conn):
+    ids = []
     for _ in range(2):
-        with pytest.raises(payments.NeedsApproval):
+        with pytest.raises(payments.NeedsApproval) as e:
             payments.authorize(conn, "research-agent", None, quote(amount=9_000_000, pay_to=SCAMMER, url="http://x/premium"))
+        ids.append(e.value.attempt_id)
     assert conn.execute("SELECT COUNT(*) AS n FROM payment_attempts WHERE status = 'pending'").fetchone()["n"] == 1
+    assert ids[0] == ids[1] is not None

@@ -61,9 +61,13 @@ def test_history_for_unlisted_seller_is_none(conn):
 
 
 def test_history_flags_duplicate_and_baseline_after_settlement(conn):
-    ledger.settle_attempt(conn, approve(conn), "0xtx", b"body")
+    attempt_id = approve(conn)
+    ledger.settle_attempt(conn, attempt_id, "0xtx", b"body")
     h = attempts.load_history(conn, "research-agent", Q, guard.POLICY)
-    assert h == {"seller_status": "approved", "week_spend": 500_000, "seller_settled": (500_000,), "duplicate": True}
+    assert h == {
+        "seller_status": "approved", "week_spend": 500_000, "seller_settled": (500_000,),
+        "duplicate": True, "duplicate_of": attempt_id,
+    }
 
 
 def test_agent_limits_come_back_in_atomic_units(conn):
@@ -123,14 +127,55 @@ def test_a_failure_inside_settlement_rolls_back_the_status_change(conn, monkeypa
 
 # Ledger integrity enforced by the database itself
 
+def test_settlement_stores_the_body_and_its_hash(conn):
+    attempt_id = approve(conn)
+    ledger.settle_attempt(conn, attempt_id, "0xtx", b'{"open_rate": 0.214}', "application/json")
+    assert attempts.load_result(conn, attempt_id) == '{"open_rate": 0.214}'
+    row = conn.execute("SELECT content_type FROM attempt_results WHERE attempt_id = %s", (attempt_id,)).fetchone()
+    assert row["content_type"] == "application/json"
+
+
+def test_body_with_nul_bytes_and_bad_utf8_still_settles(conn):
+    attempt_id = approve(conn)
+    ledger.settle_attempt(conn, attempt_id, "0xtx", b"a\x00b\xff")
+    assert attempts.load_result(conn, attempt_id) == "a\ufffdb\ufffd"
+    assert count(conn, "journal_entries") == 1
+
+
+def test_a_failed_attempt_has_no_stored_body(conn):
+    attempt_id = approve(conn)
+    attempts.set_attempt_status(conn, attempt_id, "failed")
+    assert attempts.load_result(conn, attempt_id) is None
+
+
+def test_get_attempt_is_scoped_to_the_calling_agent(conn):
+    attempt_id = approve(conn)
+    assert attempts.get_attempt(conn, attempt_id, "research-agent")["status"] == "approved"
+    db.init(conn)
+    conn.execute(
+        "INSERT INTO agents (name, per_payment_cap, weekly_budget, expense_account_id)"
+        " VALUES ('other-agent', 1, 1, %s)", (db.account_id(conn, "6100"),),
+    )
+    assert attempts.get_attempt(conn, attempt_id, "other-agent") is None
+    assert attempts.get_attempt(conn, 999_999_999, "research-agent") is None
+
+
+def test_find_live_id_returns_the_attempt_holding_the_lock(conn):
+    attempt_id = approve(conn)
+    assert attempts.find_live_id(conn, "research-agent", Q) == attempt_id
+    attempts.set_attempt_status(conn, attempt_id, "failed")
+    assert attempts.find_live_id(conn, "research-agent", Q) is None
+
+
 def test_ledger_tables_reject_update_delete_and_truncate(conn):
     entry_id = ledger.settle_attempt(conn, approve(conn), "0xtx", b"body")
     conn.execute(
         "INSERT INTO approvals (attempt_id, approver, decision) SELECT id, 'human', 'approved' FROM payment_attempts"
     )
     conn.execute("SET CONSTRAINTS ALL IMMEDIATE")  # run the balance checks now so TRUNCATE has no pending events
-    for table in ("journal_entries", "journal_lines", "approvals"):
-        rejected(conn, f"UPDATE {table} SET id = id", match="append only")
+    for table in ("journal_entries", "journal_lines", "approvals", "attempt_results"):
+        key = "attempt_id" if table == "attempt_results" else "id"
+        rejected(conn, f"UPDATE {table} SET {key} = {key}", match="append only")
         rejected(conn, f"DELETE FROM {table}", match="append only")
         rejected(conn, f"TRUNCATE {table} CASCADE", match="append only")
     assert count(conn, "journal_entries", f"WHERE id = {entry_id}") == 1

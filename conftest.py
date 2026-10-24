@@ -45,3 +45,9 @@ def conn(test_schema: str) -> Iterator[db.Connection]:
     with db.connection() as c, db.transaction(c, rollback=True):
         db.use_schema(c, test_schema)
         yield c
+
+
+@pytest.fixture(params=["asyncio"])
+def anyio_backend(request: pytest.FixtureRequest) -> str:
+    """Run async tests on asyncio only (the trio backend is not installed)."""
+    return str(request.param)

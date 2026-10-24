@@ -8,6 +8,10 @@ Sentinel holds the wallet so the agent never does. Every payment request passes 
 
 | File | Job |
 |---|---|
+| `mcp_server.py` | The MCP server an agent talks to: tools `pay` and `payment_status`, agent identity, wallet |
+| `results.py` | The one result shape the tools return, and the plain English for each outcome |
+| `auth.py` | Agent bearer tokens: issue, rotate, verify (stored only as a hash) |
+| `urls.py` | Refuses unsafe URLs (file://, private or metadata addresses) before anything is fetched |
 | `payments.py` | The x402 flow: ask for a price, build a quote, run the guard, sign, pay, record |
 | `guard.py` | Pure policy: ALLOW, BLOCK or NEEDS_APPROVAL for one quote |
 | `policy.json` | Guard thresholds (price jump multiplier and window, duplicate window, budget window) |
@@ -39,13 +43,49 @@ You need a CDP account, an API key and a wallet secret from https://portal.cdp.c
 
 Each run prints the outcome and the trial balance. Blocked and paused attempts still write a row.
 
+## MCP server
+
+The agent never holds the wallet. It connects to Sentinel over MCP and has two tools:
+
+- `pay(url, reason)`: buy a paywalled URL. `reason` must be specific (20 to 500 characters); the owner reads it next to the seller's address when approving. Returns one of `SETTLED` (body, amount, tx hash), `BLOCKED` (the rule and a plain English reason), `PENDING` (request id, waiting for the owner), `FREE`, or `FAILED`.
+- `payment_status(request_id)`: the current state of one of the agent's own requests, including the paid body once it has settled.
+
+There is no approve tool on purpose: the agent that asks can never be the one that approves.
+
+Each agent has its own bearer token. Create one (it is written to `.env` and never printed):
+
+    python auth.py issue research-agent --env-file .env
+
+Run it:
+
+    python mcp_server.py                       # stdio: Claude Desktop, Claude Code, the Inspector
+    python mcp_server.py --transport http      # Streamable HTTP at http://127.0.0.1:8000/mcp, bearer token required
+
+Over stdio the agent's identity is `SENTINEL_AGENT_TOKEN` (checked against the database at startup). Over HTTP every request must carry `Authorization: Bearer <token>`; a missing or wrong token gets a 401. For the local demo set `SENTINEL_ALLOW_LOCAL_URLS=1` in `.env` so the localhost test sellers can be reached; leave it unset on a hosted server.
+
+Try it with the MCP Inspector (start the test sellers first):
+
+    uvicorn sellers:app --port 4000
+    npx @modelcontextprotocol/inspector .venv/bin/python mcp_server.py        # opens the web UI
+
+    # or without a browser:
+    npx @modelcontextprotocol/inspector --cli .venv/bin/python mcp_server.py --method tools/call --tool-name pay \
+      --tool-arg url=http://localhost:4000/benchmarks/email \
+      --tool-arg "reason=Need 2026 email open-rate benchmarks for the Q3 report; DataCo is named in the brief."
+
+Use it from Claude Code:
+
+    claude mcp add sentinel -- "$PWD/.venv/bin/python" "$PWD/mcp_server.py"
+
+Notes: the payment path makes blocking database calls inside async code, which is fine for a demo but adds a few tens of milliseconds per call. Everything an agent sends (`reason`) and receives (`body`) is untrusted text; escape it in any dashboard.
+
 ## Tests and checks
 
     pytest -v                            # database tests run in the "test" schema of your Supabase database
     ruff check .
     mypy *.py
 
-`test_guard.py` is the answer key for the guard: six planted cases (unknown seller, cap, budget, price jump, duplicate, clean) plus edge cases. `test_store.py` and `test_payments.py` cover the attempt log, the in flight lock and the books.
+`test_guard.py` is the answer key for the guard: six planted cases (unknown seller, cap, budget, price jump, duplicate, clean) plus edge cases. `test_store.py` and `test_payments.py` cover the attempt log, the in flight lock and the books. `test_pay_flow.py` runs the whole payment flow against a fake seller and covers every way an approved payment can fail. `test_mcp_server.py` calls the tools through an in memory MCP client and checks each result the agent can see, agent identity and the HTTP 401s.
 
 ## Guard
 
@@ -94,4 +134,4 @@ To let someone view the data, set the claim on their auth user:
 
 ## Not built yet
 
-MCP server tools, the human approval step (NEEDS_APPROVAL currently stops the payment and leaves a pending row), month end flags and the QuickBooks export.
+The human approval step (a paused payment stays PENDING; nothing resumes it yet), month end flags and the QuickBooks export.

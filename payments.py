@@ -26,20 +26,52 @@ USDC_BASE_SEPOLIA = "0x036CbD53842c5426634e7929541eC2318f3dCF7e"
 
 @dataclass
 class PayResult:
-    """Outcome of a request: the HTTP status and body, plus the tx hash and quote if a payment was made."""
+    """Outcome of a request: the HTTP status and body, plus the quote and tx hash if a payment was made.
+
+    settled is True only when the seller returned the data and the payment was booked. A free resource
+    has no quote and no attempt_id, since nothing was paid or recorded.
+    """
 
     status: int
     body: str
     tx_hash: str | None = None
     quote: guard.Quote | None = None
+    attempt_id: int | None = None
+    settled: bool = False
+    content_type: str | None = None
 
 
 class PaymentRejected(Exception):
-    """The guard blocked the payment, or the seller offered nothing we can pay. Nothing was signed."""
+    """The guard blocked the payment, or the seller offered nothing we can pay. Nothing was signed.
+
+    rule is the guard rule that fired, detail is the plain English reason, attempt_id is the blocked row in
+    the log, and related_id is the earlier attempt a duplicate block refers to. str() is "rule: detail".
+    """
+
+    def __init__(self, rule: str, detail: str, attempt_id: int | None = None, related_id: int | None = None):
+        super().__init__(f"{rule}: {detail}")
+        self.rule, self.detail = rule, detail
+        self.attempt_id, self.related_id = attempt_id, related_id
 
 
 class NeedsApproval(Exception):
-    """The guard paused the payment for a human. Nothing was signed; a pending attempt row exists."""
+    """The guard paused the payment for a human. Nothing was signed; a pending attempt row exists (attempt_id)."""
+
+    def __init__(self, rule: str, detail: str, attempt_id: int | None = None):
+        super().__init__(f"{rule}: {detail}")
+        self.rule, self.detail, self.attempt_id = rule, detail, attempt_id
+
+
+class PaymentFailed(Exception):
+    """The payment was approved but did not complete.
+
+    If tx_hash is set the money moved onchain but could not be booked, and the attempt is left approved on
+    purpose so it shows up for reconciliation. Otherwise the attempt is marked failed and the lock is released.
+    """
+
+    def __init__(self, message: str, attempt_id: int, tx_hash: str | None = None):
+        super().__init__(message)
+        self.attempt_id, self.tx_hash = attempt_id, tx_hash
 
 
 def select_requirement(payment_required: Any) -> Any:
@@ -48,7 +80,7 @@ def select_requirement(payment_required: Any) -> Any:
         if requirement.network == NETWORK and requirement.asset.lower() == USDC_BASE_SEPOLIA.lower():
             return requirement
     offered = [(r.network, r.asset) for r in payment_required.accepts]
-    raise PaymentRejected(f"no Base Sepolia USDC option in accepts: {offered}")
+    raise PaymentRejected("payment_option", f"The seller offers no Base Sepolia USDC payment option: {offered}")
 
 
 def build_quote(url: str, requirement: Any) -> guard.Quote:
@@ -67,7 +99,7 @@ def authorize(conn: db.Connection, agent: str, reason: str | None, quote: guard.
     """Run the guard and record the attempt. Returns the approved attempt id, or raises.
 
     BLOCK raises PaymentRejected and NEEDS_APPROVAL raises NeedsApproval. Both leave a row in the log
-    so the ledger shows what did not happen.
+    so the ledger shows what did not happen, and both carry that row's id.
     """
     quote_dict = asdict(quote)
     history = guard.History(**attempts.load_history(conn, agent, quote_dict, guard.POLICY))
@@ -75,15 +107,21 @@ def authorize(conn: db.Connection, agent: str, reason: str | None, quote: guard.
     rule = f"{decision.rule}: {decision.detail}"
 
     if decision.decision == guard.BLOCK:
-        attempts.record_attempt(conn, agent, quote.url, reason, quote_dict, "blocked", decision.decision, rule)
-        raise PaymentRejected(rule)
+        blocked_id = attempts.record_attempt(
+            conn, agent, quote.url, reason, quote_dict, "blocked", decision.decision, rule
+        )
+        raise PaymentRejected(decision.rule, decision.detail, blocked_id, decision.related_id)
     if decision.decision == guard.NEEDS_APPROVAL:
+        pending_id: int | None
         try:
             with db.transaction(conn):
-                attempts.record_attempt(conn, agent, quote.url, reason, quote_dict, "pending", decision.decision, rule)
+                pending_id = attempts.record_attempt(
+                    conn, agent, quote.url, reason, quote_dict, "pending", decision.decision, rule
+                )
         except db.UniqueViolation:
-            pass  # the same request is already waiting for a human, so do not log a second pending row
-        raise NeedsApproval(rule)
+            # The same request is already waiting for a human: do not log a second pending row, reuse its id.
+            pending_id = attempts.find_live_id(conn, agent, quote_dict)
+        raise NeedsApproval(decision.rule, decision.detail, pending_id)
     try:
         with db.transaction(conn):  # own savepoint, so a lock clash does not poison an outer transaction
             return attempts.record_attempt(
@@ -91,16 +129,20 @@ def authorize(conn: db.Connection, agent: str, reason: str | None, quote: guard.
             )
     except db.UniqueViolation:
         # Another call already holds the in flight lock for this exact payment.
-        rule = "duplicate: identical payment already in flight"
-        attempts.record_attempt(conn, agent, quote.url, reason, quote_dict, "blocked", guard.BLOCK, rule)
-        raise PaymentRejected(rule) from None
+        live_id = attempts.find_live_id(conn, agent, quote_dict)
+        detail = f"An identical payment is already in progress (request {live_id})."
+        blocked_id = attempts.record_attempt(
+            conn, agent, quote.url, reason, quote_dict, "blocked", guard.BLOCK, f"duplicate: {detail}"
+        )
+        raise PaymentRejected("duplicate", detail, blocked_id, live_id) from None
 
 
 async def pay_for(url: str, account: Any, agent: str = "research-agent", reason: str | None = None) -> PayResult:
     """Fetch url, paying the seller if it returns 402 and the guard allows it.
 
     account is the CDP account that signs. Returns the response and, if paid, the tx hash. Raises
-    PaymentRejected or NeedsApproval when the guard stops the payment.
+    PaymentRejected or NeedsApproval when the guard stops the payment, and PaymentFailed when an
+    approved payment does not complete.
     """
     with db.connection() as conn:
         return await _pay_with(conn, url, account, agent, reason)
@@ -123,26 +165,33 @@ async def _pay_with(conn: db.Connection, url: str, account: Any, agent: str, rea
         try:
             requirement = select_requirement(payment_required)
         except PaymentRejected as e:
-            attempts.record_attempt(conn, agent, url, reason, status="blocked", decision=guard.BLOCK, rule_fired=str(e))
+            e.attempt_id = attempts.record_attempt(
+                conn, agent, url, reason, status="blocked", decision=guard.BLOCK, rule_fired=str(e)
+            )
             raise
         quote = build_quote(url, requirement)
         attempt_id = authorize(conn, agent, reason, quote)
 
-        # Sign only the requirement we vetted, not whatever else the seller listed.
-        narrowed = payment_required.model_copy(update={"accepts": [requirement]})
-        payload = await client.create_payment_payload(narrowed)
         try:
+            # Sign only the requirement we vetted, not whatever else the seller listed.
+            narrowed = payment_required.model_copy(update={"accepts": [requirement]})
+            payload = await client.create_payment_payload(narrowed)
             paid = await session.get(url, headers=http.encode_payment_signature_header(payload))
-        except Exception:
-            attempts.set_attempt_status(conn, attempt_id, "failed")
-            raise
+        except Exception as e:
+            attempts.set_attempt_status(conn, attempt_id, "failed")  # releases the in flight lock
+            raise PaymentFailed("signing or sending the payment failed", attempt_id) from e
 
     try:
         tx_hash: str | None = http.get_payment_settle_response(paid.headers.get).transaction
     except ValueError:  # no PAYMENT-RESPONSE header, so nothing settled
         tx_hash = None
     if paid.status_code == 200 and tx_hash:
-        ledger.settle_attempt(conn, attempt_id, tx_hash, paid.content)
-    else:
-        attempts.set_attempt_status(conn, attempt_id, "failed")
-    return PayResult(paid.status_code, paid.text, tx_hash, quote)
+        content_type = paid.headers.get("content-type")
+        try:
+            ledger.settle_attempt(conn, attempt_id, tx_hash, paid.content, content_type)
+        except Exception as e:
+            # Money moved but the books did not take it. Leave the attempt approved so it stands out.
+            raise PaymentFailed("payment went through but could not be recorded", attempt_id, tx_hash) from e
+        return PayResult(paid.status_code, paid.text, tx_hash, quote, attempt_id, True, content_type)
+    attempts.set_attempt_status(conn, attempt_id, "failed")
+    return PayResult(paid.status_code, paid.text, tx_hash, quote, attempt_id, False)
