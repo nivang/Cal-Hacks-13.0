@@ -65,13 +65,18 @@ def load_history(conn: Connection, agent: str, quote: dict[str, Any], policy: di
     Returns seller_status, week_spend, seller_settled, duplicate and duplicate_of as a dict that builds
     guard.History. Spend counts settled and in flight attempts so money on its way out is not double spent.
     seller_settled is this agent's own last settled prices from the seller, so the price jump baseline is per
-    agent: one user can neither see nor move another's. Only the approved seller list is shared by everyone.
+    agent: one user can neither see nor move another's. seller_status follows the seller lists: the operator's rows
+    (agent_id null) apply to every agent and this agent's own rows to it alone; any applicable blocked row wins, then
+    any approved row, then whatever else is listed (pending), else None. So an operator block cannot be overridden by
+    a personal approval, and one user's approval never opens a seller for another agent.
     Time windows are computed by the database clock.
     """
     aid = agent_id(conn, agent)
     seller = conn.execute(
-        "SELECT status FROM sellers WHERE lower(pay_to) = lower(%s) AND network = %s AND lower(asset) = lower(%s)",
-        (quote["pay_to"], quote["network"], quote["asset"]),
+        "SELECT status FROM sellers WHERE lower(pay_to) = lower(%s) AND network = %s AND lower(asset) = lower(%s)"
+        " AND (agent_id IS NULL OR agent_id = %s)"
+        " ORDER BY CASE status WHEN 'blocked' THEN 0 WHEN 'approved' THEN 1 ELSE 2 END, id LIMIT 1",
+        (quote["pay_to"], quote["network"], quote["asset"], aid),
     ).fetchone()
     settled = conn.execute(
         f"SELECT (amount {ATOMIC})::bigint AS amount FROM payment_attempts"

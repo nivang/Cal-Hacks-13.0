@@ -1,6 +1,8 @@
-"""What only the owner can do: keep the seller list and each agent's limits, and read the books.
+"""What only the owner can do: keep the operator's seller list and each agent's limits, and read the books.
 
-The agent has no path here. mcp_server.py exposes pay and payment_status only; these functions are called by the
+The operator's list is the sellers rows with agent_id null; they apply to every agent. A signed in user keeps a
+personal list of their own (web/books.py) and can never touch these rows. The agent has no path here.
+mcp_server.py exposes pay and payment_status only; these functions are called by the
 ledger page (ledger_app.py), which sits behind the owner's password. No web code in this file, so it is tested
 like attempts.py. Amounts go in and out as integer atomic units; parse_usd is the one place a typed dollar
 amount becomes an integer.
@@ -49,7 +51,8 @@ def parse_usd(text: str) -> int:
 def upsert_seller(conn: Connection, name: str, pay_to: str, status: str = "approved") -> int:
     """Approve or block a seller's address, adding it if it is new. Returns the seller id.
 
-    Matches case insensitively, the same way the guard looks sellers up, so one address is never listed twice.
+    This is the operator's list (agent_id null) and never touches a user's personal rows. Matches case insensitively,
+    the same way the guard looks sellers up, so one address is never listed twice.
     added_by and added_at record the owner's latest decision, which the ledger shows as who listed the seller.
     """
     name, pay_to = name.strip(), pay_to.strip()
@@ -61,7 +64,8 @@ def upsert_seller(conn: Connection, name: str, pay_to: str, status: str = "appro
         raise ValueError(f"status must be one of {SELLER_STATUSES}")
     row = conn.execute(
         "UPDATE sellers SET name = %s, status = %s, added_by = 'owner', added_at = now()"
-        " WHERE lower(pay_to) = lower(%s) AND network = %s AND lower(asset) = lower(%s) RETURNING id",
+        " WHERE agent_id IS NULL AND lower(pay_to) = lower(%s) AND network = %s AND lower(asset) = lower(%s)"
+        " RETURNING id",
         (name, status, pay_to, NETWORK, USDC_BASE_SEPOLIA),
     ).fetchone()
     if row is not None:
@@ -88,9 +92,10 @@ def set_agent_limits(conn: Connection, agent: str, per_payment_cap: int, weekly_
 
 
 def list_sellers(conn: Connection) -> list[dict[str, Any]]:
-    """Every listed seller, approved first, then by name."""
+    """Every seller on the operator's list (agent_id null), approved first, then by name."""
     return conn.execute(
-        "SELECT id, name, pay_to, status, added_by, added_at FROM sellers ORDER BY status = 'approved' DESC, name, id"
+        "SELECT id, name, pay_to, status, added_by, added_at FROM sellers WHERE agent_id IS NULL"
+        " ORDER BY status = 'approved' DESC, name, id"
     ).fetchall()
 
 
@@ -104,19 +109,25 @@ def list_agents(conn: Connection, budget_window_days: int) -> list[dict[str, Any
     return [{**r, "week_spend": attempts.week_spend(conn, r["id"], budget_window_days)} for r in rows]
 
 
-def list_attempts(conn: Connection, limit: int = 200) -> list[dict[str, Any]]:
+def list_attempts(conn: Connection, limit: int = 200, agent_id: int | None = None) -> list[dict[str, Any]]:
     """The newest payment attempts with agent, seller name and who listed that seller. Amount in atomic units.
 
-    rule_fired is split into rule and detail. seller is None when the address was never on the list.
+    rule_fired is split into rule and detail. seller is None when the address was never on a list that applies to the
+    attempt's agent. When several seller rows share an address, one is picked per attempt (the attempt's own agent's
+    row first, then the operator's), so an attempt never repeats. agent_id limits the log to one agent.
     """
     rows = conn.execute(
         f"SELECT a.id, a.created_at, ag.name AS agent, a.reason, s.name AS seller, a.pay_to,"
         f" (a.amount {ATOMIC})::bigint AS amount, a.decision, a.rule_fired, a.status, a.tx_hash, a.response_hash,"
         " a.url, s.added_by AS seller_listed_by, s.added_at AS seller_listed_at"
         " FROM payment_attempts a JOIN agents ag ON ag.id = a.agent_id"
-        " LEFT JOIN sellers s ON lower(s.pay_to) = lower(a.pay_to) AND s.network = %s AND lower(s.asset) = lower(%s)"
+        " LEFT JOIN LATERAL (SELECT x.name, x.added_by, x.added_at FROM sellers x"
+        "  WHERE lower(x.pay_to) = lower(a.pay_to) AND x.network = %s AND lower(x.asset) = lower(%s)"
+        "  AND (x.agent_id IS NULL OR x.agent_id = a.agent_id)"
+        "  ORDER BY (x.agent_id IS NULL), x.id LIMIT 1) s ON true"
+        " WHERE (%s::bigint IS NULL OR a.agent_id = %s::bigint)"
         " ORDER BY a.id DESC LIMIT %s",
-        (NETWORK, USDC_BASE_SEPOLIA, limit),
+        (NETWORK, USDC_BASE_SEPOLIA, agent_id, agent_id, limit),
     ).fetchall()
     for r in rows:
         r["rule"], _, r["detail"] = (r.pop("rule_fired") or "").partition(": ")
@@ -129,6 +140,11 @@ def list_journal(conn: Connection, limit: int = 100) -> list[dict[str, Any]]:
         "SELECT id, date, memo, attempt_id, reverses_entry_id FROM journal_entries ORDER BY id DESC LIMIT %s",
         (limit,),
     ).fetchall()
+    return attach_lines(conn, entries)
+
+
+def attach_lines(conn: Connection, entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Add each entry's lines (account code, name, debit, credit in atomic units) as entry["lines"]."""
     if not entries:
         return []
     lines = conn.execute(

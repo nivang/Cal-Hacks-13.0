@@ -9,18 +9,18 @@
 <script src="https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4.3.3/dist/index.global.js" integrity="sha384-2ql948lIdLcGEE0/qxNiudyTjgauA3RDJERu5xW75kFCvSl5a9odyQYCb6tEjnmB" crossorigin="anonymous"></script>
 </head>
 <body class="min-h-screen bg-stone-50 text-stone-900 antialiased">
-<header class="border-b border-stone-200 bg-white">
-  <div class="mx-auto flex max-w-xl items-center justify-between px-4 py-3">
+{% block header %}<header class="border-b border-stone-200 bg-white">
+  <div class="mx-auto flex {% block width %}max-w-xl{% endblock %} items-center justify-between px-4 py-3">
     <a href="/" class="flex items-center gap-2 font-semibold tracking-tight">
       <img src="/favicon.ico" alt="" width="20" height="20"> Sentinel
     </a>
     {% block nav %}{% endblock %}
   </div>
-</header>
-<main class="mx-auto max-w-xl px-4 py-10">
+</header>{% endblock %}
+<main class="mx-auto {{ self.width() }} min-w-0 px-4 py-10">
 {% block content %}{% endblock %}
 </main>
-<footer class="mx-auto max-w-xl px-4 pb-10 text-xs text-stone-500">
+<footer class="mx-auto {{ self.width() }} px-4 pb-10 text-xs text-stone-500">
   Sentinel holds your agent's wallet and checks every payment against your rules. Base Sepolia test network.
 </footer>
 </body>

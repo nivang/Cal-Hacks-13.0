@@ -1,11 +1,13 @@
-"""The owner's ledger page: the books, the seller list, each agent's limits, and the payments CSV.
+"""The operator's ledger page: every agent's books, the operator's seller list, each agent's limits, the payments CSV.
 
-This is the only place sellers get approved or blocked and limits get changed. It runs as its own process,
+Signed in users manage their own sellers and limits on their account page (web/app.py); this page is for the
+operator, and its seller list (agent_id null) applies to every agent. It runs as its own process,
 separate from the MCP server, and every route sits behind SENTINEL_OWNER_PASSWORD, which the agent never holds.
 So the agent asks (pay) and the owner decides what it may buy (here), and the two never share a door.
 Reads and writes go through owner.py and ledger.py; nothing here touches the wallet.
 
-Run:  uvicorn sentinel.ledger_app:create_app --factory --port 5000 then open http://127.0.0.1:5000
+Run:  uvicorn sentinel.ledger_app:create_app --factory --port 5001 then open http://127.0.0.1:5001
+(not 5000: macOS uses that port for the AirPlay receiver, which answers 403)
 """
 import hashlib
 import hmac

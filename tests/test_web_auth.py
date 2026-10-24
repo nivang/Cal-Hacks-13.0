@@ -253,7 +253,8 @@ def test_limit_key_folds_tags_and_gmail_dots():
     assert auth.limit_key("Alice@Example.com") == "alice@example.com"
 
 
-@pytest.mark.parametrize("raw", ["/account", "/oauth/consent?req=abc.DEF_12-3", "/oauth/consent?req=" + "a" * 4096])
+@pytest.mark.parametrize("raw", ["/account", "/account/payments", "/account/rules", "/account/books",
+                                 "/oauth/consent?req=abc.DEF_12-3", "/oauth/consent?req=" + "a" * 4096])
 def test_safe_next_accepts_the_allow_list(raw):
     assert auth.safe_next(raw) == raw
 
@@ -261,7 +262,8 @@ def test_safe_next_accepts_the_allow_list(raw):
 @pytest.mark.parametrize(
     "raw",
     [None, "", "//evil.com", "/\\evil.com", "https://evil.com", "http://localhost:8000/account", "/account/",
-     "/accounts", "/account?x=1", "/oauth/consent", "/oauth/consent?req=", "/oauth/consent?req=a b",
+     "/accounts", "/account?x=1", "/account/payments.csv", "/account/rules/limits", "/account/books/",
+     "/account/rules?done=limits", "/Account/rules", "/oauth/consent", "/oauth/consent?req=", "/oauth/consent?req=a b",
      "/oauth/consent?req=a&x=1", "/oauth/consent?req=a\n", "/signin", "/oauth/consent?req=" + "a" * 4097],
 )
 def test_safe_next_refuses_everything_else(raw):
@@ -1516,3 +1518,47 @@ async def test_dev_app_without_a_mailer_prints_the_link_to_stderr(settings, conn
         token = err.split(prefix, 1)[1].split()[0]
         assert auth.TOKEN_RE.fullmatch(token)
         assert (await client.post("/auth/verify", data={"token": token})).status_code == 303
+
+
+# Opening the site at 127.0.0.1 instead of localhost (a 403 on every form before LocalhostAlias)
+
+
+def alias_client(app, host: str = "http://127.0.0.1:8000") -> httpx.AsyncClient:
+    """A client that reaches the app under another host name, as a browser opened at that address would."""
+    return httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app, client=("203.0.113.77", 50000)), base_url=host, follow_redirects=False,
+    )
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("host", ["http://127.0.0.1:8000", "http://[::1]:8000"])
+async def test_a_page_opened_at_a_loopback_alias_is_sent_to_the_configured_address(app, host):
+    async with alias_client(app, host) as client:
+        for path, expected in [("/signin", "/signin"), ("/signin?next=/account", "/signin?next=/account"),
+                               ("/account/rules", "/account/rules"), ("/", "/")]:
+            response = await client.get(path)
+            assert response.status_code == 307, path
+            assert response.headers["location"] == TEST_BASE_URL + expected
+        head = await client.head("/signin")
+        assert head.status_code == 307
+
+
+@pytest.mark.anyio
+async def test_the_alias_redirect_leaves_health_mcp_other_hosts_ports_and_posts_alone(app):
+    async with alias_client(app) as client:
+        assert (await client.get("/healthz")).status_code == 200
+        assert (await client.post("/mcp", content=b"{}")).status_code == 401  # the MCP challenge, not a redirect
+        posted = await client.post("/signin", data={"email": "alias@example.com"}, headers={"origin": "http://127.0.0.1:8000"})
+        assert posted.status_code == 403 and TEST_BASE_URL in posted.text  # refused, and it says where to go
+    async with alias_client(app, "http://127.0.0.1:9000") as other_port:
+        assert (await other_port.get("/signin")).status_code == 200
+    async with alias_client(app, "http://evil.example:8000") as stranger:
+        assert (await stranger.get("/signin")).status_code == 200  # never a redirect to or from a stranger's name
+
+
+@pytest.mark.anyio
+async def test_the_alias_redirect_is_off_outside_localhost(https_settings, connect, mailer):
+    async with serve(https_settings, connect=connect, mailer=mailer) as make:
+        client = make()
+        client.base_url = httpx.URL("https://127.0.0.1:8000")  # another name for the same machine, no redirect
+        assert (await client.get("/signin")).status_code == 200

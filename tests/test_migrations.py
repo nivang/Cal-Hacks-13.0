@@ -1,4 +1,4 @@
-"""Tests for the tracked migration runner (db.apply_migrations, db.pending_migrations) and the schema 008 adds.
+"""Tests for the tracked migration runner (db.apply_migrations, db.pending_migrations) and the schema 008 and 009 add.
 
 Each runner test builds a throwaway schema inside the rolled back test transaction (the conn fixture), so nothing
 here is ever committed and the shared "test" schema is only read. Schema names are random, so two test runs at once
@@ -151,3 +151,70 @@ def test_008_keeps_the_check_constraints(conn):
     conn.execute(token, ("refresh-rotated", "refresh", grant_id, "2026-01-01"))
     refused(conn, token, ("access-used", "access", grant_id, "2026-01-01"))  # only refresh tokens are rotated
     refused(conn, token, ("id-token", "id", grant_id, None))
+
+
+# 009: seller lists per user
+
+OTHER = "0x" + "ab" * 20
+
+
+def make_agents(conn, count=2):
+    """Insert plain agents (no user needed) and return their ids."""
+    ids = []
+    for i in range(count):
+        ids.append(db.insert(
+            conn,
+            "INSERT INTO agents (name, per_payment_cap, weekly_budget, expense_account_id) VALUES (%s, 1, 1, %s)",
+            (f"nine-{uuid.uuid4().hex[:8]}-{i}", db.account_id(conn, "6100")),
+        ))
+    return ids
+
+
+SELLER = (
+    "INSERT INTO sellers (name, pay_to, network, asset, status, added_by, agent_id)"
+    " VALUES ('S', %s, 'eip155:84532', %s, 'approved', 'user', %s)"
+)
+ASSET_ADDRESS = "0x036CbD53842c5426634e7929541eC2318f3dCF7e"
+
+
+def test_009_two_users_may_approve_the_same_address_and_the_operator_may_list_it_too(conn):
+    one, two = make_agents(conn)
+    conn.execute(SELLER, (OTHER, ASSET_ADDRESS, one))
+    conn.execute(SELLER, (OTHER, ASSET_ADDRESS, two))
+    conn.execute(SELLER, (OTHER, ASSET_ADDRESS, None))
+    rows = conn.execute("SELECT agent_id FROM sellers WHERE lower(pay_to) = %s", (OTHER,)).fetchall()
+    assert sorted(r["agent_id"] is None for r in rows) == [False, False, True]
+
+
+def test_009_one_agent_cannot_list_an_address_twice_whatever_the_letter_case(conn):
+    one, _ = make_agents(conn)
+    conn.execute(SELLER, (OTHER, ASSET_ADDRESS, one))
+    refused(conn, SELLER, (OTHER.upper().replace("0X", "0x"), ASSET_ADDRESS, one))
+    refused(conn, SELLER, (OTHER, ASSET_ADDRESS.lower(), one))
+
+
+def test_009_the_operator_list_stays_unique_and_seed_sellers_stays_idempotent(conn):
+    operator = [
+        {"name": "Op", "pay_to": OTHER, "network": "eip155:84532", "asset": ASSET_ADDRESS, "status": "approved"}
+    ]
+    db.seed_sellers(conn, operator)
+    db.seed_sellers(conn, operator)
+    db.seed_sellers(conn, [{**operator[0], "pay_to": OTHER.upper().replace("0X", "0x")}])  # same address, other case
+    count = conn.execute("SELECT count(*) AS n FROM sellers WHERE lower(pay_to) = %s", (OTHER,)).fetchone()["n"]
+    assert count == 1
+    refused(conn, SELLER, (OTHER, ASSET_ADDRESS, None))
+
+
+def test_009_the_old_unique_constraint_is_gone_and_the_agent_is_a_real_foreign_key(conn):
+    names = {r["conname"] for r in conn.execute(
+        "SELECT conname FROM pg_constraint WHERE conrelid = 'sellers'::regclass"
+    ).fetchall()}
+    assert "sellers_pay_to_network_asset_key" not in names
+    refused(conn, SELLER, (OTHER, ASSET_ADDRESS, 999_999_999))  # no such agent
+    columns = conn.execute(
+        "SELECT has_table_privilege('anon', 'sellers', 'SELECT, INSERT, UPDATE, DELETE') AS anon,"
+        " has_table_privilege('authenticated', 'sellers', 'INSERT, UPDATE, DELETE') AS write"
+    ).fetchone()
+    assert (columns["anon"], columns["write"]) == (False, False)
+    rls = conn.execute("SELECT relrowsecurity FROM pg_class WHERE oid = 'sellers'::regclass").fetchone()
+    assert rls["relrowsecurity"] is True

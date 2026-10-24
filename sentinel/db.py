@@ -1,7 +1,8 @@
 """Postgres (Supabase) connection pool, tracked migrations and seed data for Sentinel's store.
 
-The tables live in Supabase Postgres (see migrations/*.sql): agents, sellers, payment_attempts, approvals, accounts,
-journal_entries, journal_lines and attempt_results, plus users, magic_links and the oauth_* tables for sign in.
+The tables live in Supabase Postgres (see migrations/*.sql): agents, sellers (the operator's list plus each
+user's own), payment_attempts, approvals, accounts, journal_entries, journal_lines and attempt_results, plus users,
+magic_links and the oauth_* tables for sign in.
 attempts.py and ledger.py read and write them through the connections this module hands out. Every other file
 imports from here and never touches the driver, so swapping databases again means editing this file and the SQL in
 the modules that query it.
@@ -206,7 +207,7 @@ def init(conn: Connection) -> None:
 
 
 def seed_sellers(conn: Connection, sellers: list[dict[str, str]]) -> None:
-    """Add sellers to the approved list (or whichever status is given), skipping ones already present.
+    """Add sellers to the operator's list (agent_id null; or whichever status is given), skipping ones already there.
 
     Each dict needs name, pay_to, network, asset and status. These come from the human's config,
     never from text the agent read online.
@@ -214,7 +215,7 @@ def seed_sellers(conn: Connection, sellers: list[dict[str, str]]) -> None:
     for s in sellers:
         conn.execute(
             "INSERT INTO sellers (name, pay_to, network, asset, status, added_by) VALUES (%s, %s, %s, %s, %s, %s)"
-            " ON CONFLICT (pay_to, network, asset) DO NOTHING",
+            " ON CONFLICT (lower(pay_to), network, lower(asset)) WHERE agent_id IS NULL DO NOTHING",
             (s["name"], s["pay_to"], s["network"], s["asset"], s["status"], "human"),
         )
 

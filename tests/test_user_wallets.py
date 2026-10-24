@@ -590,12 +590,13 @@ def test_sign_out_everywhere_revokes_every_live_grant_of_that_user_only_and_bump
 async def test_account_view_shows_the_email_wallet_agent_limits_and_week_spend(conn, connect, fake_wallets):
     user = users.find_or_create_user(conn, "Ann@Example.com", "ann@example.com")
     assert users.account_view(conn, user["id"]) == {
-        "email": "Ann@Example.com", "wallet_address": None, "agent": None,
+        "email": "Ann@Example.com", "wallet_address": None, "agent": None, "agent_id": None,
         "per_payment_cap": None, "weekly_budget": None, "week_spend": 0,
     }
     address = await users.ensure_wallet(connect, user["id"])
+    agent_id = conn.execute("SELECT agent_id FROM users WHERE id = %s", (user["id"],)).fetchone()["agent_id"]
     assert users.account_view(conn, user["id"]) == {
-        "email": "Ann@Example.com", "wallet_address": address, "agent": f"user-{user['id']}",
+        "email": "Ann@Example.com", "wallet_address": address, "agent": f"user-{user['id']}", "agent_id": agent_id,
         "per_payment_cap": db.DEFAULT_PER_PAYMENT_CAP, "weekly_budget": db.DEFAULT_WEEKLY_BUDGET, "week_spend": 0,
     }
     with pytest.raises(LookupError):

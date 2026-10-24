@@ -242,11 +242,11 @@ def identity_for(conn: db.Connection, user_id: str) -> Identity | None:
 
 
 def account_view(conn: db.Connection, user_id: str) -> dict[str, Any]:
-    """What the account page shows: email, wallet_address, agent, per_payment_cap, weekly_budget and week_spend.
+    """What the account pages show: email, wallet_address, agent, agent_id, per_payment_cap, weekly_budget, week_spend.
 
     Amounts are atomic units; week_spend counts settled and in flight payments over the guard's budget window.
-    Before the wallet exists wallet_address, agent and the limits are None and week_spend is 0. LookupError for an
-    unknown user.
+    Before the wallet exists wallet_address, agent, agent_id and the limits are None and week_spend is 0.
+    LookupError for an unknown user.
     """
     uid = canonical_id(user_id)
     row = None
@@ -261,6 +261,7 @@ def account_view(conn: db.Connection, user_id: str) -> dict[str, Any]:
     if row is None:
         raise LookupError("no such user")
     aid = row.pop("aid")
+    row["agent_id"] = aid
     row["week_spend"] = attempts.week_spend(conn, aid, guard.POLICY["budget_window_days"]) if aid is not None else 0
     return row
 

@@ -7,8 +7,8 @@ Sentinel holds the wallet so the agent never does. Every payment request passes 
 | Path | Job |
 |---|---|
 | `sentinel/mcp_server.py` | The MCP tools `pay` and `payment_status`: identity from the OAuth token, the user's own wallet per call, in flight limits. `main()` checks env, settings and migrations, then serves the whole app |
-| `sentinel/ledger_app.py` | The owner's ledger page: books, seller list, agent limits, payments CSV. Password protected |
-| `sentinel/owner.py` | What only the owner can do (approve or block sellers, set limits) and the ledger queries |
+| `sentinel/ledger_app.py` | The operator's ledger page (port 5001): every agent's books, the operator's seller list, limits, payments CSV. Password protected |
+| `sentinel/owner.py` | The operator's actions (the operator seller list, set limits, `parse_usd`) and the ledger queries, also used per agent by the account pages |
 | `sentinel/results.py` | The one result shape the tools return, and the plain English for each outcome |
 | `sentinel/urls.py` | Refuses unsafe URLs (file://, private or metadata addresses) before anything is fetched |
 | `sentinel/payments.py` | The x402 flow: ask for a price, build a quote, run the guard, sign, pay, record |
@@ -18,11 +18,12 @@ Sentinel holds the wallet so the agent never does. Every payment request passes 
 | `sentinel/attempts.py` | Attempt log and the history lookups the guard reads (price history per agent) |
 | `sentinel/ledger.py` | Balanced, append only journal and trial balance; credits the agent's own cash account |
 | `sentinel/db.py` | Postgres connection pool (max 10), tracked migrations, seed data and default limits. The only file that touches the driver |
-| `sentinel/migrations/` | The Postgres schema: tables, append only triggers, balance check, RLS, dashboard read policies; 008 adds users, magic links and the OAuth tables |
+| `sentinel/migrations/` | The Postgres schema: tables, append only triggers, balance check, RLS, dashboard read policies; 008 adds users, magic links and the OAuth tables; 009 adds `sellers.agent_id` (personal seller lists) |
 | `sentinel/web/__init__.py` | `Settings` and `load_settings`: reads and checks the environment once, derives one subkey per purpose |
 | `sentinel/web/app.py` | The one ASGI app: site routes, consent, security headers, CORS on `/mcp`, then FastMCP mounted at `/` |
 | `sentinel/web/auth.py` | Magic links, email normalization, session cookies, CSRF, same origin check |
 | `sentinel/web/oauth.py` | The OAuth server: FastMCP's `OAuthProvider` over Postgres, registration rules, consent requests, codes, tokens |
+| `sentinel/web/books.py` | What a signed in user sees and changes for their own agent: merged seller list, payments, journal, totals, summary, live grant check |
 | `sentinel/web/users.py` | Users, their wallet and books on first sign in, the `Identity` a token carries, sign out everywhere |
 | `sentinel/web/ratelimit.py` | Limits for sign in links and client registration, counted from the rows those write |
 | `sentinel/web/mailer.py` | The sign in email: Resend in production, stderr on a local run |
@@ -40,7 +41,7 @@ Sentinel holds the wallet so the agent never does. Every payment request passes 
 - `pay(url, reason)`: buy a paywalled URL. `reason` must be specific (20 to 500 characters); the owner reads it in the ledger next to the seller and the price. Returns one of `SETTLED` (body, amount, tx hash), `BLOCKED` (the rule and a plain English reason), `FREE`, or `FAILED`.
 - `payment_status(request_id)`: the current state of one of the agent's own requests, including the paid body once it has settled.
 
-There is no tool to add sellers or change limits on purpose: only the owner does that, on the ledger page. A seller that is not on the list is blocked, not queued for approval.
+There is no tool to add sellers or change limits on purpose: only the signed in user does that, on the Rules page of their account (or the operator, on the ledger page). A seller that is not on the list is blocked, not queued for approval.
 
 The tools are served over Streamable HTTP only, at `PUBLIC_BASE_URL/mcp` (`python -m sentinel.mcp_server`, default http://127.0.0.1:8000/mcp), stateless and JSON, so every request is authenticated again. Every request carries an OAuth access token; a missing, expired, revoked or foreign one gets a 401 (see [Onboarding and identity](#onboarding-and-identity)). There is no stdio transport and no agent token any more. `SENTINEL_ALLOW_LOCAL_URLS=1` lets the localhost test sellers be reached; the server refuses it outside localhost.
 
@@ -73,7 +74,22 @@ One process serves three things on one origin, `PUBLIC_BASE_URL` (B): the sign i
 
 **Storage.** Links, codes, access and refresh tokens are stored only as HMACs under `TOKEN_HASH_SECRET` (one subkey per purpose); IPs only as HMACs too. Cookies, CSRF tokens and pending requests are signed with `SESSION_SECRET`. Logs name user ids and client ids, never emails, links, tokens, cookies or CSRF values, and query strings are stripped from the access log. Site pages get a strict CSP (Tailwind's pinned browser build is the only script), `X-Frame-Options: DENY`, `Referrer-Policy: same-origin`, `nosniff`, `no-store`, and HSTS on https.
 
+## Account pages
+
+A signed in user does everything from `/account` (all need a live session, otherwise a 303 to `/signin?next=<page>`):
+
+| Route | What |
+|---|---|
+| `GET /account` | Overview: spend against budget, cap, wallet and Fund it, getting started checklist, connection details, recent payments, sign out everywhere |
+| `GET /account/payments`, `GET /account/payments.csv` | Their own payments (newest 200) with status and a plain English why; the CSV holds up to the latest 20,000 |
+| `GET /account/rules`, `POST /account/rules/limits`, `POST /account/rules/sellers` | Their per payment cap and weekly budget; their seller list (add, block, re approve; up to 200 personal sellers, then block one you no longer use) |
+| `GET /account/books` | Their journal, totals by account and whether the books balance |
+
+Every query is scoped to the agent id read from the database for the session's user, never from a form or URL, and every POST needs the same origin and the account CSRF token. In dev mode the Rules page also offers the demo sellers (DataCo, InsightLab, from `SELLER_A_ADDRESS` and `SELLER_B_ADDRESS`; never the scammer). The journal shows each entry as "Paid <seller> for <host and path>" with a Basescan link, the raw memo kept as a tooltip. `web/books.py` holds the queries.
+
 ## Ledger page
+
+This page is for the operator and runs on port 5001 (macOS uses 5000 for the AirPlay receiver, which answers 403). Users do their own sellers, limits and books on the account pages. Here the operator keeps the list that applies to every agent.
 
 It shows each agent's spend against its weekly budget (with a form to change the cap and budget), the approved sellers (approve a new address, block or re approve one), every payment attempt (agent, reason, seller, price, decision, rule, status, tx link), the journal and the trial balance. **Download payments CSV** exports one row per attempt for the accountant.
 
@@ -87,7 +103,7 @@ It runs as its own process, separate from the MCP server, and the agent never ho
 
 `guard.evaluate(agent, quote, history)` returns `{decision, rule, detail}`. Rules run in order and the first to fire wins: seller (anything the owner has not approved is blocked), per payment cap, rolling weekly budget, price jump (more than 2x the median of this agent's last 5 settled payments to the seller), duplicate (same agent, payTo, url and amount within 10 min), then ALLOW.
 
-Every user is their own agent, so the cap, the budget, the duplicate window and the price jump baseline are all per user: one user cannot see or move another's baseline. The approved seller list is global and owner curated.
+Every user is their own agent, so the cap, the budget, the duplicate window and the price jump baseline are all per user: one user cannot see or move another's baseline. Sellers come from two lists: the operator's (`sellers.agent_id` null, applies to every agent) and the user's own (`agent_id` = their agent). For one agent the applicable rows are those two sets; any applicable blocked row wins, then any approved row, else the seller is unlisted and blocked (`attempts.load_history`, one query; `guard.py` stays pure). A user can add, block and re approve only their own rows, so one user's approval never opens a seller for anyone else, and an operator block cannot be overridden.
 
 - An agent's first purchase from a seller has no history, so its price is trusted and becomes the baseline.
 - A unique index on live attempts means two simultaneous identical calls cannot both pass.
@@ -133,11 +149,11 @@ Row level security is on for every table. The anon role gets nothing. A signed i
 
 Database tests run in the `test` schema of your Supabase database, each inside a rolled back transaction.
 
-`test_guard.py` is the answer key for the guard: six planted cases (unknown seller, cap, budget, price jump, duplicate, clean) plus edge cases. `test_store.py` and `test_payments.py` cover the attempt log, the in flight lock and the books. `test_pay_flow.py` runs the whole payment flow against a fake seller and covers every way an approved payment can fail. `test_mcp_server.py` calls the tools with a token identity and checks each result the agent can see, plus `main()`'s startup checks. `test_oauth.py` covers discovery, registration, the full connect flow, consent, codes, refresh, revocation and access tokens. `test_web_auth.py` covers magic links, rate limits, sessions, CSRF, headers, the mailer and settings. `test_user_wallets.py` covers provisioning, isolation between users and failing closed. `test_migrations.py` covers tracked migrations and `test_app_smoke.py` the assembled app. `test_owner.py` covers the seller list and limits the guard obeys, the ledger queries and the CSV. `test_ledger_app.py` covers the password gate, the forms, escaping and the CSV download. `test_wallets.py` covers wallet selection and shows that a signer other than CDP plugs into the same interface.
+`test_guard.py` is the answer key for the guard: six planted cases (unknown seller, cap, budget, price jump, duplicate, clean) plus edge cases. `test_store.py` and `test_payments.py` cover the attempt log, the in flight lock and the books. `test_pay_flow.py` runs the whole payment flow against a fake seller and covers every way an approved payment can fail. `test_mcp_server.py` calls the tools with a token identity and checks each result the agent can see, plus `main()`'s startup checks. `test_oauth.py` covers discovery, registration, the full connect flow, consent, codes, refresh, revocation and access tokens. `test_web_auth.py` covers magic links, rate limits, sessions, CSRF, headers, the mailer and settings. `test_user_wallets.py` covers provisioning, isolation between users and failing closed. `test_migrations.py` covers tracked migrations and `test_app_smoke.py` the assembled app. `test_account_pages.py` covers the account pages over HTTP and `test_user_sellers.py` the two seller lists. `test_owner.py` covers the operator's seller list and limits the guard obeys, the ledger queries and the CSV. `test_ledger_app.py` covers the password gate, the forms, escaping and the CSV download. `test_wallets.py` covers wallet selection and shows that a signer other than CDP plugs into the same interface.
 
 ## Not built (by design)
 
-No per payment human approval. The owner approves sellers, not payments: an unlisted seller is blocked outright, and the owner adds it on the ledger page if it is legitimate. The `approvals` table and the `pending` / `denied` attempt statuses remain in the schema unused (migration 007 closed out the old pending rows).
+No per payment human approval. The owner approves sellers, not payments: an unlisted seller is blocked outright, and the user (or the operator, for everyone) adds it if it is legitimate. The `approvals` table and the `pending` / `denied` attempt statuses remain in the schema unused (migration 007 closed out the old pending rows).
 
 Not built yet: month end flags and the QuickBooks export.
 
@@ -147,6 +163,6 @@ Not built yet: month end flags and the QuickBooks export.
 - **Blocking CDP signer:** each signature is a blocking CDP call inside the event loop. An async x402 signer would fix it.
 - **Tailwind:** the browser build compiles CSS at runtime (pinned with SRI).
 - **Funding:** a new user's cash account goes negative in the books until funding is booked.
-- **Ledger page:** it shows `user-<uuid>` agents without their email yet.
+- **Ledger page:** the operator's page shows `user-<uuid>` agents without their email yet.
 - **CIMD:** client ID metadata documents are not supported yet; registration is DCR only.
 - **Fresh sign in:** consent does not yet require a recent sign in.

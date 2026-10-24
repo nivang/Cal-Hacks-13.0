@@ -20,20 +20,21 @@ import hmac
 import logging
 from collections.abc import Callable, Mapping
 from contextlib import AbstractAsyncContextManager, AbstractContextManager
+from datetime import date
 from pathlib import Path
 from typing import Any, TypeVar
-from urllib.parse import urlencode
+from urllib.parse import urlencode, urlsplit
 
 from fastapi import FastAPI, Request
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 from fastmcp.utilities.lifespan import combine_lifespans
-from starlette.datastructures import MutableHeaders
+from starlette.datastructures import Headers, MutableHeaders
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 from x402.mechanisms.evm import ClientEvmSigner
 
-from sentinel import db, mcp_server, payments, results, wallets
-from sentinel.web import Settings, auth, oauth, pages, ratelimit, users
+from sentinel import db, mcp_server, owner, payments, results, wallets
+from sentinel.web import Settings, auth, books, oauth, pages, ratelimit, users
 from sentinel.web.mailer import Mailer, MailError, make_mailer, sign_in_message
 
 Connect = Callable[[], AbstractContextManager[db.Connection]]
@@ -56,8 +57,15 @@ SITE_CSP = CSP_BEFORE_FORM + "form-action 'self'" + CSP_AFTER_FORM
 
 SITE_PATHS = frozenset({
     "/", "/signin", "/auth/verify", "/account", "/account/wallet", "/account/signout-everywhere", "/signout",
+    "/account/payments", "/account/payments.csv", "/account/rules", "/account/rules/limits",
+    "/account/rules/sellers", "/account/books",
     "/oauth/consent", "/healthz", "/favicon.ico", "/authorize",
 })
+DONE_TEXT = {  # the ?done= values the Rules page shows a banner for; anything else is ignored
+    "limits": "Saved. Your new limits apply to the next payment.",
+    "seller": "Saved. The seller list is updated.",
+}
+WARN_PERCENT = 80  # the weekly budget bar turns amber from here
 MCP_PATHS = frozenset({"/mcp", "/mcp/"})
 MCP_ALLOW_HEADERS = "authorization, content-type, mcp-protocol-version, mcp-session-id, last-event-id"
 MCP_EXPOSE_HEADERS = "WWW-Authenticate, mcp-session-id"
@@ -113,6 +121,46 @@ class SecurityHeaders:
             await send(message)
 
         await self.app(scope, receive, send_with_headers)
+
+
+class LocalhostAlias:
+    """Pure ASGI middleware for local runs: a page opened at 127.0.0.1 or [::1] is sent on to the configured address.
+
+    Cookies, the same origin check and the OAuth issuer all use PUBLIC_BASE_URL (http://localhost:8000), and a browser
+    keeps a separate cookie jar per host name. A visit to http://127.0.0.1:8000 would fail every form with a 403, so
+    GET and HEAD requests for site pages get a 307 to the same path and query on the configured host. Only the loopback
+    names on the configured port are rewritten, and only when the site runs on localhost (dev mode); /healthz, /mcp and
+    every other method are left alone.
+    """
+
+    ALIASES = frozenset({"localhost", "127.0.0.1", "[::1]"})
+
+    def __init__(self, app: ASGIApp, settings: Settings) -> None:
+        """Wrap app; settings gives the address to send people to."""
+        self.app = app
+        self.enabled = settings.dev_mode
+        self.base = settings.base_url
+        self.netloc = urlsplit(settings.base_url).netloc.lower()
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        """Redirect an aliased GET or HEAD of a site page; pass everything else through."""
+        if (
+            self.enabled and scope["type"] == "http" and scope["method"] in ("GET", "HEAD")
+            and is_site_path(scope["path"]) and scope["path"] != "/healthz"
+        ):
+            host = Headers(scope=scope).get("host", "").lower()
+            if host and host != self.netloc and self.is_alias_of_base(host):
+                query = scope.get("query_string", b"").decode("latin-1")
+                target = self.base + scope["path"] + ("?" + query if query else "")
+                await RedirectResponse(target, status_code=307)(scope, receive, send)
+                return
+        await self.app(scope, receive, send)
+
+    def is_alias_of_base(self, host: str) -> bool:
+        """True when host is another loopback name on the same port as the configured address."""
+        name, _, port = host.rpartition(":") if not host.endswith("]") and ":" in host else (host, "", "")
+        base_name, _, base_port = self.netloc.rpartition(":") if ":" in self.netloc else (self.netloc, "", "")
+        return name in self.ALIASES and base_name in self.ALIASES and port == base_port
 
 
 class McpCors:
@@ -293,7 +341,7 @@ def create_app(
         """The answer to a POST that did not come from our own pages."""
         return error(
             request, "That request was refused",
-            "It did not come from a Sentinel page. Go back, reload the page and try again.", 403,
+            f"It did not come from a Sentinel page. Open the site at {settings.base_url}, reload and try again.", 403,
         )
 
     # Landing, health, favicon
@@ -409,47 +457,224 @@ def create_app(
 
     # Account
 
-    @app.get("/account")
-    async def account(request: Request) -> Response:
-        """The user's email, wallet, limits and how to connect their AI app."""
-        session, user, stale = await current(request)
-        if session is None or user is None:
-            response = _redirect(_sign_in_url("/account"))
-            if stale:
-                clear_cookie(response, session_cookie)
-            return response
-        view = await run_db(users.account_view, user["id"])
+    def percent_spent(spent: int, budget: int) -> int:
+        """How much of the weekly budget is used, 0 to 100 (100 once it is reached or passed)."""
+        return min(100, spent * 100 // budget) if budget > 0 else 0
+
+    def sign_in_redirect(path: str, stale: bool) -> Response:
+        """Send a visitor without a live session to sign in, coming back to path afterwards."""
+        response = _redirect(_sign_in_url(path))
+        if stale:
+            clear_cookie(response, session_cookie)
+        return response
+
+    def account_context(session: auth.Session, view: Mapping[str, Any], tab: str) -> dict[str, Any]:
+        """What every account page needs: the user's view, the CSRF token, the tab and the formatted limits."""
         address = view["wallet_address"]
-        context = {
+        has_agent = view["agent"] is not None
+        percent = percent_spent(view["week_spend"], view["weekly_budget"]) if has_agent else 0
+        return {
             **view,
+            "tab": tab,
             "csrf": auth.csrf_token(settings, session.value, "account"),
             "basescan_url": BASESCAN_ADDRESS + address if address else None,
             "faucet_url": FAUCET,
             "cap": usdc(view["per_payment_cap"]),
             "budget": usdc(view["weekly_budget"]),
             "spent": usdc(view["week_spend"]),
+            "percent": percent,
+            "bar": "bg-red-600" if percent >= 100 else "bg-amber-500" if percent >= WARN_PERCENT else "bg-stone-900",
+            "error": None,
+        }
+
+    async def account_get(request: Request, path: str) -> tuple[Response | None, auth.Session | None, dict[str, Any]]:
+        """The checks every account page shares: a live session, else the sign in redirect. Returns the user's view."""
+        session, user, stale = await current(request)
+        if session is None or user is None:
+            return sign_in_redirect(path, stale), None, {}
+        view = await run_db(users.account_view, user["id"])
+        return None, session, view
+
+    @app.get("/account")
+    async def account(request: Request) -> Response:
+        """Overview: the week's spending, the wallet, what is left to set up and the latest payments."""
+        refusal, session, view = await account_get(request, "/account")
+        if refusal is not None or session is None:
+            return refusal or forbidden(request)
+        user_id = str(session.user_id)
+        aid = view["agent_id"]
+
+        def data(conn: db.Connection) -> dict[str, Any]:
+            if aid is None:
+                return {"recent": [], "has_seller": False, "connected": books.has_live_grant(conn, user_id)}
+            return {
+                "recent": books.recent_payments(conn, aid),
+                "has_seller": any(sl["status"] == "approved" for sl in books.list_sellers(conn, aid)),
+                "connected": books.has_live_grant(conn, user_id),
+            }
+
+        found = await run_db(data)
+        steps = [
+            (aid is not None, "Create your wallet", None),
+            (found["has_seller"], "Approve a seller your agent may pay", "/account/rules"),
+            (found["connected"], "Connect your AI app", "#connect-h"),
+        ]
+        context = {
+            **account_context(session, view, "overview"), **found, "steps": steps,
+            "all_set": all(done for done, _, _ in steps),
             "mcp_url": settings.resource_url,
             "claude_command": f"claude mcp add --transport http sentinel {settings.resource_url}",
         }
         return page(request, "account.html", context)
 
-    async def account_post(request: Request) -> tuple[Response | None, dict[str, Any] | None, Mapping[str, Any]]:
+    @app.get("/account/payments")
+    async def account_payments(request: Request) -> Response:
+        """Payments: this user's own payment log."""
+        refusal, session, view = await account_get(request, "/account/payments")
+        if refusal is not None or session is None:
+            return refusal or forbidden(request)
+        aid = view["agent_id"]
+        rows = await run_db(books.list_payments, aid) if aid is not None else []
+        context = {**account_context(session, view, "payments"), "payments": rows}
+        return page(request, "account_payments.html", {**context, "csv_limit": f"{books.CSV_LIMIT:,}"})
+
+    @app.get("/account/payments.csv")
+    async def account_payments_csv(request: Request) -> Response:
+        """This user's own payments as a CSV download (spreadsheet formulas defused by owner.payments_csv)."""
+        refusal, session, view = await account_get(request, "/account/payments")  # next must be an allowed page
+        if refusal is not None or session is None:
+            return refusal or forbidden(request)
+        if view["agent_id"] is None:
+            return _redirect("/account/payments")
+        rows = await run_db(books.list_payments, view["agent_id"], books.CSV_LIMIT)
+        filename = f"sentinel-payments-{date.today().isoformat()}.csv"
+        return Response(
+            owner.payments_csv(rows), media_type="text/csv; charset=utf-8",
+            headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+        )
+
+    async def rules_page(
+        request: Request, session: auth.Session, view: Mapping[str, Any], *, status: int = 200,
+        error: str | None = None, typed: Mapping[str, str] | None = None,
+    ) -> Response:
+        """Render Rules: limits, the sellers that apply to this agent and, in dev mode, the demo sellers."""
+        aid = view["agent_id"]
+
+        def data(conn: db.Connection) -> tuple[list[dict[str, Any]], list[dict[str, str]]]:
+            return books.list_sellers(conn, aid), books.demo_sellers(conn, aid, settings.dev_mode)
+
+        sellers, demo = await run_db(data) if aid is not None else ([], [])
+        typed = typed or {}
+        done = request.query_params.get("done")
+        context = {
+            **account_context(session, view, "rules"),
+            "sellers": sellers, "demo": demo, "error": error,
+            "done": done if done in DONE_TEXT and error is None else None,
+            "done_text": DONE_TEXT.get(done or "", ""),
+            "typed_cap": typed.get("cap", results.usdc_text(view["per_payment_cap"]) if aid is not None else ""),
+            "typed_budget": typed.get("budget", results.usdc_text(view["weekly_budget"]) if aid is not None else ""),
+            "typed_name": typed.get("name", ""),
+            "typed_pay_to": typed.get("pay_to", ""),
+        }
+        return page(request, "account_rules.html", context, status)
+
+    @app.get("/account/rules")
+    async def account_rules(request: Request) -> Response:
+        """Rules: the user's limits and seller list."""
+        refusal, session, view = await account_get(request, "/account/rules")
+        if refusal is not None or session is None:
+            return refusal or forbidden(request)
+        return await rules_page(request, session, view)
+
+    @app.get("/account/books")
+    async def account_books(request: Request) -> Response:
+        """Books: this user's journal and totals, from their own settled payments only."""
+        refusal, session, view = await account_get(request, "/account/books")
+        if refusal is not None or session is None:
+            return refusal or forbidden(request)
+        aid = view["agent_id"]
+
+        def data(conn: db.Connection) -> dict[str, Any]:
+            return {
+                "journal": books.journal(conn, aid), "totals": books.totals(conn, aid),
+                "summary": books.summary(conn, aid),
+            }
+
+        found = await run_db(data) if aid is not None else {}
+        return page(request, "account_books.html", {**account_context(session, view, "books"), **found})
+
+    async def account_post(
+        request: Request, path: str = "/account"
+    ) -> tuple[Response | None, dict[str, Any] | None, Mapping[str, Any]]:
         """The checks every account form shares: same origin, a live session and its CSRF token.
 
-        Returns (refusal, user, form): refusal is None when every check passed.
+        Returns (refusal, user, form): refusal is None when every check passed. Without a session the visitor goes
+        to sign in and comes back to path.
         """
         if not auth.same_origin(settings, request.headers):
             return forbidden(request), None, {}
         form = await request.form()
         session, user, stale = await current(request)
         if session is None or user is None:
-            response = _redirect(_sign_in_url("/account"))
-            if stale:
-                clear_cookie(response, session_cookie)
-            return response, None, form
+            return sign_in_redirect(path, stale), None, form
         if not auth.check_csrf(settings, session.value, "account", _first(form, "csrf")):
             return forbidden(request), None, form
         return None, user, form
+
+    @app.post("/account/rules/limits")
+    async def save_limits(request: Request) -> Response:
+        """Set the session user's own per payment cap and weekly budget; the agent is never a form field."""
+        refusal, user, form = await account_post(request, "/account/rules")
+        if refusal is not None or user is None:
+            return refusal or forbidden(request)
+        view = await run_db(users.account_view, user["id"])
+        session, _, _ = await current(request)
+        if session is None:
+            return forbidden(request)
+        typed = {"cap": _first(form, "cap") or "", "budget": _first(form, "budget") or ""}
+        if view["agent"] is None:
+            return await rules_page(request, session, view, status=400,
+                                    error="Create your wallet first, on the Overview page.", typed=typed)
+
+        def save(conn: db.Connection) -> None:
+            with db.transaction(conn):
+                owner.set_agent_limits(conn, view["agent"], owner.parse_usd(typed["cap"]),
+                                       owner.parse_usd(typed["budget"]))
+
+        try:
+            await run_db(save)
+        except ValueError as exc:
+            return await rules_page(request, session, view, status=400, error=str(exc), typed=typed)
+        log.info("user %s changed their limits", user["id"])
+        return _redirect("/account/rules?done=limits")
+
+    @app.post("/account/rules/sellers")
+    async def save_seller(request: Request) -> Response:
+        """Approve or block a seller on this user's own list; the operator's rows are never touched."""
+        refusal, user, form = await account_post(request, "/account/rules")
+        if refusal is not None or user is None:
+            return refusal or forbidden(request)
+        view = await run_db(users.account_view, user["id"])
+        session, _, _ = await current(request)
+        if session is None:
+            return forbidden(request)
+        typed = {"name": _first(form, "name") or "", "pay_to": _first(form, "pay_to") or ""}
+        if view["agent_id"] is None:
+            return await rules_page(request, session, view, status=400,
+                                    error="Create your wallet first, on the Overview page.", typed=typed)
+
+        def save(conn: db.Connection) -> None:
+            with db.transaction(conn):
+                books.upsert_seller(
+                    conn, view["agent_id"], typed["name"], typed["pay_to"], _first(form, "status") or ""
+                )
+
+        try:
+            await run_db(save)
+        except ValueError as exc:
+            return await rules_page(request, session, view, status=400, error=str(exc), typed=typed)
+        log.info("user %s changed their seller list", user["id"])
+        return _redirect("/account/rules?done=seller")
 
     @app.post("/account/wallet")
     async def retry_wallet(request: Request) -> Response:
@@ -612,5 +837,6 @@ def create_app(
     app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
     app.mount("/", mcp_app)
     app.add_middleware(SecurityHeaders, settings=settings)
+    app.add_middleware(LocalhostAlias, settings=settings)
     app.add_middleware(McpCors)  # added last, so outermost: even a preflight never reaches the routes
     return app
