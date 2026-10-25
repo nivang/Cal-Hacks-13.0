@@ -1902,7 +1902,9 @@ async def test_a_real_fastmcp_client_lists_and_calls_the_tools(app, browser, mai
     )
     async with Client(transport) as mcp:
         tools = await mcp.list_tools()
-        assert sorted(tool.name for tool in tools) == ["find_services", "pay", "payment_status", "quote", "start_task"]
+        assert sorted(tool.name for tool in tools) == [
+            "apify_actor", "discover", "find_services", "pay", "payment_status", "quote", "start_task",
+        ]
         task_id = (await mcp.call_tool("start_task", {"task": TASK})).structured_content["task_id"]
         result = await mcp.call_tool("pay", {"task_id": task_id, "url": PAY_URL, "reason": REASON})
     assert result.structured_content is not None

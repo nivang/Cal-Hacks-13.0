@@ -18,6 +18,7 @@ anything is signed, and test_guard.py is its answer key. Rules run in order and 
 """
 import json
 from dataclasses import dataclass
+from decimal import Decimal
 from pathlib import Path
 
 ALLOW, BLOCK = "ALLOW", "BLOCK"
@@ -89,8 +90,10 @@ def imitates(address: str, known: list[str]) -> str | None:
 
 
 def usd(atomic: int) -> str:
-    """Format USDC atomic units as dollars for messages only. Never used for arithmetic."""
-    return f"${atomic / 1_000_000:.2f}"
+    """Format USDC atomic units as dollars for messages only, never rounded: $0.50, $10.00, $0.001, $1.001."""
+    text = format((Decimal(atomic) / 1_000_000).normalize(), "f")
+    whole, _, frac = text.partition(".")
+    return f"${whole}.{frac.ljust(2, '0')}"
 
 
 def evaluate(agent: Agent, quote: Quote, history: History, policy: dict[str, int] = POLICY) -> Decision:

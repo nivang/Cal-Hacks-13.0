@@ -1,7 +1,7 @@
 """Answer key for the guard. Each planted case maps to one rule; the rest are edge cases."""
 import pytest
 
-from sentinel.guard import ALLOW, BLOCK, Agent, History, Quote, evaluate, imitates
+from sentinel.guard import ALLOW, BLOCK, Agent, History, Quote, evaluate, imitates, usd
 
 USDC = 1_000_000
 DATACO = "0x290E84b17Ce32cF9403f5D0218cB50ccdcc94781"
@@ -108,6 +108,10 @@ def test_duplicate_message_points_at_the_earlier_request():
     assert evaluate(AGENT, quote(500_000), history(duplicate=True)).related_id is None
 
 
+@pytest.mark.parametrize("atomic,text", [(500_000, "$0.50"), (10_000_000, "$10.00"), (1000, "$0.001"),
+                                         (1_001_000, "$1.001"), (0, "$0.00")])
+def test_dollar_amounts_in_messages_are_never_rounded_away(atomic, text):
+    assert usd(atomic) == text
 # Seller attacks
 
 
