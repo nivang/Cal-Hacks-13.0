@@ -358,6 +358,7 @@ def compared(result: ComparisonResult, explanation: str, auto_buy: bool) -> Comp
     if result.best is not None and not result.best.buyable:
         parts.append(
             f"The best value overall is the Apify Actor {result.best.name} (about ${result.best.job_cost_usdc} for "
-            f"{result.results} results), but Sentinel cannot run Actors yet: tell the owner about it.")
+            f"{result.results} results). If pay_with is apify_credit, call apify_actor for inputs, then "
+            "run_apify_actor with a task_id and max_charge_usd cap; otherwise tell the owner it needs Apify credit.")
     parts.append(f"Every check still runs when you pay. {SELLER_TEXT}")
     return result.model_copy(update={"message": " ".join(parts)})

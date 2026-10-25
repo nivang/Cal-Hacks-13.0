@@ -26,6 +26,13 @@
         <div class="min-w-0"><dt class="text-xs uppercase tracking-wide text-stone-500">Out of scope</dt><dd class="mt-1">{{ t.out_of_scope | join(", ") or "Not stated" }}</dd></div>
         <div class="min-w-0"><dt class="text-xs uppercase tracking-wide text-stone-500">Spent</dt><dd class="mt-1 tabular-nums">{{ t.spent | usd }} of {{ t.budget | usd }}{% if t.per_call %} · about {{ t.per_call | usd }} each{% endif %}</dd></div>
       </dl>
+      {% for p in t.apify_purchases or [] %}
+      <div class="mt-3 rounded-md bg-stone-50 p-3 text-sm">
+        <p class="font-medium">Apify credit purchase: {{ p.actor }} · {{ p.status }}</p>
+        <p class="mt-1">{% if p.actual_charge is not none %}Charged ${{ p.charge_usd }} USD{% else %}Reserved up to {{ p.max_charge | usd }} USD{% endif %} · request {{ p.id }}</p>
+        <p class="mt-1 text-stone-600">{{ p.reason }}</p>
+      </div>
+      {% endfor %}
       {% for c in (comparisons or {}).get(t.id, []) %}
       <details class="mt-3 rounded-md bg-stone-50 p-3 text-sm">
         <summary class="cursor-pointer"><span class="font-medium">Price comparison: {{ c.query }}</span>
@@ -39,7 +46,7 @@
             <tbody class="divide-y divide-stone-200 align-top">
             {% for o in c.offers %}
               <tr>
-                <td class="max-w-[12rem] break-words py-1 pr-3 {% if o.recommended %}font-semibold{% endif %}">{{ o.name }}<span class="block text-stone-500">{{ o.source }}{% if o.verdict == "BLOCKED" %} · blocked{% elif o.verdict == "NEEDS_OWNER" %} · held{% elif o.verdict == "APIFY" %} · cannot run yet{% elif o.verdict == "BROWSE" %} · browse only{% endif %}</span></td>
+                <td class="max-w-[12rem] break-words py-1 pr-3 {% if o.recommended %}font-semibold{% endif %}">{{ o.name }}<span class="block text-stone-500">{{ o.source }}{% if o.verdict == "BLOCKED" %} · blocked{% elif o.verdict == "NEEDS_OWNER" %} · held{% elif o.verdict == "APIFY" %} · Apify credits{% elif o.verdict == "BROWSE" %} · browse only{% endif %}</span></td>
                 <td class="py-1 pr-3 tabular-nums">{% if o.cost is not none %}{{ o.cost | usd }}{% else %}unknown{% endif %}</td>
                 <td class="py-1 pr-3 tabular-nums">{% if o.quality is not none %}{{ o.quality }}{% else %}not rated{% endif %}</td>
                 <td class="max-w-[20rem] py-1 text-stone-600">{{ o.why_not or o.fit_reason or "" }}</td>

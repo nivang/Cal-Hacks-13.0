@@ -70,9 +70,11 @@ def to_mandate(row: dict[str, Any]) -> intent.Mandate:
 def spend(conn: Connection, mandate_id: int) -> int:
     """What this task has spent or has in flight, in atomic units."""
     row = conn.execute(
-        f"SELECT (COALESCE(SUM(amount), 0) {ATOMIC})::bigint AS total FROM payment_attempts"
-        " WHERE mandate_id = %s AND status = ANY(%s)",
-        (mandate_id, LIVE_STATUSES),
+        f"SELECT (COALESCE((SELECT SUM(amount) FROM payment_attempts"
+        f" WHERE mandate_id = %s AND status = ANY(%s)), 0) {ATOMIC})::bigint"
+        " + COALESCE((SELECT SUM(COALESCE(actual_charge, max_charge)) FROM apify_runs"
+        " WHERE mandate_id = %s), 0)::bigint AS total",
+        (mandate_id, LIVE_STATUSES, mandate_id),
     ).fetchone()
     return int(row["total"]) if row else 0
 
@@ -242,12 +244,21 @@ def remember(conn: Connection, mandate_id: int, pay_to: str, url: str, verdict: 
 def list_for_agent(conn: Connection, agent_id: int, limit: int = TASK_LIMIT) -> list[dict[str, Any]]:
     """This agent's newest tasks with what each has spent, the provisional ones first."""
     rows = conn.execute(
-        f"SELECT {COLUMNS}, (COALESCE(s.total, 0) {ATOMIC})::bigint AS spent FROM mandates m"
+        f"SELECT {COLUMNS}, (COALESCE(s.total, 0) {ATOMIC})::bigint"
+        " + COALESCE((SELECT SUM(COALESCE(actual_charge, max_charge)) FROM apify_runs ar"
+        " WHERE ar.mandate_id = m.id), 0)::bigint AS spent FROM mandates m"
         " LEFT JOIN LATERAL (SELECT SUM(amount) AS total FROM payment_attempts p"
         "  WHERE p.mandate_id = m.id AND p.status = ANY(%s)) s ON true"
         " WHERE m.agent_id = %s ORDER BY m.id DESC LIMIT %s",
         (LIVE_STATUSES, agent_id, limit),
     ).fetchall()
+    purchases = conn.execute("SELECT * FROM apify_runs WHERE agent_id = %s ORDER BY id DESC LIMIT 100",
+                             (agent_id,)).fetchall()
+    for purchase in purchases:
+        charge = purchase["actual_charge"]
+        purchase["charge_usd"] = format(usdc(charge), ".6f") if charge is not None else None
+    for row in rows:
+        row["apify_purchases"] = [p for p in purchases if p["mandate_id"] == row["id"]]
     rows.sort(key=lambda r: (r["status"] != intent.PROVISIONAL or r["expired"], -r["id"]))
     return rows
 

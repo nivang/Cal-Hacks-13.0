@@ -189,9 +189,12 @@ def deliveries(conn: Connection, agent: str, keys: list[str]) -> dict[str, tuple
 def week_spend(conn: Connection, aid: int, days: int) -> int:
     """Return what this agent (by id) has spent or has in flight over the last days, in atomic units."""
     row = conn.execute(
-        f"SELECT (COALESCE(SUM(amount), 0) {ATOMIC})::bigint AS total FROM payment_attempts"
-        " WHERE agent_id = %s AND created_at >= now() - make_interval(days => %s) AND status = ANY(%s)",
-        (aid, days, LIVE_STATUSES),
+        f"SELECT (COALESCE((SELECT SUM(amount) FROM payment_attempts"
+        " WHERE agent_id = %s AND created_at >= now() - make_interval(days => %s) AND status = ANY(%s)), 0)"
+        f" {ATOMIC})::bigint + COALESCE((SELECT SUM(COALESCE(actual_charge, max_charge)) FROM apify_runs"
+        " WHERE agent_id = %s AND (created_at >= now() - make_interval(days => %s)"
+        " OR actual_charge IS NULL)), 0)::bigint AS total",
+        (aid, days, LIVE_STATUSES, aid, days),
     ).fetchone()
     return int(row["total"]) if row else 0
 

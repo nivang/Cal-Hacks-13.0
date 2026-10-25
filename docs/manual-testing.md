@@ -2,7 +2,9 @@
 
 Use this checklist to verify sign in, MCP, marketplace discovery, Apify details, task checks, and payment records on `feature/market-discovery`. Record the tool arguments, result status, request ID, and any unexpected behavior as you go. Use a dedicated test account so previous purchases and budgets do not confuse the results.
 
-Sentinel currently **searches the Apify Store and reads Actor details**. It does **not** start Actor runs or spend Apify credit. `pay_with: apify_credit` describes the Actor's funding method; it is not permission or an implemented way to run it. Public marketplace search (`discover`) and task catalog previews (`find_services`, `quote`) are separate features.
+Sentinel searches the Apify Store, reads Actor details, and runs Actors using the configured `APIFY_TOKEN` credit. Use `run_apify_actor(task_id, actor, actor_input, max_charge_usd, reason)` to buy a run and `apify_run_status(request_id)` to retrieve results. The full spending cap is reserved against task and weekly budgets before starting. `APIFY_MAX_RUN_USD` (default $1) and `APIFY_DAILY_BUDGET_USD` (default $5, shared across all users) further limit credit purchases. Apify receives the cap as `maxTotalChargeUsd`. Runs have a 120 second timeout and limited permissions. Monthly rentals are refused. Credit purchases appear under Tasks and are separate from USDC wallet payments and journal entries. The token is shared server configuration, not a separate Apify account per user.
+
+For a cheap live check, start a task to test the credit integration using the official Hello World Actor, with a $0.05 task budget. Read `apify_actor("apify/hello-world")`, then call `run_apify_actor` with that task id, `actor: "apify/hello-world"`, `actor_input: {"message":"Sentinel credits integration test"}`, `max_charge_usd: "0.01"`, `max_items: 1` and a specific testing reason. Poll only `apify_run_status` until terminal; record the actual cost and result. Actors may return dataset `items` or a JSON `output` record. Repeat the same purchase arguments and verify the request id is unchanged. Do not rerun if status is UNKNOWN: the provider may already have charged, so the reservation remains until an operator reconciles it in the Apify console. The live check on 2026-10-25 succeeded through authenticated HTTP MCP: task 12, request 2, run `nsZVceBcZgLqoKvX9`, output `{"message":"Hello world!"}`, charge $0.000125. The repeated purchase reused the same run.
 
 ## 1 Run automated checks
 
@@ -91,7 +93,7 @@ Open `http://localhost:8013`. The demo URLs below are fetched by Sentinel on the
    ```
 
 6. Run `/mcp`, authenticate, and Allow. If Sentinel is already configured, reconnect or restart the client so it refreshes the changed tool schemas.
-7. Check that these seven tools are exposed: `start_task`, `find_services`, `quote`, `pay`, `payment_status`, `discover`, `apify_actor`.
+7. Check that these eleven tools are exposed: `start_task`, `find_services`, `quote`, `compare_prices`, `pay`, `payment_status`, `resume_payment`, `discover`, `apify_actor`, `run_apify_actor`, `apify_run_status`.
 
 Use Claude's tool call display or MCP Inspector to inspect arguments and structured results. The JSON examples below are **tool arguments**, not shell commands. Replace `TASK_ID` and `REQUEST_ID` with actual returned integers.
 
@@ -209,8 +211,8 @@ Save every unexpected status and its `rule` field. Rules run in order, so prior 
 - Record the live source statuses, successful Apify detail lookups, and the manual OAuth/task/payment/Books results. Mark unperformed checks pending rather than passed.
 - Confirm that no API key, database password, OAuth token, cookie, sign in link, or real `.env` is in the staged diff. `.env.example` should contain placeholders only.
 - Ensure the new `sentinel/apify.py` and `tests/test_apify.py` are included when preparing the branch for merge. They were previously untracked, so pushing only existing commits would omit the feature.
-- Keep both `sentinel/discovery.py` (public marketplaces) and `sentinel/catalog.py` (task previews), with tests for each. Confirm the seven-tool contract after restarting the service.
+- Keep both `sentinel/discovery.py` (public marketplaces) and `sentinel/catalog.py` (task previews), with tests for each. Confirm the eleven-tool contract after restarting the service.
 - Restart demo sellers to reset mutable prices/payees. Restore account limits changed for testing and revoke test tasks you no longer need. Keep journal history; do not delete or reset payment rows to make the page look empty.
 - After merging, install dependencies, run migrations, restart Sentinel, and reconnect MCP clients to refresh the task-aware `pay` schema.
 
-Passing tests verify the implemented scope. Actor execution, Apify spending controls/bookkeeping, and a public Grok/Funnel deployment are separate work and are not established by this checklist.
+Passing automated tests does not establish that external credentials, Actor inputs or a public deployment work; record the live credit purchase separately, including its request id, actual cost and result.

@@ -155,10 +155,12 @@ def make_server(conn, connect, settings, opener, fake_judge) -> Callable[..., Fa
 
     def build(
         pay_fn: Callable[..., Any] | None = None, judge_: FakeJudge | None = None, discover_fetch: Any = None,
+        apify_client_factory: Any = None,
     ) -> FastMCP:
         return mcp_server.create_server(
             auth=SentinelOAuthProvider(settings, connect), pay_fn=pay_fn or fake_pay_for(conn), open_signer=opener,
             connect=connect, judge_=judge_ or fake_judge, discover_fetch=discover_fetch or Directory(),
+            apify_client_factory=apify_client_factory,
         )
 
     return build
@@ -198,11 +200,11 @@ def count_attempts(conn) -> int:
 
 
 @pytest.mark.anyio
-async def test_the_server_exposes_exactly_the_nine_tools(make_server, alice):
+async def test_the_server_exposes_exactly_the_eleven_tools(make_server, alice):
     async with Client(make_server()) as client:
         tools = {t.name: t for t in await client.list_tools()}
     assert set(tools) == {"start_task", "find_services", "quote", "compare_prices", "pay", "payment_status",
-                          "discover", "apify_actor", "resume_payment"}
+                          "discover", "apify_actor", "resume_payment", "run_apify_actor", "apify_run_status"}
 
 
 @pytest.mark.anyio
@@ -1417,7 +1419,7 @@ async def test_a_judge_failure_recommends_nothing(make_server, alice, hotels, fa
 
 
 @pytest.mark.anyio
-async def test_an_apify_actor_can_be_the_best_value_but_the_agent_is_told_it_cannot_be_run_yet(
+async def test_an_apify_actor_can_be_the_best_value_and_the_agent_can_run_it_on_credit(
     make_server, alice, hotels, fake_judge, monkeypatch,
 ):
     monkeypatch.setenv("APIFY_TOKEN", "apify_api_test")
@@ -1428,7 +1430,7 @@ async def test_an_apify_actor_can_be_the_best_value_but_the_agent_is_told_it_can
     assert r["best"]["name"] == "Google Maps Scraper" and r["best"]["buyable"] is False
     assert r["best"]["job_cost_usdc"] == "0.04" and r["best"]["pay_with"] == "apify_credit"
     assert r["best_buyable"]["name"] == "Hotels Pro"
-    assert "cannot run Actors yet" in r["message"]
+    assert "run_apify_actor" in r["message"]
 
 
 @pytest.mark.anyio
