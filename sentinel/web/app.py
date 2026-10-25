@@ -58,13 +58,14 @@ SITE_CSP = CSP_BEFORE_FORM + "form-action 'self'" + CSP_AFTER_FORM
 SITE_PATHS = frozenset({
     "/", "/signin", "/auth/verify", "/account", "/account/wallet", "/account/signout-everywhere", "/signout",
     "/account/live", "/account/payments", "/account/payments.csv", "/account/rules", "/account/rules/limits",
-    "/account/rules/sellers", "/account/books", "/account/tasks", "/account/tasks/confirm", "/account/tasks/revoke",
-    "/account/tasks/allow", "/account/tasks/capture", "/account/tasks/void",
+    "/account/rules/sellers", "/account/rules/auto-buy", "/account/books", "/account/tasks", "/account/tasks/confirm",
+    "/account/tasks/revoke", "/account/tasks/allow", "/account/tasks/capture", "/account/tasks/void",
     "/oauth/consent", "/healthz", "/favicon.ico", "/authorize",
 })
 DONE_TEXT = {  # the ?done= values the Rules page shows a banner for; anything else is ignored
     "limits": "Saved. Your new limits apply to the next payment.",
     "seller": "Saved. The seller list is updated.",
+    "auto_buy": "Saved. The new setting applies to the next payment.",
 }
 TASK_DONE_TEXT = {  # the ?done= values the Tasks page shows a banner for
     "confirm": "Confirmed. Your agent can now spend this task's full budget.",
@@ -535,7 +536,7 @@ def create_app(
         "/account": {"overview_spending", "overview_cap", "overview_wallet", "overview_setup", "overview_recent"},
         "/account/live": {"live_feed"},
         "/account/payments": {"payments_list"},
-        "/account/rules": {"rules_limits", "rules_sellers", "seller_wallet"},
+        "/account/rules": {"rules_limits", "rules_auto_buy", "rules_sellers", "seller_wallet"},
         "/account/tasks": {"tasks_escrow", "tasks_held", "tasks_list"},
         "/account/books": {"books_summary", "books_journal", "books_totals"},
     }
@@ -639,6 +640,10 @@ def create_app(
                 context["held"] = await run_db(mandates.list_held, aid)
             elif section == "tasks_list":
                 context["tasks"] = await run_db(mandates.list_for_agent, aid)
+                comparisons: dict[int, list[dict[str, Any]]] = {}
+                for c in await run_db(mandates.list_comparisons, aid):
+                    comparisons.setdefault(c["mandate_id"], []).append(c)
+                context["comparisons"] = comparisons
                 context["provisional_cap"] = usdc(guard.POLICY["intent_provisional_budget"])
             elif section == "books_summary":
                 context["summary"] = await run_db(books.summary, aid)
@@ -817,14 +822,19 @@ def create_app(
         request: Request, session: auth.Session, view: Mapping[str, Any], *, status: int = 200,
         error: str | None = None,
     ) -> Response:
-        """Render Tasks: what the agent is working on (provisional first) and the payments held for the owner."""
+        """Render Tasks: what the agent is working on (provisional first), the payments held for the owner, and each
+        task's price comparisons."""
         aid = view["agent_id"]
 
         def data(conn: db.Connection) -> dict[str, Any]:
+            comparisons: dict[int, list[dict[str, Any]]] = {}
+            for c in mandates.list_comparisons(conn, aid):
+                comparisons.setdefault(c["mandate_id"], []).append(c)
             return {"tasks": mandates.list_for_agent(conn, aid), "held": mandates.list_held(conn, aid),
-                    "escrow_held": mandates.list_escrow_held(conn, aid)}
+                    "escrow_held": mandates.list_escrow_held(conn, aid), "comparisons": comparisons}
 
-        found = await run_db(data) if aid is not None else {"tasks": [], "held": [], "escrow_held": []}
+        empty: dict[str, Any] = {"tasks": [], "held": [], "escrow_held": [], "comparisons": {}}
+        found = await run_db(data) if aid is not None else empty
         done = request.query_params.get("done")
         context = {
             **account_context(session, view, "tasks"), **found, "error": error,
@@ -932,6 +942,31 @@ def create_app(
             return await rules_page(request, session, view, status=400, error=str(exc), typed=typed)
         log.info("user %s changed their limits", user["id"])
         return _redirect("/account/rules?done=limits")
+
+    @app.post("/account/rules/auto-buy")
+    async def save_auto_buy(request: Request) -> Response:
+        """Turn the session user's own auto buy on or off; the agent is never a form field."""
+        refusal, user, form = await account_post(request, "/account/rules")
+        if refusal is not None or user is None:
+            return refusal or forbidden(request)
+        view = await run_db(users.account_view, user["id"])
+        session, _, _ = await current(request)
+        if session is None:
+            return forbidden(request)
+        choice = _first(form, "auto_buy")
+        if view["agent"] is None:
+            return await rules_page(request, session, view, status=400,
+                                    error="Create your wallet first, on the Overview page.")
+        if choice not in ("on", "off"):
+            return forbidden(request)
+
+        def save(conn: db.Connection) -> None:
+            with db.transaction(conn):
+                owner.set_auto_buy(conn, view["agent"], choice == "on")
+
+        await run_db(save)
+        log.info("user %s turned auto buy %s", user["id"], choice)
+        return _redirect("/account/rules?done=auto_buy")
 
     @app.post("/account/rules/sellers")
     async def save_seller(request: Request) -> Response:

@@ -149,7 +149,8 @@ async def test_each_page_renders_with_its_tab_marked_and_the_site_headers(browse
     response = await client.get(path)
     assert response.status_code == 200
     assert "alice@example.com" in response.text
-    current = re.findall(r'<a href="([^"]+)" aria-current="page"[^>]*>([^<]+)</a>', response.text)
+    links = re.findall(r'<a href="([^"]+)" aria-current="page"[^>]*>(.*?)</a>', response.text, re.DOTALL)
+    current = [(href, re.sub(r"<[^>]+>", "", content).strip()) for href, content in links]
     assert current == [(path, label)]
     assert response.headers["cache-control"] == "no-store"
     assert "script-src" in response.headers["content-security-policy"]
@@ -162,11 +163,12 @@ async def test_each_page_renders_with_its_tab_marked_and_the_site_headers(browse
 FORMS = [
     ("/account/rules/limits", {"cap": "1", "budget": "2"}),
     ("/account/rules/sellers", {"name": "NewCo", "pay_to": SELLER, "status": "approved"}),
+    ("/account/rules/auto-buy", {"auto_buy": "on"}),
 ]
 
 
 async def snapshot(conn, user):
-    limits = conn.execute("SELECT per_payment_cap, weekly_budget FROM agents WHERE id = %s",
+    limits = conn.execute("SELECT per_payment_cap, weekly_budget, auto_buy_best_value FROM agents WHERE id = %s",
                           (user["agent_id"],)).fetchone()
     return limits, own_sellers(conn, user)
 
@@ -458,12 +460,18 @@ async def test_the_pages_hold_to_the_screen_width_no_wide_text_and_tables_scroll
     client = await signed_in(browser, mailer)
     user = user_of(conn, client)
     await pay_spy("http://x/paid", None, agent=user["agent"], reason="r")
+    stylesheet = (await client.get("/static/site.css")).text
+    email_styles = re.search(r"\.sidebar-email\s*\{([^}]+)\}", stylesheet)
+    assert email_styles and all(rule in email_styles.group(1) for rule in (
+        "min-width:0", "overflow:hidden", "text-overflow:ellipsis", "white-space:nowrap",
+    ))
+    main_styles = re.search(r"\.account-main\s*\{([^}]+)\}", stylesheet)
+    assert main_styles and "max-width:1120px" in main_styles.group(1)
     for path in ["/account", "/account/payments", "/account/rules", "/account/books"]:
         text = (await client.get(path)).text
-        assert "min-w-0 max-w-[9rem] truncate" in text and "shrink-0" in text, path  # email truncates, Sign out stays
-        main = re.search(r'<main class="([^"]*)"', text)
-        assert main and "max-w-5xl" in main.group(1).split() and "min-w-0" in main.group(1).split(), path
-        # max-w-full next to max-w-5xl wins in CSS and stretches the page edge to edge on a desktop (a real regression)
+        assert 'class="sidebar-email"' in text and 'class="sidebar-signout"' in text, path
+        main = re.search(r'<main\b[^>]*class="([^"]*)"', text)
+        assert main and {"account-main", "min-w-0"} <= set(main.group(1).split()), path
         assert "max-w-full" not in main.group(1).split(), path
         for table in re.finditer(r"<table", text):
             before = text[max(0, table.start() - 120):table.start()]
@@ -893,3 +901,63 @@ async def test_browser_yes_is_single_purchase_and_never_changes_seller_list(conn
                         (request_id,)).fetchone()["n"] == 1
     assert own_sellers(conn, user) == []
     assert conn.execute("SELECT count(*) AS n FROM journal_entries").fetchone()["n"] == 0
+
+
+# Best value buying: the auto buy switch and the price comparisons on the Tasks page
+
+
+def auto_buy(conn, user) -> bool:
+    row = conn.execute("SELECT auto_buy_best_value FROM agents WHERE id = %s", (user["agent_id"],)).fetchone()
+    return bool(row["auto_buy_best_value"])
+
+
+@pytest.mark.anyio
+async def test_auto_buy_is_off_until_the_owner_turns_it_on_and_off_again(browser, mailer, conn):
+    client = await signed_in(browser, mailer)
+    user = user_of(conn, client)
+    page = await client.get("/account/rules")
+    assert "Auto buy is <span class=\"font-semibold\">off</span>" in page.text and not auto_buy(conn, user)
+    done = await client.post("/account/rules/auto-buy", data={"csrf": form_value(page.text, "csrf"), "auto_buy": "on"})
+    assert done.status_code == 303 and done.headers["location"] == "/account/rules?done=auto_buy"
+    assert auto_buy(conn, user)
+    page = await client.get(done.headers["location"])
+    assert "Turn auto buy off" in page.text and "The new setting applies" in page.text
+    await client.post("/account/rules/auto-buy", data={"csrf": form_value(page.text, "csrf"), "auto_buy": "off"})
+    assert not auto_buy(conn, user)
+
+
+@pytest.mark.anyio
+async def test_auto_buy_refuses_anything_but_on_or_off_and_only_changes_the_owners_own_agent(browser, mailer, conn):
+    alice = await signed_in(browser, mailer)
+    bob = await signed_in(browser, mailer, "bob@example.com", BOB_IP)
+    response = await alice.post("/account/rules/auto-buy", data={"csrf": await csrf(alice), "auto_buy": "yes"})
+    assert response.status_code == 403 and not auto_buy(conn, user_of(conn, alice))
+    await alice.post("/account/rules/auto-buy", data={"csrf": await csrf(alice), "auto_buy": "on",
+                                                      "agent": user_of(conn, bob)["agent"]})
+    assert auto_buy(conn, user_of(conn, alice)) and not auto_buy(conn, user_of(conn, bob))
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("headers", [{}, {"x-sentinel-section": "tasks_list"}])
+async def test_the_tasks_page_shows_each_price_comparison_with_the_pick_and_the_offers(browser, mailer, conn, headers):
+    client = await signed_in(browser, mailer)
+    user = user_of(conn, client)
+    task_id = task_for(conn, user)
+    offers = [
+        {"name": "Hotels Pro", "source": "catalog", "verdict": "OK", "cost": 150_000, "quality": 90,
+         "fit_reason": "Fifty hotels with prices.", "why_not": None, "recommended": True},
+        {"name": "<b>Hotels Cheap</b>", "source": "catalog", "verdict": "BLOCKED", "cost": 20_000, "quality": None,
+         "fit_reason": None, "why_not": "Sentinel would not pay it for this task.", "recommended": False},
+    ]
+    mandates.save_comparison(conn, task_id, "Tokyo hotel prices", 1, 50, offers, ["http://m.test/pro"],
+                             ("http://m.test/pro", "Hotels Pro", 150_000),
+                             ("http://m.test/lite", "Hotels Lite", 50_000),
+                             "Best value: Hotels Pro at $0.15 for this job, scoring 90 of 100.")
+    page = await client.get("/account/tasks", headers=headers)
+    assert page.status_code == 200
+    assert "Price comparison: Tokyo hotel prices" in page.text
+    assert "picked Hotels Pro ($0.15) over Hotels Lite ($0.05)" in page.text
+    assert "Fifty hotels with prices." in page.text and "· blocked" in page.text
+    assert "&lt;b&gt;Hotels Cheap&lt;/b&gt;" in page.text and "<b>Hotels Cheap</b>" not in page.text
+    bob = await signed_in(browser, mailer, "bob@example.com", BOB_IP)
+    assert "Tokyo hotel prices" not in (await bob.get("/account/tasks", headers=headers)).text

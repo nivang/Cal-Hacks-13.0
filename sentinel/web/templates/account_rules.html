@@ -30,6 +30,8 @@
 {% else %}
 {% if loading %}{{ placeholder("rules_limits", "Limits") }}{% else %}{% include "account_sections/rules_limits.html" %}{% endif %}
 
+{% if loading %}{{ placeholder("rules_auto_buy", "Best value buying") }}{% else %}{% include "account_sections/rules_auto_buy.html" %}{% endif %}
+
 {% if loading %}{{ placeholder("rules_sellers", "Approved sellers") }}{% else %}{% include "account_sections/rules_sellers.html" %}{% endif %}
 
 {% endif %}

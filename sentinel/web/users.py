@@ -242,7 +242,8 @@ def identity_for(conn: db.Connection, user_id: str) -> Identity | None:
 
 
 def account_view(conn: db.Connection, user_id: str, include_spend: bool = True) -> dict[str, Any]:
-    """What the account pages show: email, wallet_address, agent, agent_id, per_payment_cap, weekly_budget, week_spend.
+    """What the account pages show: email, wallet_address, agent, agent_id, per_payment_cap, weekly_budget, auto_buy
+    (the owner's auto buy switch, off before the wallet exists) and week_spend.
 
     Amounts are atomic units; week_spend counts settled and in flight payments over the guard's budget window.
     Lazy sections can skip the spending query with include_spend=False.
@@ -255,7 +256,7 @@ def account_view(conn: db.Connection, user_id: str, include_spend: bool = True) 
         row = conn.execute(
             f"SELECT u.email, u.wallet_address, a.id AS aid, a.name AS agent,"
             f" (a.per_payment_cap {ATOMIC})::bigint AS per_payment_cap,"
-            f" (a.weekly_budget {ATOMIC})::bigint AS weekly_budget"
+            f" (a.weekly_budget {ATOMIC})::bigint AS weekly_budget, COALESCE(a.auto_buy_best_value, false) AS auto_buy"
             " FROM users u LEFT JOIN agents a ON a.id = u.agent_id WHERE u.id = %s",
             (uid,),
         ).fetchone()

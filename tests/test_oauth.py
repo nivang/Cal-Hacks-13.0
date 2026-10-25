@@ -1901,7 +1901,7 @@ async def test_a_real_fastmcp_client_lists_and_calls_the_tools(app, browser, mai
     async with Client(transport) as mcp:
         tools = await mcp.list_tools()
         assert sorted(tool.name for tool in tools) == [
-            "apify_actor", "discover", "find_services", "pay", "payment_status", "quote",
+            "apify_actor", "compare_prices", "discover", "find_services", "pay", "payment_status", "quote",
             "resume_payment", "start_task",
         ]
         task_id = (await mcp.call_tool("start_task", {"task": TASK})).structured_content["task_id"]

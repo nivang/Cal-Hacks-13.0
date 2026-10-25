@@ -13,10 +13,13 @@
     python -m demo.run void    CorpData's docket monitor sends an HTML error page where it promised JSON: voided
     python -m demo.run escrow-held  the briefing buys headcount by department and gets the weather in its fields:
                                Claude cannot vouch for it, so it stays in escrow for the owner, who then refunds it here
+    python -m demo.run compare compare Acme Robotics news sources, then buy the best value for the briefing
 
 Also seeds the approved sellers and the opening balance on first run. Real testnet payments, no simulation.
 Pays as research-agent from the shared test wallet (demo.DEMO_ACCOUNT), which is created on first use.
-intent, held and escrow-held need ANTHROPIC_API_KEY: Claude reads the task and judges the payments.
+intent, held, escrow-held and compare need ANTHROPIC_API_KEY: Claude reads the task and judges the payments. compare
+also needs SENTINEL_ALLOW_LOCAL_URLS=1 and SENTINEL_DISCOVERY_URL pointing at the test site's catalog, and searches the
+public directories too.
 The escrow modes also open the escrow operator (escrow.open_operator), which pays the gas.
 """
 import asyncio
@@ -28,7 +31,22 @@ from dotenv import load_dotenv
 from x402.mechanisms.evm import ClientEvmSigner
 
 from demo import DEMO_ACCOUNT
-from sentinel import ENV_FILE, attempts, chain, db, escrow, judge, ledger, mandates, wallets
+from sentinel import (
+    ENV_FILE,
+    apify,
+    attempts,
+    chain,
+    compare,
+    db,
+    discovery,
+    escrow,
+    judge,
+    ledger,
+    mandates,
+    owner,
+    results,
+    wallets,
+)
 from sentinel.payments import (
     NETWORK,
     USDC_BASE_SEPOLIA,
@@ -50,7 +68,9 @@ API = "/test-site/api"
 ACME = "?company=Acme+Robotics"
 FUNDING = f"{API}/company/funding{ACME}"
 APPROVED = {"CorpData": "SELLER_A_ADDRESS", "OpenWire": "SELLER_B_ADDRESS"}
-SCENARIOS = ("seed", "buy", "surge", "scam", "intent", "held", "escrow", "void", "escrow-held")
+SCENARIOS = ("seed", "buy", "surge", "scam", "intent", "held", "escrow", "void", "escrow-held", "compare")
+COMPARE_TASK = "Find recent news about Acme Robotics, with summaries and source links; keep data costs under $1."
+COMPARE_REASON = "Need recent company news and sources for the Acme Robotics briefing; compare the offers."
 
 
 async def bootstrap_books(conn: db.Connection, wallet_address: str) -> None:
@@ -76,7 +96,8 @@ async def set_price(path: str, price: str) -> None:
         await http.post(f"{SELLERS_URL}/test-site/admin/price", json={"path": path, "price": price})
 
 
-async def start_task(the_judge: judge.Judge, text: str, per_call: int | None = None) -> Task:
+async def start_task(the_judge: judge.Judge, text: str, per_call: int | None = None,
+                     found_at: str = "owner") -> Task:
     """Have Claude read the task into a mandate for research-agent and confirm it with its $1 budget, as the owner
     would.
 
@@ -91,16 +112,62 @@ async def start_task(the_judge: judge.Judge, text: str, per_call: int | None = N
         task_id = mandates.create(conn, aid, text, draft.goal, draft.expected_types, draft.out_of_scope, 1_000_000,
                                   per_call)
         mandates.confirm(conn, task_id, aid, 1_000_000, attempts.load_agent(conn, AGENT)["weekly_budget"])
-    return Task(task_id, "owner", the_judge)
+    return Task(task_id, found_at, the_judge)
+
+
+async def compare_news(task: Task) -> results.ComparisonResult:
+    """Compare every seller of Acme Robotics news for the task and print the table, best value first."""
+    with db.connection() as conn:
+        auto = attempts.load_agent(conn, AGENT)["auto_buy_best_value"]
+    print(f"COMPARE  Acme Robotics news (auto buy {'on' if auto else 'off'})")
+    async with httpx.AsyncClient(timeout=discovery.TIMEOUT_S, follow_redirects=False) as client:
+        found = await compare.compare(db.connection, AGENT, task, "Acme Robotics news", 1, 50,
+                                      fetch=discovery.http_fetcher(client, apify.headers_for),
+                                      apify_credit=apify.has_credit(), purpose="Recent company news for the briefing.")
+    for o in found.offers:
+        mark = "*" if o.recommended else " "
+        cost = f"${o.job_cost_usdc}" if o.job_cost_usdc else "?"
+        quality = o.quality if o.quality is not None else "-"
+        print(f"  {mark} {o.name[:34]:<34} {o.source:<8} {cost:>8}  q {quality!s:>3}  {o.note or o.fit_reason or ''}")
+    print(f"PICK     {found.message}")
+    return found
+
+
+async def set_auto_buy(on: bool) -> None:
+    """Flip research-agent's auto buy, as the owner would on the Rules page."""
+    with db.connection() as conn, db.transaction(conn):
+        owner.set_auto_buy(conn, AGENT, on)
+
+
+async def run_compare(signer: ClientEvmSigner) -> None:
+    """Compare marketplace news sources; demonstrate auto buy when the best value needs owner approval."""
+    await set_auto_buy(False)
+    task = await start_task(judge.ClaudeJudge(), COMPARE_TASK, None, "sentinel discovery")
+    found = await compare_news(task)
+    if found.best_buyable is None:
+        return
+    await attempt(signer, found.best_buyable.url, COMPARE_REASON, task)
+    if not found.needs_owner:
+        return  # An allowed/free pick was already fetched; do not pay for it twice.
+    print("OWNER    turns auto buy on")
+    await set_auto_buy(True)
+    try:
+        found = await compare_news(task)
+        if found.best_buyable is not None:
+            await attempt(signer, found.best_buyable.url, COMPARE_REASON, task)
+    finally:
+        await set_auto_buy(False)
 
 
 async def attempt(
     signer: ClientEvmSigner, path: str, reason: str, task: Task | None = None,
     operator: escrow.EscrowOperator | None = None,
 ) -> int | None:
-    """Pay for one path and print the outcome. Returns the request id of a payment left in escrow for the owner."""
+    """Pay for one path (or a full URL) and print the outcome. Returns the request id of a payment left in escrow for
+    the owner."""
+    url = path if path.startswith(("http://", "https://")) else f"{SELLERS_URL}{path}"
     try:
-        result = await pay_for(f"{SELLERS_URL}{path}", signer, agent=AGENT, reason=reason, task=task,
+        result = await pay_for(url, signer, agent=AGENT, reason=reason, task=task,
                                operator=operator)
     except PaymentHeld as e:
         print(f"HELD     {e}")
@@ -152,6 +219,8 @@ async def run(scenario: str) -> None:
             print(f"the Rules page at {FRESH_WALLET}")
         elif scenario in ("escrow", "void", "escrow-held"):
             await run_escrow(scenario, signer)
+        elif scenario == "compare":
+            await run_compare(signer)
         elif scenario == "intent":
             task = await start_task(judge.ClaudeJudge(), TASK)
             await attempt(signer, FUNDING, REASON, task)

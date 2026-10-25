@@ -70,6 +70,7 @@ def test_history_flags_duplicate_and_baseline_after_settlement(conn):
 def test_agent_limits_come_back_in_atomic_units(conn):
     assert attempts.load_agent(conn, "research-agent") == {
         "name": "research-agent", "per_payment_cap": 10_000_000, "weekly_budget": 50_000_000,
+        "auto_buy_best_value": False,
     }
 
 

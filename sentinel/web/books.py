@@ -158,8 +158,9 @@ def fingerprint(conn: Connection, agent_id: int) -> tuple[str, bool]:
     """A short tag that changes whenever the Live or Payments page would show something new, in one query.
 
     Covers the newest PAYMENT_LIMIT attempts (status, delivery check, escrow state), the newest tasks (status,
-    budget, expiry) and the seller lists that name the sellers. Also says whether an approval has run out and
-    needs link_approvals.expire first (the tag is read again after that). Polls compare tags and skip the page.
+    budget, expiry), the seller lists that name the sellers and Apify runs (they count toward task spend). Also
+    says whether an approval has run out and needs link_approvals.expire first (the tag is read again after that).
+    Polls compare tags and skip the page.
     """
     row = conn.execute(
         "SELECT md5(concat_ws('|',"
@@ -170,7 +171,8 @@ def fingerprint(conn: Connection, agent_id: int) -> tuple[str, bool]:
         " (SELECT string_agg(concat_ws(':', m.id, m.status, m.budget, m.expires_at <= now()), ',' ORDER BY m.id)"
         "  FROM (SELECT id, status, budget, expires_at FROM mandates WHERE agent_id = %(aid)s"
         "  ORDER BY id DESC LIMIT %(tasks)s) m),"
-        " (SELECT max(added_at) FROM sellers WHERE agent_id IS NULL OR agent_id = %(aid)s)"
+        " (SELECT max(added_at) FROM sellers WHERE agent_id IS NULL OR agent_id = %(aid)s),"
+        " (SELECT concat_ws(':', count(*), max(updated_at)) FROM apify_runs WHERE agent_id = %(aid)s)"
         " )) AS tag,"
         " EXISTS (SELECT 1 FROM payment_attempts WHERE agent_id = %(aid)s AND status = ANY(%(waiting)s)"
         "  AND approval_expires_at <= clock_timestamp()) AS expired_approvals",

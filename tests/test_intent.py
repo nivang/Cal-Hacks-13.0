@@ -249,3 +249,60 @@ def test_a_seller_whose_deliveries_keep_failing_is_held():
     v = run(session=replace(SESSION, seller_bad_deliveries=2))
     assert (v.decision, v.rule) == (intent.ESCALATE, "bad_deliveries") and "2 deliveries" in v.detail
     assert run(session=replace(SESSION, seller_bad_deliveries=2, allowance_id=3)).rule == "allowance"
+
+
+# pricier_pick: a price comparison under this task found something cheaper
+
+PICK = intent.Comparison(
+    id=3, best_key="http://data.test/benchmarks/email", best_name="DataCo", cheapest_key="http://cheap.test/email",
+    cheapest_name="CheapCo", cheapest_cost=100_000, calls=1, explanation="Best value: DataCo, scoring 90 of 100.",
+)
+
+
+def test_the_recommended_pricier_pick_is_held_for_the_owner_with_the_reason():
+    v = run(session=replace(SESSION, comparison=PICK))
+    assert (v.decision, v.tier, v.rule) == (intent.ESCALATE, 0, "pricier_pick")
+    assert "best value" in v.detail and "CheapCo at $0.10" in v.detail and "scoring 90" in v.detail
+
+
+def test_auto_buy_lets_the_recommended_pricier_pick_through():
+    assert run(session=replace(SESSION, comparison=PICK), agent=replace(AGENT, auto_buy_best_value=True)) is None
+
+
+def test_auto_buy_still_holds_a_pricier_offer_sentinel_did_not_recommend():
+    other = replace(PICK, best_key="http://other.test/email", best_name="Other")
+    v = run(session=replace(SESSION, comparison=other), agent=replace(AGENT, auto_buy_best_value=True))
+    assert v.rule == "pricier_pick" and "not the one Sentinel recommended (Other)" in v.detail
+
+
+def test_buying_the_cheapest_option_or_paying_no_more_than_it_is_not_held():
+    assert run(session=replace(SESSION, comparison=replace(PICK, cheapest_key=QUOTE.url))) is None
+    assert run(session=replace(SESSION, comparison=replace(PICK, cheapest_cost=QUOTE.amount))) is None
+
+
+def test_the_job_is_priced_at_the_comparisons_calls():
+    # $0.50 a call x 3 calls = $1.50 against a $1.20 cheapest job: held. Against $1.50: not.
+    assert run(session=replace(SESSION, comparison=replace(PICK, calls=3, cheapest_cost=1_200_000))).rule == \
+        "pricier_pick"
+    assert run(session=replace(SESSION, comparison=replace(PICK, calls=3, cheapest_cost=1_500_000))) is None
+
+
+def test_the_comparison_matches_the_product_whatever_query_the_agent_sets():
+    asked = replace(PAYMENT, quote=replace(QUOTE, url=QUOTE.url + "?industry=retail"))
+    assert run(payment=asked, session=replace(SESSION, comparison=PICK)).rule == "pricier_pick"
+    assert intent.url_key("http://a.test/x?q=1#top") == "http://a.test/x"
+
+
+def test_an_allow_once_wins_over_pricier_pick():
+    v = run(session=replace(SESSION, comparison=PICK, allowance_id=12))
+    assert v.decision == intent.ALLOW and v.rule == "allowance"
+
+
+def test_no_comparison_or_one_without_a_cheapest_option_is_not_held():
+    assert run() is None
+    assert run(session=replace(SESSION, comparison=replace(PICK, cheapest_key=None, cheapest_cost=None))) is None
+
+
+def test_a_security_hold_still_comes_before_pricier_pick():
+    v = run(session=replace(SESSION, comparison=PICK, payee_unused=True))
+    assert v.rule == "unused_wallet"
