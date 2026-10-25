@@ -33,7 +33,20 @@ from starlette.datastructures import Headers, MutableHeaders
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 from x402.mechanisms.evm import ClientEvmSigner
 
-from sentinel import chain, db, guard, judge, link_approvals, mandates, mcp_server, owner, payments, results, wallets
+from sentinel import (
+    chain,
+    db,
+    guard,
+    injection_detector,
+    judge,
+    link_approvals,
+    mandates,
+    mcp_server,
+    owner,
+    payments,
+    results,
+    wallets,
+)
 from sentinel.web import Settings, auth, books, oauth, pages, ratelimit, users
 from sentinel.web.mailer import Mailer, MailError, make_mailer, sign_in_message
 
@@ -313,6 +326,8 @@ def create_app(
 
     @asynccontextmanager
     async def sweeper(_app: Any) -> AsyncIterator[None]:
+        # A configured but unusable detector must prevent startup, not silently disable the screen.
+        await asyncio.to_thread(injection_detector.initialize)
         task = asyncio.create_task(sweep_forever()) if open_operator is not None else None
         try:
             yield

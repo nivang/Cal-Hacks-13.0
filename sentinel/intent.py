@@ -32,6 +32,7 @@ hard rule. Decisions come in tiers, fast to smart, and the first to decide wins:
           answers allow, block or escalate.
 payments.review_intent runs the tiers; everything it needs from the database arrives here as plain dataclasses, so
 the same inputs always give the same decision and test_intent.py is the answer key for tier 0.
+After tier 0, payments.review_intent also runs the optional local injection detector before any Claude cache hit.
 Seller text and the agent's reason are untrusted: case() hands them to the judge as quoted data, never instructions.
 """
 import re

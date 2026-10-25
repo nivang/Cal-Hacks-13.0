@@ -17,6 +17,7 @@ and captures (seller paid), voids (buyer refunded) or leaves it held for the own
 payments later. Sellers without escrow are paid with exact as before; their deliveries are checked by the rules and
 recorded, but nothing can be given back.
 """
+import asyncio
 import logging
 import time
 from dataclasses import asdict, dataclass, replace
@@ -30,7 +31,20 @@ from x402.mechanisms.evm import ClientEvmSigner
 from x402.mechanisms.evm.exact import ExactEvmScheme
 from x402.schemas import PaymentPayload
 
-from sentinel import attempts, chain, db, delivery, escrow, guard, intent, judge, ledger, link_approvals, mandates
+from sentinel import (
+    attempts,
+    chain,
+    db,
+    delivery,
+    escrow,
+    guard,
+    injection_detector,
+    intent,
+    judge,
+    ledger,
+    link_approvals,
+    mandates,
+)
 
 log = logging.getLogger("sentinel.payments")
 
@@ -355,8 +369,11 @@ async def review_intent(
     conn: db.Connection, agent: str, quote: guard.Quote, reason: str, task: Task, seller: intent.Seller,
     profile: chain.WalletProfile | None = None,
 ) -> Review:
-    """Check one guard approved payment against its task: tier 0 rules, then the cached or fresh fast check, then
-    the judge. A judge failure holds the payment (intent.unavailable), never pays."""
+    """Run deterministic rules, the optional local injection screen, then Claude (including its cache).
+
+    A configured detector failure or judge failure holds the payment, never pays. Owner Allow once is a
+    deterministic verdict and keeps its existing purchase scoped override behavior.
+    """
     policy = guard.POLICY
     agent_row = attempts.load_agent(conn, agent)
     aid = db.agent_id(conn, agent)
@@ -372,6 +389,8 @@ async def review_intent(
         session = replace(session, payee_unused=True)
 
     verdict = intent.tier0(mandate, payment, session, guard.Agent(**agent_row), policy)
+    if verdict is None:
+        verdict = await asyncio.to_thread(injection_detector.review, seller, session.listing)
     if verdict is None:
         verdict = await _model_tiers(conn, task.judge, mandate, payment, session, policy)
     log.info("intent: agent %s task %s tier %s %s (%s)", agent, mandate.id, verdict.tier, verdict.decision,

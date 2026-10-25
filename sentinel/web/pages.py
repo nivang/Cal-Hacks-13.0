@@ -54,6 +54,7 @@ RULE_LABELS = {
     "big_share": "Large share of the task's budget", "long_window": "Payment window too long",
     "lookalike": "Lookalike address", "payee_changed": "Payee swapped",
     "injection": "Seller tried to instruct the agent", "unlisted_url": "URL not from the catalog",
+    "injection_ml": "Possible instructions in seller text", "injection_unavailable": "Could not check seller text",
     "bait_switch": "Bait and switch",
     "listing_changed": "Sells something other than listed", "flagged_wallet": "Wallet flagged as a scam",
     "unused_wallet": "Wallet has no history", "bad_deliveries": "Seller's deliveries keep failing",
