@@ -89,15 +89,15 @@ def section_client(settings, monkeypatch):
     return client
 
 
-async def test_overview_shell_has_connection_instructions_before_data(settings):
+async def test_settings_shell_has_connection_instructions_before_data(settings):
     def unavailable():
         raise AssertionError("The shell must not access the database")
 
     app = create_app(settings, connect=unavailable)
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url=settings.base_url) as client:
         client.cookies.set(auth.session_cookie_name(settings), auth.make_session(settings, USER_ID, 0))
-        response = await client.get("/account", headers={"accept": "text/html"})
-        for section in ("identity", "overview_spending", "overview_setup", "overview_recent"):
+        response = await client.get("/account/rules", headers={"accept": "text/html"})
+        for section in ("identity", "rules_limits", "rules_sellers", "rules_demo"):
             assert f'data-account-section="{section}"' in response.text
         assert settings.resource_url in response.text
         assert "claude mcp add" in response.text
@@ -193,7 +193,7 @@ async def test_invalid_section_is_rejected(section_client):
     ("/account", "overview_spending", "Spent this week"),
     ("/account", "overview_cap", "Per payment cap"),
     ("/account", "overview_wallet", "Create my wallet"),
-    ("/account", "overview_setup", "Get started"),
+    ("/account", "overview_setup", "Finish setup"),
     ("/account", "overview_recent", "Nothing yet"),
     ("/account/payments", "payments_list", "No payments yet"),
     ("/account/tasks", "tasks_held", "Nothing is waiting for you"),

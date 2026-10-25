@@ -1,10 +1,10 @@
 {% extends "account_base.html" %}
 {% from "account_macros.html" import primary, secondary, danger, input, card, seller_badge, source_badge, banners, no_wallet %}
-{% block title %}Rules · Sentinel{% endblock %}
+{% block title %}Settings · Sentinel{% endblock %}
 {% from "account_loading_macros.html" import placeholder %}
 {% block content %}
-<h1 class="text-2xl font-semibold tracking-tight">Rules</h1>
-<p class="mt-1 text-sm text-stone-600">What your agent may spend, and who it may pay. Anything else is blocked.</p>
+<h1 class="text-2xl font-semibold tracking-tight">Settings</h1>
+<p class="mt-1 text-sm text-stone-600">Manage spending limits, sellers, and your connected apps.</p>
 <div class="mt-6">
 {{ banners(done, done_text, error) }}
 {% if confirm %}
@@ -35,5 +35,7 @@
 {% if loading %}{{ placeholder("rules_demo", "Demo sellers") }}{% else %}{% include "account_sections/rules_demo.html" %}{% endif %}
 
 {% endif %}
+{% include "account_sections/connection.html" %}
+{% include "account_sections/sessions.html" %}
 </div>
 {% endblock %}

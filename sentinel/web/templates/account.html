@@ -5,39 +5,14 @@
 {% block content %}
 {{ banners(false, "", error) }}
 <h1 class="text-2xl font-semibold tracking-tight">Your account</h1>
-<p data-account-email class="mt-1 break-all text-stone-600">{% if loading %}Account details are loading…{% else %}{{ email }}{% endif %}</p>
+<p class="mt-1 text-sm text-stone-600">Spending, recent activity, and anything that needs your attention.</p>
 
 
-{% if loading %}
-<div class="mt-6 grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
-{{ placeholder("overview_spending", "Spent this week") }}
-{{ placeholder("overview_cap", "Per payment cap") }}
-{{ placeholder("overview_wallet", "Wallet") }}
-</div>{% else %}{% include "account_sections/overview_summary.html" %}{% endif %}
+{% if loading %}{{ placeholder("overview_spending", "Spent this week") }}{% else %}{% include "account_sections/overview_spending.html" %}{% endif %}
+{% if loading %}{{ placeholder("overview_wallet", "Wallet") }}{% else %}{% include "account_sections/overview_wallet.html" %}{% endif %}
 
-{% if loading %}{{ placeholder("overview_setup", "Get started") }}{% else %}{% include "account_sections/overview_setup.html" %}{% endif %}
-
-<section class="mt-4 {{ card }}" aria-labelledby="connect-h">
-  <h2 id="connect-h" class="font-semibold">Connect your AI app</h2>
-  <p class="mt-1 text-sm text-stone-600">Your agent asks Sentinel to pay; Sentinel checks your rules first.</p>
-  <details class="mt-3"{% if not connected %} open{% endif %}>
-    <summary class="cursor-pointer text-sm font-medium">Show the connection details</summary>
-    <p class="mt-3 text-sm text-stone-700">In Claude, add a custom connector with this URL (leave the OAuth fields empty):</p>
-    <p class="mt-2 break-all rounded bg-stone-100 px-3 py-2 font-mono text-sm select-all">{{ mcp_url }}</p>
-    <p class="mt-4 text-sm text-stone-700">In Claude Code:</p>
-    <p class="mt-2 break-all rounded bg-stone-100 px-3 py-2 font-mono text-sm select-all">{{ claude_command }}</p>
-    <p class="mt-2 text-sm text-stone-600">Then run /mcp and approve the connection in your browser.</p>
-  </details>
-</section>
+{% if loading %}{{ placeholder("overview_setup", "Setup") }}{% else %}{% include "account_sections/overview_setup.html" %}{% endif %}
 
 {% if loading %}{{ placeholder("overview_recent", "Recent payments") }}{% else %}{% include "account_sections/overview_recent.html" %}{% endif %}
 
-<section class="mt-4 rounded-lg border border-red-200 bg-white p-5" aria-labelledby="out-h">
-  <h2 id="out-h" class="font-semibold">Sign out everywhere</h2>
-  <p class="mt-1 text-sm text-stone-700">This ends every browser session and disconnects every app you approved. You will have to connect your AI app again.</p>
-  <form method="post" action="/account/signout-everywhere" class="mt-3">
-    <input type="hidden" name="csrf" value="{{ csrf }}">
-    <button type="submit" class="{{ danger }}">Sign out everywhere</button>
-  </form>
-</section>
 {% endblock %}

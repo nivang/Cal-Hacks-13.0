@@ -489,6 +489,8 @@ def create_app(
             "csrf": auth.csrf_token(settings, session.value, "account"),
             "basescan_url": BASESCAN_ADDRESS + address if address else None,
             "faucet_url": FAUCET,
+            "mcp_url": settings.resource_url,
+            "claude_command": f"claude mcp add --transport http sentinel {settings.resource_url}",
             "cap": usdc(view["per_payment_cap"]),
             "budget": usdc(view["weekly_budget"]),
             "spent": usdc(view["week_spend"]),
@@ -528,7 +530,7 @@ def create_app(
                 steps = [
                     (True, "Create your wallet", None),
                     (found["has_seller"], "Approve a seller your agent may pay", "/account/rules"),
-                    (found["connected"], "Connect your AI app", "#connect-h"),
+                    (found["connected"], "Connect your AI app", "/account/rules#connect-h"),
                 ]
                 context.update(steps=steps, all_set=all(done for done, _, _ in steps))
             elif section == "overview_recent":
@@ -569,7 +571,7 @@ def create_app(
         elif section == "overview_setup":
             context.update(steps=[(False, "Create your wallet", None),
                                   (False, "Approve a seller your agent may pay", "/account/rules"),
-                                  (False, "Connect your AI app", "#connect-h")], all_set=False)
+                                  (False, "Connect your AI app", "/account/rules#connect-h")], all_set=False)
         if section == "rules_limits":
             context.update(typed_cap=results.usdc_text(view["per_payment_cap"]) if aid is not None else "",
                            typed_budget=results.usdc_text(view["weekly_budget"]) if aid is not None else "")
@@ -638,7 +640,7 @@ def create_app(
         steps = [
             (aid is not None, "Create your wallet", None),
             (found["has_seller"], "Approve a seller your agent may pay", "/account/rules"),
-            (found["connected"], "Connect your AI app", "#connect-h"),
+            (found["connected"], "Connect your AI app", "/account/rules#connect-h"),
         ]
         context = {
             **account_context(session, view, "overview"), **found, "steps": steps,

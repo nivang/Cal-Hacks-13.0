@@ -4,7 +4,7 @@
 {% from "account_loading_macros.html" import placeholder %}
 {% block content %}
 <h1 class="text-2xl font-semibold tracking-tight">Tasks</h1>
-<p class="mt-1 text-sm text-stone-600">Every payment your agent makes belongs to a task you gave it. Sentinel checks each one against the task, and holds anything you should decide.</p>
+<p class="mt-1 text-sm text-stone-600">Review your agent’s tasks and approve anything waiting for you.</p>
 <div class="mt-6">
 {{ banners(done, done_text, error) }}
 {% if not loading and not agent %}

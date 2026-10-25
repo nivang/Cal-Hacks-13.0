@@ -115,7 +115,9 @@ Honest limits of what is built: the injection rule matches phrases, so subtle at
 
 ## Development
 
-Account pages show their layout and connection instructions before fetching authenticated data. Each spending,
+Account navigation groups Overview, Activity (Tasks, Payments, Books), and Settings. Longer task and payment
+details expand on demand; setup and session controls live in Settings. Account pages show their layout before
+fetching authenticated data, and connection instructions in Settings are available immediately. Each spending,
 wallet, task, history, and books section loads independently and has its own retry. Seller wallet checks load
 after the seller controls; each request rechecks the live session. The no-JavaScript link still loads the full page.
 Restart the Python server after backend edits;

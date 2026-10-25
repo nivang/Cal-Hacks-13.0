@@ -1,5 +1,5 @@
 {% from "account_macros.html" import primary, secondary, danger, input, card, status_badge, seller_cell, seller_badge, source_badge, banners, no_wallet %}
-<section class="{{ card }}" aria-labelledby="limits-h">
+<section class="mt-6 border-b border-stone-200 pb-6" aria-labelledby="limits-h">
   <h2 id="limits-h" class="font-semibold">Limits</h2>
   <p class="mt-1 text-sm text-stone-600">You have spent {{ spent }} this week, out of {{ budget }}.</p>
   <form method="post" action="/account/rules/limits" class="mt-4 grid grid-cols-1 gap-4 sm:grid-cols-2">

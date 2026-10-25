@@ -1,7 +1,7 @@
 {% from "account_macros.html" import primary, secondary, danger, input, card, status_badge, seller_cell, seller_badge, source_badge, banners, no_wallet %}
 {% if demo %}
-<section class="mt-4 {{ card }}" aria-labelledby="demo-h">
-  <h2 id="demo-h" class="font-semibold">Demo sellers</h2>
+<details class="mt-6 border-b border-stone-200 pb-6">
+  <summary id="demo-h" class="cursor-pointer font-semibold">Demo sellers</summary>
   <p class="mt-1 text-sm text-stone-600">Shown only while Sentinel runs locally. These are the test sellers from the demo. Approving both opens the demo marketplace (trip data, and the off task products Sentinel then blocks by task); the scammer is never offered.</p>
   <ul class="mt-3 divide-y divide-stone-100">
     {% for d in demo %}
@@ -17,5 +17,5 @@
     </li>
     {% endfor %}
   </ul>
-</section>
+</details>
 {% endif %}

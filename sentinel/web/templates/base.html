@@ -8,7 +8,7 @@
 <link rel="icon" href="/favicon.ico" type="image/svg+xml">
 <link rel="stylesheet" href="/static/site.css">
 </head>
-<body class="min-h-screen bg-stone-50 text-stone-900 antialiased">
+<body class="{% block body_class %}sentinel-theme public-site min-h-screen bg-stone-50 text-stone-900 antialiased{% endblock %}">
 {% block header %}<header class="border-b border-stone-200 bg-white">
   <div class="mx-auto flex {% block width %}max-w-xl{% endblock %} items-center justify-between px-4 py-3">
     <a href="/" class="flex items-center gap-2 font-semibold tracking-tight">
@@ -17,10 +17,10 @@
     {% block nav %}{% endblock %}
   </div>
 </header>{% endblock %}
-<main class="mx-auto {{ self.width() }} min-w-0 px-4 py-10">
+<main id="main-content" class="{% block main_class %}mx-auto {{ self.width() }} min-w-0 px-4 py-10{% endblock %}">
 {% block content %}{% endblock %}
 </main>
-<footer class="mx-auto {{ self.width() }} px-4 pb-10 text-xs text-stone-500">
+<footer class="{% block footer_class %}mx-auto {{ self.width() }} px-4 pb-10 text-xs text-stone-500{% endblock %}">
   Sentinel holds your agent's wallet and checks every payment against your rules. Base Sepolia test network.
 </footer>
 </body>

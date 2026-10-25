@@ -87,5 +87,22 @@
     });
   }
 
+  // A setup link should reveal its destination, including collapsed connection help.
+  function revealHash() {
+    const id = window.location.hash.slice(1);
+    if (!id) return;
+    let target;
+    try { target = document.getElementById(decodeURIComponent(id)); } catch { return; }
+    if (!target) return;
+    let details = target.closest("details");
+    while (details) {
+      details.open = true;
+      details = details.parentElement?.closest("details");
+    }
+    target.scrollIntoView();
+  }
+
+  window.addEventListener("hashchange", revealHash);
+  revealHash();
   discover(document);
 })();
