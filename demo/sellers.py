@@ -19,6 +19,7 @@ swapped payee); never expose this server publicly.
 Run with: uvicorn demo.sellers:app --port 4000
 """
 import hashlib
+import logging
 import os
 from collections.abc import Callable
 from decimal import Decimal
@@ -33,6 +34,7 @@ from x402.http import HTTPFacilitatorClient, PaymentOption
 from x402.http.middleware.fastapi import PaymentMiddlewareASGI
 from x402.http.types import RouteConfig
 from x402.mechanisms.evm.exact import ExactEvmServerScheme
+from x402.schemas import SettleFailureContext, VerifyFailureContext
 from x402.server import x402ResourceServer
 
 from demo.escrow_seller import PAID_PREFIX, EscrowMiddleware, paid_only
@@ -63,6 +65,9 @@ def wallet(env_var: str) -> str:
 # path: (seller wallet env var, price, service name, description, tags, what a paid call returns).
 # Names and descriptions are seller written, so Sentinel treats them as data.
 CATALOG: dict[str, tuple[str, str, str, str, list[str], dict[str, Any]]] = {
+    "/approval-test/email": (C, "$0.25", "Demo Email Benchmarks", "Email open-rate and click-rate benchmarks.",
+                             ["email", "marketing", "benchmarks"],
+                             {"vendor": "Demo Email Benchmarks", "open_rate": 0.214, "click_rate": 0.028}),
     "/benchmarks/email": (A, "$0.50", "DataCo", "2026 email marketing benchmarks: open and click rates by industry.",
                           ["email", "marketing", "benchmarks"],
                           {"vendor": "DataCo", "open_rate": 0.214, "click_rate": 0.028}),
@@ -149,6 +154,19 @@ OPTS: dict[str, PaymentOption] = {
 
 server = x402ResourceServer(HTTPFacilitatorClient(create_facilitator_config()))
 server.register(NET, ExactEvmServerScheme())  # type: ignore[arg-type]  # SDK typing mismatch, see FEEDBACK.md
+
+def log_verify_failure(context: VerifyFailureContext) -> None:
+    """Explain a rejected signed payment without logging its signature or credentials."""
+    logging.getLogger("uvicorn.error").warning("x402 verification failed: %s", context.error)
+
+
+def log_settle_failure(context: SettleFailureContext) -> None:
+    """Explain a settlement failure; returning None leaves the SDK's rejection intact."""
+    logging.getLogger("uvicorn.error").warning("x402 settlement failed: %s", context.error)
+
+
+server.on_verify_failure(log_verify_failure)
+server.on_settle_failure(log_settle_failure)
 
 routes = {
     f"GET {path}": RouteConfig(

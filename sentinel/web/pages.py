@@ -58,6 +58,7 @@ RULE_LABELS = {
     "listing_changed": "Sells something other than listed", "flagged_wallet": "Wallet flagged as a scam",
     "unused_wallet": "Wallet has no history", "bad_deliveries": "Seller's deliveries keep failing",
     "escrow_terms": "Escrow terms not safe",
+    "approval": "Purchase approval", "quote_changed": "Quote changed",
 }
 ADDRESS = re.compile(r"0x[0-9a-fA-F]{40}")
 
@@ -80,7 +81,7 @@ def why(payment: Mapping[str, Any]) -> tuple[str, str]:
         if payment.get("tx_hash"):
             return "Paid but not recorded, contact the owner", ""
         return "Payment did not complete", ""
-    if status in ("approved", "pending"):
+    if status == "approved":
         return "In progress", ""
     if status == "escalated":
         rule = (payment.get("rule") or "").strip()
@@ -94,6 +95,13 @@ def why(payment: Mapping[str, Any]) -> tuple[str, str]:
         return "Refunded: the delivery failed the check", delivery
     if status == "settled" and payment.get("delivery_verdict") == "fail":
         return "Paid, but the delivery failed the check (no escrow)", delivery
+    if status in ("pending", "authorized", "cancelled", "expired"):
+        return {
+            "pending": ("Waiting for your approval", "Nothing has been signed."),
+            "authorized": ("Approved once", "Ask your agent to resume before approval expires."),
+            "cancelled": ("Approval dismissed", "Nothing was signed."),
+            "expired": ("Approval expired", "Nothing was signed."),
+        }[status]
     return "", ""
 
 

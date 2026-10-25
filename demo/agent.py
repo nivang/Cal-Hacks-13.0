@@ -22,7 +22,8 @@ from x402.mechanisms.evm import ClientEvmSigner
 
 from demo import DEMO_ACCOUNT
 from demo.run import AGENT, bootstrap_books
-from sentinel import ENV_FILE, attempts, db, discovery, judge, mandates, owner, payments, results, urls, wallets
+from sentinel import ENV_FILE, attempts, db, judge, mandates, owner, payments, results, urls, wallets
+from sentinel import catalog as discovery
 
 MODEL = "claude-opus-5-5"
 DEFAULT_BUDGET = 3_000_000

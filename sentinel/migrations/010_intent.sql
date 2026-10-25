@@ -40,7 +40,8 @@ alter table payment_attempts
     add column intent_reason text;
 alter table payment_attempts drop constraint payment_attempts_status_check;
 alter table payment_attempts add constraint payment_attempts_status_check
-    check (status in ('blocked', 'pending', 'approved', 'denied', 'settled', 'failed', 'escalated'));
+    check (status in ('blocked', 'pending', 'authorized', 'approved', 'denied', 'cancelled', 'expired', 'settled',
+                      'failed', 'escalated', 'escrowed', 'voided'));
 create index payment_attempts_mandate_created_idx on payment_attempts (mandate_id, created_at)
     where mandate_id is not null;
 

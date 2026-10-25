@@ -34,6 +34,7 @@ from conftest import (
     call_tool,
     fake_wallet_address,
     form_value,
+    mcp_request,
     path_of,
     pkce,
     query_of,
@@ -1458,10 +1459,7 @@ async def site_tokens(client: httpx.AsyncClient, mailer: RecordingMailer, **kw: 
 
 async def mcp_status(client: httpx.AsyncClient, token: str) -> int:
     """The HTTP status of a tools/list call to /mcp with this bearer token."""
-    response = await client.post(
-        "/mcp", json={"jsonrpc": "2.0", "id": 1, "method": "tools/list"},
-        headers={"Authorization": f"Bearer {token}", "Accept": "application/json, text/event-stream"},
-    )
+    response = await mcp_request(client, token, {"jsonrpc": "2.0", "id": 1, "method": "tools/list"})
     return response.status_code
 
 
@@ -1902,10 +1900,46 @@ async def test_a_real_fastmcp_client_lists_and_calls_the_tools(app, browser, mai
     )
     async with Client(transport) as mcp:
         tools = await mcp.list_tools()
-        assert sorted(tool.name for tool in tools) == ["find_services", "pay", "payment_status", "quote", "start_task"]
+        assert sorted(tool.name for tool in tools) == [
+            "apify_actor", "discover", "find_services", "pay", "payment_status", "quote",
+            "resume_payment", "start_task",
+        ]
         task_id = (await mcp.call_tool("start_task", {"task": TASK})).structured_content["task_id"]
         result = await mcp.call_tool("pay", {"task_id": task_id, "url": PAY_URL, "reason": REASON})
     assert result.structured_content is not None
     assert result.structured_content["status"] == "SETTLED"
     assert result.structured_content["body"] == PAID_BODY.decode()
     assert len(pay_spy.calls) == 1
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("mode", ["legacy", "auto"])
+@pytest.mark.parametrize("choice,expected", [("No", "DENIED"), ("Yes", "SETTLED")])
+async def test_native_purchase_approval_over_authenticated_http(
+    app, browser, mailer, pay_spy, conn, mode, choice, expected,
+):
+    from fastmcp.client.elicitation import ElicitResult
+
+    _, tokens = await site_tokens(browser(), mailer)
+    pay_spy.pay_to = "0x" + "a" * 40
+    prompts = []
+
+    async def answer(message, response_type, params, context):
+        prompts.append(message)
+        assert conn.execute("SELECT count(*) AS n FROM journal_entries").fetchone()["n"] == 0
+        return ElicitResult(action="accept", content={"value": choice})
+
+    def factory(**kwargs):
+        options = {key: value for key, value in kwargs.items() if value is not None}
+        return httpx2.AsyncClient(transport=StreamingASGITransport(app), **options)
+
+    transport = StreamableHttpTransport(
+        f"{TEST_BASE_URL}/mcp", headers={"Authorization": f"Bearer {tokens['access_token']}"},
+        httpx_client_factory=factory,
+    )
+    async with Client(transport, elicitation_handler=answer, mode=mode) as client:
+        task_id = (await client.call_tool("start_task", {"task": TASK})).structured_content["task_id"]
+        result = await client.call_tool("pay", {"task_id": task_id, "url": PAY_URL, "reason": REASON})
+        assert result.structured_content["status"] == expected
+    assert len(prompts) == 1
+    assert conn.execute("SELECT count(*) AS n FROM journal_entries").fetchone()["n"] == (expected == "SETTLED")

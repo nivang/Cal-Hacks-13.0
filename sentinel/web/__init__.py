@@ -17,7 +17,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from urllib.parse import urlsplit
 
-SESSION_PURPOSES = frozenset({"session", "csrf", "pending-request", "consent-binding"})
+SESSION_PURPOSES = frozenset({"session", "csrf", "pending-request", "consent-binding", "purchase-approval-state"})
 TOKEN_PURPOSES = frozenset(
     {"magic-link", "auth-code", "access-token", "refresh-token", "refresh-rotation", "client-secret", "ip"}
 )

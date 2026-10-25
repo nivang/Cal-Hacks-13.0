@@ -1,4 +1,4 @@
-"""Deterministic payment policy: decides ALLOW or BLOCK for one quote.
+"""Deterministic payment policy: ALLOW, BLOCK, or a human approval requirement.
 
 evaluate() is pure, so the same inputs always give the same decision. payments.py calls it before
 anything is signed, and test_guard.py is its answer key. Rules run in order and the first to fire wins:
@@ -7,20 +7,22 @@ anything is signed, and test_guard.py is its answer key. Rules run in order and 
   2. lookalike      the payee is not approved but imitates an approved seller's (or the owner's own) address: same
                     first 6 and last 4 hex characters, the address poisoning trick -> BLOCK
   3. flagged_wallet the Base Sepolia explorer flags the payee as a scam (chain.wallet_profile) -> BLOCK
-  3b. seller        any seller the owner has not approved (unlisted or blocked) -> BLOCK
+  3b. seller        explicitly blocked or noninteractive unknown -> BLOCK
   4. payee_changed  this agent already paid this exact URL to a different address: the payee was swapped -> BLOCK
   5. cap            amount above the agent's per payment cap -> BLOCK
   6. budget         rolling spend + amount above the weekly budget -> BLOCK
   7. price_jump     amount above 2x the median of the last 5 settled prices of this product (seller and URL) -> BLOCK
                     (no history means the first price is trusted and becomes the baseline)
   8. duplicate      same agent, payTo, url and amount inside the duplicate window -> BLOCK
-  9. clean          everything passed -> ALLOW
+  9. seller         interactive unknown without one purchase authorization -> APPROVAL_REQUIRED
+ 10. clean          everything passed -> ALLOW
 """
 import json
 from dataclasses import dataclass
+from decimal import Decimal
 from pathlib import Path
 
-ALLOW, BLOCK = "ALLOW", "BLOCK"
+ALLOW, BLOCK, APPROVAL_REQUIRED = "ALLOW", "BLOCK", "APPROVAL_REQUIRED"
 
 POLICY: dict[str, int] = json.loads((Path(__file__).parent / "policy.json").read_text())
 
@@ -89,12 +91,17 @@ def imitates(address: str, known: list[str]) -> str | None:
 
 
 def usd(atomic: int) -> str:
-    """Format USDC atomic units as dollars for messages only. Never used for arithmetic."""
-    return f"${atomic / 1_000_000:.2f}"
+    """Format USDC atomic units as dollars for messages only, never rounded: $0.50, $10.00, $0.001, $1.001."""
+    text = format((Decimal(atomic) / 1_000_000).normalize(), "f")
+    whole, _, frac = text.partition(".")
+    return f"${whole}.{frac.ljust(2, '0')}"
 
 
-def evaluate(agent: Agent, quote: Quote, history: History, policy: dict[str, int] = POLICY) -> Decision:
-    """Return the decision for this agent paying this quote, given what the ledger already holds.
+def evaluate(
+    agent: Agent, quote: Quote, history: History, policy: dict[str, int] = POLICY,
+    *, interactive: bool = False, authorized: bool = False,
+) -> Decision:
+    """Return policy for this quote. authorized is set only after consuming a server-side human approval.
 
     detail is written for the owner and for the agent that asked, so it avoids jargon and rule names.
     """
@@ -121,8 +128,8 @@ def evaluate(agent: Agent, quote: Quote, history: History, policy: dict[str, int
 
     if history.seller_status == "blocked":
         return Decision(BLOCK, "seller", f"The seller {quote.pay_to} is on the owner's blocked list.")
-    # Only the owner adds sellers, so anything not approved stops here, however convincing the page was.
-    if history.seller_status != "approved":
+    # Noninteractive callers still require permanent seller approval.
+    if history.seller_status != "approved" and not (interactive or authorized):
         return Decision(
             BLOCK, "seller",
             f"The seller {quote.pay_to} is not on the owner's approved list. Only the owner can add sellers.",
@@ -172,4 +179,6 @@ def evaluate(agent: Agent, quote: Quote, history: History, policy: dict[str, int
             related_id=history.duplicate_of,
         )
 
+    if history.seller_status != "approved" and not authorized:
+        return Decision(APPROVAL_REQUIRED, "seller", "This seller is not approved. Ask the user before signing.")
     return Decision(ALLOW, "clean", "All checks passed.")

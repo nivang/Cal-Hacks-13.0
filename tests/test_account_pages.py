@@ -625,8 +625,8 @@ async def test_sign_in_approve_a_seller_on_the_rules_page_then_pay_over_mcp(brow
     url = "http://seller.test/benchmarks/email"
 
     blocked = await call_tool(client, tokens.access_token, "pay", {"url": url, "reason": REASON})
-    assert blocked["status"] == "BLOCKED" and blocked["rule"] == "seller"
-    assert (await client.get("/account/payments")).text.count("BLOCKED") >= 1
+    assert blocked["status"] == "APPROVAL_REQUIRED" and blocked["approval_url"]
+    assert "AWAITING APPROVAL" in (await client.get("/account/payments")).text
 
     await add_seller(client, "DataCo", DATACO)
     settled = await call_tool(client, tokens.access_token, "pay", {"url": url + "?again=1", "reason": REASON})
@@ -856,3 +856,48 @@ async def test_the_demo_card_offers_a_fresh_wallet_and_approving_it_warns(browse
     assert "PocketWiFi (new wallet)" in page and books.DEMO_FRESH_WALLET in page
     response = await add_seller(client, "PocketWiFi (new wallet)", books.DEMO_FRESH_WALLET)
     assert response.status_code == 200 and "no activity at all on Base Sepolia" in response.text
+@pytest.mark.anyio
+async def test_purchase_approval_fallback_needs_session_csrf_and_ownership(conn, browser, mailer):
+    from sentinel import link_approvals
+
+    alice = await signed_in(browser, mailer)
+    user = user_of(conn, alice)
+    quote = Quote("http://seller.test/new", SELLER, 500_000, ASSET, NETWORK, 300)
+    with pytest.raises(payments.ApprovalRequired) as caught:
+        payments.authorize(conn, user["agent"], '<script>alert("purpose")</script>', quote, interactive=True)
+    request_id = caught.value.attempt_id
+    path = f"/account/approvals/{request_id}"
+    page = await alice.get(path)
+    assert page.status_code == 200 and "Yes, approve once" in page.text
+    assert '<script>alert("purpose")</script>' not in page.text
+    assert page.headers["x-frame-options"] == "DENY"
+    assert (await alice.post(path, data={"choice": "yes"})).status_code == 403
+    bob = await signed_in(browser, mailer, "bob@example.com", BOB_IP)
+    assert (await bob.get(path)).status_code == 404
+    assert (await bob.post(path, data={"choice": "yes", "csrf": await csrf(bob)})).status_code == 403
+    assert link_approvals.get(conn, user["agent"], request_id)["status"] == "pending"
+    response = await alice.post(path, data={"choice": "no", "csrf": form_value(page.text, "csrf")})
+    assert response.status_code == 303
+    assert link_approvals.get(conn, user["agent"], request_id)["status"] == "denied"
+    assert conn.execute("SELECT count(*) AS n FROM journal_entries").fetchone()["n"] == 0
+
+
+@pytest.mark.anyio
+async def test_browser_yes_is_single_purchase_and_never_changes_seller_list(conn, browser, mailer):
+    from sentinel import link_approvals
+
+    client = await signed_in(browser, mailer)
+    user = user_of(conn, client)
+    quote = Quote("http://seller.test/new", SELLER, 500_000, ASSET, NETWORK, 300)
+    with pytest.raises(payments.ApprovalRequired) as caught:
+        payments.authorize(conn, user["agent"], REASON, quote, interactive=True)
+    request_id = caught.value.attempt_id
+    path = f"/account/approvals/{request_id}"
+    token = await csrf(client, path)
+    for _ in range(2):
+        assert (await client.post(path, data={"choice": "yes", "csrf": token})).status_code == 303
+    assert link_approvals.get(conn, user["agent"], request_id)["status"] == "authorized"
+    assert conn.execute("SELECT count(*) AS n FROM approvals WHERE attempt_id = %s",
+                        (request_id,)).fetchone()["n"] == 1
+    assert own_sellers(conn, user) == []
+    assert conn.execute("SELECT count(*) AS n FROM journal_entries").fetchone()["n"] == 0

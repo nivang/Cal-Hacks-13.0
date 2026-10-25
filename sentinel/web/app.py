@@ -33,7 +33,7 @@ from starlette.datastructures import Headers, MutableHeaders
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 from x402.mechanisms.evm import ClientEvmSigner
 
-from sentinel import chain, db, guard, judge, mandates, mcp_server, owner, payments, results, wallets
+from sentinel import chain, db, guard, judge, link_approvals, mandates, mcp_server, owner, payments, results, wallets
 from sentinel.web import Settings, auth, books, oauth, pages, ratelimit, users
 from sentinel.web.mailer import Mailer, MailError, make_mailer, sign_in_message
 
@@ -93,7 +93,7 @@ def csp(form_action: str = "'self'") -> str:
 
 def is_site_path(path: str) -> bool:
     """True for the paths that get the site's security headers: site pages, /static and /authorize."""
-    return path in SITE_PATHS or path.startswith("/static/")
+    return path in SITE_PATHS or path.startswith(("/static/", "/account/approvals/"))
 
 
 class SecurityHeaders:
@@ -290,11 +290,12 @@ def create_app(
     """
     mail = mailer if mailer is not None else make_mailer(settings)
     provider = oauth.SentinelOAuthProvider(settings, connect)
-    server = mcp_server.create_server(
-        auth=provider, pay_fn=pay_fn, open_signer=open_signer, connect=connect, judge_=judge_,
-        open_operator=open_operator,
-    )
-    mcp_app = server.http_app(path=oauth.MCP_PATH, json_response=True, stateless_http=True)
+    server = mcp_server.create_server(auth=provider, pay_fn=pay_fn, open_signer=open_signer, connect=connect,
+                                      judge_=judge_, approval_base_url=settings.base_url,
+                                      approval_state_key=settings.key("purchase-approval-state"),
+                                      open_operator=open_operator)
+    # Native legacy forms need stateful sessions and SSE to return the human's answer.
+    mcp_app = server.http_app(path=oauth.MCP_PATH, json_response=False, stateless_http=False)
 
     async def sweep_forever() -> None:
         """Every SWEEP_EVERY_S, finish what is still in escrow (payments.sweep). A failed round waits for the next."""
@@ -577,6 +578,8 @@ def create_app(
         if refusal is not None or session is None:
             return refusal or forbidden(request)
         aid = view["agent_id"]
+        if view["agent"]:
+            await run_db(link_approvals.expire, view["agent"])
         groups = await run_db(books.payments_by_task, aid) if aid is not None else []
         context = {**account_context(session, view, "payments"), "groups": groups,
                    "payments": [row for group in groups for row in group["rows"]]}
@@ -702,6 +705,35 @@ def create_app(
         if not auth.check_csrf(settings, session.value, "account", _first(form, "csrf")):
             return forbidden(request), None, form
         return None, user, form
+
+    @app.get("/account/approvals/{request_id}")
+    async def purchase_approval(request: Request, request_id: int) -> Response:
+        """Authenticated human fallback for clients without native MCP forms."""
+        refusal, session, view = await account_get(request, "/account/payments")
+        if refusal is not None or session is None:
+            return refusal or forbidden(request)
+        row = await run_db(link_approvals.get, view["agent"], request_id) if view["agent"] else None
+        if row is None:
+            return page(request, "error.html", {"title": "Not found", "message": "No such purchase for you."}, 404)
+        return page(request, "purchase_approval.html", {
+            **account_context(session, view, "payments"), "purchase": row,
+        })
+
+    @app.post("/account/approvals/{request_id}")
+    async def decide_purchase(request: Request, request_id: int) -> Response:
+        refusal, user, form = await account_post(request, "/account/payments")
+        if refusal is not None or user is None:
+            return refusal or forbidden(request)
+        choice = _first(form, "choice")
+        if choice not in ("yes", "no"):
+            return forbidden(request)
+        identity = await run_db(users.identity_for, user["id"])
+        if identity is None:
+            return forbidden(request)
+        row = await run_db(link_approvals.decide, identity.agent, request_id, str(user["id"]), choice)
+        if row is None:
+            return forbidden(request)
+        return _redirect(f"/account/approvals/{request_id}")
 
     @app.post("/account/rules/limits")
     async def save_limits(request: Request) -> Response:
