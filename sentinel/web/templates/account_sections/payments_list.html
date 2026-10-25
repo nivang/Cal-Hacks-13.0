@@ -21,7 +21,7 @@
       </p>
       {% else %}
       <h2 id="task-{{ loop.index }}-h" class="font-semibold">Not under a task</h2>
-      <p class="mt-0.5 text-xs text-stone-500">Payments made outside an agent task, such as the command line demo.</p>
+      <p class="mt-0.5 text-xs text-stone-500">Payments made outside an agent task.</p>
       {% endif %}
     </div>
     <p class="text-xs text-stone-600">{{ group.paid }} paid · {{ group.blocked }} blocked · {{ group.held }} held{% if group.searched %} · {{ group.searched }} found while searching{% endif %}</p>
@@ -46,6 +46,7 @@
 
         <td class="whitespace-nowrap px-3 py-2 text-right tabular-nums">{{ p.amount | usd }}</td>
         <td class="px-3 py-2">{{ status_badge(p.status) }}
+          {% if p.status == "escrowed" %}<a class="mt-1 block underline" href="/account/tasks#escrow-h">Review delivery</a>{% endif %}
           {% if p.status in ("pending", "authorized") %}<a class="mt-1 block underline" href="/account/approvals/{{ p.id }}">Review approval</a>{% endif %}
         </td>
         <td class="px-3 py-2">

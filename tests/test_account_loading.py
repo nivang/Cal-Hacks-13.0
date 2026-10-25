@@ -97,7 +97,7 @@ async def test_settings_shell_has_connection_instructions_before_data(settings):
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url=settings.base_url) as client:
         client.cookies.set(auth.session_cookie_name(settings), auth.make_session(settings, USER_ID, 0))
         response = await client.get("/account/rules", headers={"accept": "text/html"})
-        for section in ("identity", "rules_limits", "rules_sellers", "rules_demo"):
+        for section in ("identity", "rules_limits", "rules_sellers"):
             assert f'data-account-section="{section}"' in response.text
         assert settings.resource_url in response.text
         assert "claude mcp add" in response.text

@@ -13,11 +13,13 @@ Sentinel holds the wallet so the agent never does. Every payment request passes 
 | `sentinel/apify.py` | Apify Actor details for `apify_actor`: pricing, input fields and an example input. Sends `APIFY_TOKEN` to api.apify.com only. Runs nothing |
 | `sentinel/results.py` | The one result shape the tools return, and the plain English for each outcome |
 | `sentinel/urls.py` | Refuses unsafe URLs (file://, private or metadata addresses) before anything is fetched |
-| `sentinel/payments.py` | The x402 flow: ask for a price, build a quote, run the guard, then the intent review under a task, sign, pay, record |
+| `sentinel/payments.py` | The x402 flow: ask for a price, build a quote, run the guard, then the intent review under a task, sign, pay, record. With a seller that offers escrow: hold, fetch, check the delivery, then capture, void or hold for the owner (`settle_held`, `sweep`) |
+| `sentinel/escrow.py` | x402 auth-capture on Base Sepolia: PaymentInfo, its hash and nonce, the buyer's ReceiveWithAuthorization, `check_terms`, the escrow calldata, `payment_state`, and the operator account that sends authorize, capture and void |
+| `sentinel/delivery.py` | Pure delivery check: did the paid response match what the seller promised (status, type, JSON, promised fields, no injection); the judge's answer mapped to pass or hold |
 | `sentinel/wallets.py` | The wallet that signs: `open_user_wallet(user_id)`, each user's own CDP account named by their uuid, behind x402's signer interface |
 | `sentinel/guard.py` | Pure policy: ALLOW, BLOCK or APPROVAL_REQUIRED for one quote |
 | `sentinel/intent.py` | Pure intent binding: the tier 0 rules on a task, how tier 1 and tier 2 answers map to ALLOW, BLOCK or ESCALATE, and the quoted JSON case the judge reads |
-| `sentinel/judge.py` | Claude Haiku 5.5 reads a task into a mandate (`extract`), checks a purchase against it (`classify`, tier 1) and judges what tier 1 cannot settle (`decide`, tier 2); any failure raises `JudgeError` |
+| `sentinel/judge.py` | Claude Haiku 5.5 reads a task into a mandate (`extract`), checks a purchase against it (`classify`, tier 1), judges what tier 1 cannot settle (`decide`, tier 2) and checks an escrowed delivery against the seller's promise (`check_delivery`); any failure raises `JudgeError` |
 | `sentinel/catalog.py` | Reads the paid service catalog (x402 Bazaar shape), ranks it against a query, and previews each listing under a task (`find`, `preview`) |
 | `sentinel/chain.py` | Read only Base Sepolia lookups: a wallet's profile from the explorer (activity, first seen, scam flag; cached), its RPC history and USDC balance |
 | `sentinel/mandates.py` | Tasks in the database: create, session facts for the rules, the tier 1 cache, confirm, revoke, held payments and Allow once |
@@ -25,7 +27,7 @@ Sentinel holds the wallet so the agent never does. Every payment request passes 
 | `sentinel/attempts.py` | Attempt log and the history lookups the guard reads (price history per agent) |
 | `sentinel/ledger.py` | Balanced, append only journal and trial balance; credits the agent's own cash account |
 | `sentinel/db.py` | Postgres connection pool (max 10), tracked migrations, seed data and default limits. The only file that touches the driver |
-| `sentinel/migrations/` | The Postgres schema: tables, append only triggers, balance check, RLS, dashboard read policies; 008 adds users, magic links and the OAuth tables; 009 adds `sellers.agent_id` (personal seller lists); 010 adds tasks (`mandates`), the intent columns on attempts, `intent_cache` and `allowances` |
+| `sentinel/migrations/` | The Postgres schema: tables, append only triggers, balance check, RLS, dashboard read policies; 008 adds users, magic links and the OAuth tables; 009 adds `sellers.agent_id` (personal seller lists); 010 adds tasks (`mandates`), the intent columns on attempts, `intent_cache` and `allowances`; 014 adds `escrow_payments`, the `escrowed` and `voided` statuses, the delivery columns and `journal_entries.step` |
 | `sentinel/web/__init__.py` | `Settings` and `load_settings`: reads and checks the environment once, derives one subkey per purpose |
 | `sentinel/web/app.py` | The one ASGI app: site routes, consent, security headers, CORS on `/mcp`, then FastMCP mounted at `/` |
 | `sentinel/web/auth.py` | Magic links, email normalization, session cookies, CSRF, same origin check |
@@ -37,8 +39,10 @@ Sentinel holds the wallet so the agent never does. Every payment request passes 
 | `sentinel/web/pages.py`, `templates/`, `static/` | The site's pages (Jinja2, autoescaped, no JavaScript of ours) |
 | `sentinel/templates/` | Ledger page HTML |
 | `demo/__init__.py` | `DEMO_ACCOUNT = "sentinel"`: the only home of the shared test wallet |
-| `demo/run.py` | Runs the guard moments (buy, surge, scam) and the intent ones (intent, held) as research-agent from the demo wallet |
-| `demo/sellers.py` | Local test marketplace (a fixture, not part of Sentinel): trip data, traps, and `/discovery/resources` |
+| `demo/run.py` | Runs the guard moments (buy, surge, scam), the intent ones (intent, held) and the escrow ones (escrow, void, escrow-held) as research-agent from the demo wallet |
+| `test_site/app.py` | Local test marketplace (a fixture, not part of Sentinel): trip data, traps, escrow next to exact for DataCo and InsightLab, and `/test-site/discovery/resources` |
+| `test_site/escrow_seller.py` | The seller side of escrow: adds the auth-capture offer to the 402 and serves a request only once the escrow holds the full price |
+| `demo/escrow_spike.py` | One escrow round trip outside the payment flow (`capture` or `void`); creates and funds the operator on first run |
 | `demo/agent.py` | A Claude API research agent that spends through Sentinel, with a printed trace |
 | `demo/fund.py` | Asks the CDP faucet for testnet USDC |
 | `docs/onboarding.md` | Sign in, connecting Claude, local run, deploy checklist, troubleshooting |
@@ -47,7 +51,7 @@ Sentinel holds the wallet so the agent never does. Every payment request passes 
 ## MCP tools
 
 - `start_task(task, budget_usd?)`: start a task with the owner's own words. Claude reads it into a mandate (goal, expected purchase types, out of scope, and a budget and per call price only if the task states them). Returns `STARTED` with only the `task_id` and a note to go straight on to `pay` without telling the owner, or `FAILED` (the model could not read it, nothing stored). The mandate is never shown to the agent, so it has nothing to relay: the owner sees it on the Tasks page and the operator in the server log (`started task ...`). The budget is the stated one, capped at the weekly budget. Up to 50 tasks per agent per day.
-- `pay(task_id, url, reason, found_at?)`: buy a paywalled URL for a task. `reason` must be specific (20 to 500 characters); the owner reads it in the ledger next to the seller and the price. `found_at` is where the agent got the URL (`owner`, a page URL or a tool name). Returns one of `SETTLED` (body, amount, tx hash), `BLOCKED` (the rule and a plain English reason), `ESCALATED` (held for the owner, nothing paid), `FREE`, or `FAILED`. A `task_id` that is not the caller's is BLOCKED (`no_task`) before any wallet opens.
+- `pay(task_id, url, reason, found_at?)`: buy a paywalled URL for a task. `reason` must be specific (20 to 500 characters); the owner reads it in the ledger next to the seller and the price. `found_at` is where the agent got the URL (`owner`, a page URL or a tool name). Returns one of `SETTLED` (body, amount, tx hash), `BLOCKED` (the rule and a plain English reason), `ESCALATED` (held for the owner, nothing paid), `HELD` (in escrow, the owner decides whether the seller is paid; no body yet), `REFUNDED` (escrowed, the delivery failed the check, money back, no body), `PROCESSING`, `FREE`, or `FAILED`. A `task_id` that is not the caller's is BLOCKED (`no_task`) before any wallet opens.
 - `find_services(task_id, query, purpose?)`: search the paid service catalog and preview each result under the task. The agent sees only the services Sentinel would pay for (name, URL, price, the seller's own description marked untrusted). Everything turned away goes to the owner's payment log instead (see Discovery and previews), so the agent has nothing to relay. Nothing is paid.
 - `quote(task_id, url, purpose?)`: the same preview for one URL.
 - `payment_status(request_id)`: the current state of one of the agent's own requests, including the paid body once it has settled.
@@ -99,11 +103,11 @@ A signed in user does everything from `/account` (all need a live session, other
 |---|---|
 | `GET /account` | Overview: spend against budget, cap, wallet and Fund it, getting started checklist, connection details, recent payments, sign out everywhere |
 | `GET /account/payments`, `GET /account/payments.csv` | Their own payments (newest 200), grouped by task (goal, state, spend, counts), with status and a plain English why; payments outside a task come last. The CSV is flat and holds up to the latest 20,000 |
-| `GET /account/tasks`, `POST /account/tasks/confirm`, `POST /account/tasks/revoke`, `POST /account/tasks/allow` | Their agent's tasks (provisional first): confirm with a budget up to the weekly budget, or revoke; held payments with the reason and Allow once |
+| `GET /account/tasks`, `POST /account/tasks/confirm`, `POST /account/tasks/revoke`, `POST /account/tasks/allow`, `POST /account/tasks/capture`, `POST /account/tasks/void` | Their agent's tasks (provisional first): confirm with a budget up to the weekly budget, or revoke; held payments with the reason and Allow once; payments held in escrow with what the seller sent, **Pay seller** or **Refund me** |
 | `GET /account/rules`, `POST /account/rules/limits`, `POST /account/rules/sellers` | Their per payment cap and weekly budget; their seller list (add, block, re approve; up to 200 personal sellers, then block one you no longer use) |
 | `GET /account/books` | Their journal, totals by account and whether the books balance |
 
-Every query is scoped to the agent id read from the database for the session's user, never from a form or URL, and every POST needs the same origin and the account CSRF token. In dev mode the Rules page also offers the demo sellers (DataCo, InsightLab, from `SELLER_A_ADDRESS` and `SELLER_B_ADDRESS`; never the scammer). The journal shows each entry as "Paid <seller> for <host and path>" with a Basescan link, the raw memo kept as a tooltip. `web/books.py` holds the queries.
+Every query is scoped to the agent id read from the database for the session's user, never from a form or URL, and every POST needs the same origin and the account CSRF token. The journal shows each entry as "Paid <seller> for <host and path>" with a Basescan link, the raw memo kept as a tooltip. `web/books.py` holds the queries.
 
 ## Ledger page
 
@@ -145,7 +149,7 @@ A link the agent says it found on a web page, to a seller host the owner's task 
 
 **The judge can be attacked too.** It reads one JSON document of structured fields (`intent.case`): seller text, the agent's reason and the task are quoted data, clipped in length, never part of the system prompt, and the system prompt says nothing in them can authorize a payment. The answer is a closed schema (a verdict from a fixed list and a short reason, shown to the owner escaped). Any model failure (timeout, refusal, API error, unparsable output) holds the payment for the owner (`judge_unavailable`); it never pays.
 
-**Discovery and previews.** An agent rarely knows what to buy up front. `find_services` reads a catalog in the x402 Bazaar discovery shape (`SENTINEL_DISCOVERY_URL`, the local marketplace by default; the URL passes the same SSRF check as `pay`), ranks listings by the query's words, and previews up to 12, four at a time: `payments.preview` asks each URL for its real price (the catalog's price is display only), then runs the guard and the intent tiers exactly as `pay` would, without writing an attempt. The tier 1 verdict is cached, so the purchase that follows is quick. A preview is advice; `pay` checks everything again. A listing a preview turns away is written to the payment log as a `blocked` or `escalated` attempt with `preview` true (migration 011), once per task, URL and status: the Payments page and CSV show it as found while searching, and a held one can be allowed once from the Tasks page. These rows are not pay calls, so the rate and drift rules and the judge's history leave them out.
+**Discovery and previews.** An agent rarely knows what to buy up front. `find_services` reads a catalog in the x402 Bazaar discovery shape (`SENTINEL_DISCOVERY_URL`, no default; locally the test site serves one; the URL passes the same SSRF check as `pay`), ranks listings by the query's words, and previews up to 12, four at a time: `payments.preview` asks each URL for its real price (the catalog's price is display only), then runs the guard and the intent tiers exactly as `pay` would, without writing an attempt. The tier 1 verdict is cached, so the purchase that follows is quick. A preview is advice; `pay` checks everything again. A listing a preview turns away is written to the payment log as a `blocked` or `escalated` attempt with `preview` true (migration 011), once per task, URL and status: the Payments page and CSV show it as found while searching, and a held one can be allowed once from the Tasks page. These rows are not pay calls, so the rate and drift rules and the judge's history leave them out.
 
 **Seller attacks are deterministic.** The rules above that catch a malicious seller (long window, lookalike, payee changed, bait and switch, injection, unlisted URL, listing changed) are plain comparisons, not model calls: they run first, in milliseconds, and a seller cannot talk its way past them. What the catalog advertised is stored per task in `listings_seen` (migration 012) so the paywall's real 402 can be compared against it.
 
@@ -156,6 +160,24 @@ A link the agent says it found on a web page, to a seller host the owner's task 
 **Held payments.** ESCALATE records an `escalated` attempt (no in flight lock, not counted as spend) and the agent gets `ESCALATED`. The Tasks page lists it with the reason and an **Allow once** button, which writes an `allowances` row. The next identical payment under the same task (seller, URL, amount) hits tier 0's allowance rule and goes through, using the allowance up. Blocks still win over an allowance.
 
 **Speed.** Tier 0 and cache hits take milliseconds. A first look at a seller and URL is a Claude Haiku 5.5 call, measured at about 1.2 to 2.6 seconds per call locally (tier 1, and the same again when tier 2 runs), so a new purchase can take up to about 5 seconds before it is signed. Repeats are cached.
+
+## Escrow
+
+A guard can only stop a payment before it is signed. Escrow covers what happens after: when a seller offers x402 auth-capture, the money is held onchain until Sentinel has checked what came back, then the seller is paid (capture) or the buyer gets it back (void). Sellers that offer only `exact` are paid as before.
+
+**Who does what.** The escrow is AuthCaptureEscrow v1.1 (`0xf968...B19c`, deployed on Base Sepolia), reached through its ERC-3009 collector. Only the payment's operator can authorize, capture or void, so Sentinel is the operator: its own CDP account (`SENTINEL_OPERATOR_ACCOUNT`, default `sentinel-operator`) sends every escrow call and pays the gas in Base Sepolia ETH. The buyer signs a gasless `ReceiveWithAuthorization`; the seller needs no facilitator and only reads the chain. A seller opts in by naming Sentinel's operator as `captureAuthorizer` in its 402 (`test_site/escrow_seller.py`). No x402 SDK or facilitator supports the scheme yet, so `escrow.py` implements it, checked against the contract's own `getHash` (FEEDBACK.md).
+
+**The flow** (`payments._pay_escrow`): `select_requirement` prefers an auth-capture offer that passes `escrow.check_terms` (canonical escrow, Sentinel as operator, eip3009, no fee, no receiver authorizer, capture deadline 10 to 60 minutes away) and falls back to exact; an escrow offer that fails the terms with no exact option is BLOCKED (`escrow_terms`). The guard and intent binding run unchanged. Then: sign, authorize (attempt `escrowed`, Dr 1050 escrow / Cr cash), retry the GET with the payload and the authorize tx, check the delivery, then:
+
+| Delivery check | Then | Agent sees |
+|---|---|---|
+| A rule fails (`delivery.check`: HTTP error or no answer, empty, too big, wrong content type, not JSON, a promised field missing, instructions to AI agents) | void: Dr cash / Cr 1050, attempt `voided` | `REFUNDED`, no body |
+| Rules pass, and the judge says delivered (`judge.check_delivery`, quoted JSON as in intent binding; without a task, the rules alone) | capture: Dr expense / Cr 1050, attempt `settled` | `SETTLED` with the body |
+| The judge says not delivered or unsure, or fails | held for the owner on the Tasks page | `HELD`, no body until paid |
+
+The seller's promise comes from its own 402: the resource's mime type and description, and the output fields of the x402 Bazaar discovery extension (the schema's required keys, else the example's keys). The model alone never voids a sale and never pays a delivery it doubts. A voided or held delivery is kept for the owner (`attempt_results`) but not handed to the agent.
+
+**Afterwards.** The owner settles a held payment with **Pay seller** or **Refund me** (`payments.settle_held`). The server sweeps every minute (`payments.sweep`): it retries a capture or void whose chain call failed, and voids anything still held, or never checked after a crash, 5 minutes before its capture deadline. If Sentinel is down past the deadline the buyer can still reclaim the hold onchain. Exact payments get the same rules after they settle; a failure is recorded on the attempt (no money back), and two failed deliveries from one seller in the budget window hold its next payment (intent rule `bad_deliveries`). Escrowed money counts as spent for budgets and duplicates; voided money counts for nothing.
 
 ## Books
 
@@ -174,9 +196,12 @@ The journal, approvals and stored results tables cannot be edited, deleted or tr
 | Code | Name | Type |
 |------|------|------|
 | 1010 | USDC Cash | asset |
+| 1050 | USDC in Escrow | asset |
 | 3000 | Owner Contributions | equity |
 | 6100 | Research Data Expense | expense |
 | 6200 | Software and Tools Expense | expense |
+
+Each user's agent holds escrow in its own `1050-<agent id>` "USDC in Escrow <address>", created the first time it holds money; it returns to zero once every hold is captured or voided. An escrowed payment books twice (hold, then capture or void), so a journal entry is unique per attempt and `step`.
 
 The demo wallet's opening USDC balance is booked once as Dr 1010 / Cr 3000 so the trial balance is complete. Funding a user's wallet is not booked yet, so a user's cash account goes negative in the books as they pay.
 
@@ -197,7 +222,7 @@ Row level security is on for every table. The anon role gets nothing. A signed i
 
 Database tests run in the `test` schema of your Supabase database, each inside a rolled back transaction.
 
-`test_guard.py` is the answer key for the guard: six planted cases (unknown seller, cap, budget, price jump, duplicate, clean) plus edge cases. `test_store.py` and `test_payments.py` cover the attempt log, the in flight lock and the books. `test_pay_flow.py` runs the whole payment flow against a fake seller and covers every way an approved payment can fail. `test_mcp_server.py` calls the tools with a token identity and checks each result the agent can see, plus `main()`'s startup checks. `test_oauth.py` covers discovery, registration, the full connect flow, consent, codes, refresh, revocation and access tokens. `test_web_auth.py` covers magic links, rate limits, sessions, CSRF, headers, the mailer and settings. `test_user_wallets.py` covers provisioning, isolation between users and failing closed. `test_migrations.py` covers tracked migrations and `test_app_smoke.py` the assembled app. `test_account_pages.py` covers the account pages over HTTP and `test_user_sellers.py` the two seller lists. `test_owner.py` covers the operator's seller list and limits the guard obeys, the ledger queries and the CSV. `test_ledger_app.py` covers the password gate, the forms, escaping and the CSV download. `test_wallets.py` covers wallet selection and shows that a signer other than CDP plugs into the same interface. `test_intent.py` is the answer key for intent binding's tier 0 rules and tier mappings, `test_judge.py` covers the Claude calls against a fake client (what is sent, failing closed), and the intent sections of `test_mcp_server.py` and `test_account_pages.py` cover tasks, held payments and Allow once end to end with a fake judge. `test_discovery.py` covers reading and ranking the catalog; the discovery section of `test_mcp_server.py` previews a fake marketplace through `find_services` and `quote`.
+`test_guard.py` is the answer key for the guard: six planted cases (unknown seller, cap, budget, price jump, duplicate, clean) plus edge cases. `test_store.py` and `test_payments.py` cover the attempt log, the in flight lock and the books. `test_pay_flow.py` runs the whole payment flow against a fake seller and covers every way an approved payment can fail. `test_mcp_server.py` calls the tools with a token identity and checks each result the agent can see, plus `main()`'s startup checks. `test_oauth.py` covers discovery, registration, the full connect flow, consent, codes, refresh, revocation and access tokens. `test_web_auth.py` covers magic links, rate limits, sessions, CSRF, headers, the mailer and settings. `test_user_wallets.py` covers provisioning, isolation between users and failing closed. `test_migrations.py` covers tracked migrations and `test_app_smoke.py` the assembled app. `test_account_pages.py` covers the account pages over HTTP and `test_user_sellers.py` the two seller lists. `test_owner.py` covers the operator's seller list and limits the guard obeys, the ledger queries and the CSV. `test_ledger_app.py` covers the password gate, the forms, escaping and the CSV download. `test_wallets.py` covers wallet selection and shows that a signer other than CDP plugs into the same interface. `test_intent.py` is the answer key for intent binding's tier 0 rules and tier mappings, `test_judge.py` covers the Claude calls against a fake client (what is sent, failing closed), and the intent sections of `test_mcp_server.py` and `test_account_pages.py` cover tasks, held payments and Allow once end to end with a fake judge. `test_escrow.py` checks the escrow hashing and selectors against the deployed contract and the terms check; `test_delivery.py` is the answer key for the delivery rules; `test_escrow_ledger.py` covers hold, capture and void in the books; `test_escrow_flow.py` runs the escrow path against a fake seller and operator (capture, void, hold, judge failure, failed hold, retry, sweep, fallback to exact); `test_escrow_pages.py` covers Pay seller and Refund me. `test_discovery.py` covers reading and ranking the catalog; the discovery section of `test_mcp_server.py` previews a fake marketplace through `find_services` and `quote`.
 
 ## Interactive link approvals
 
@@ -213,6 +238,7 @@ Not built yet: month end flags and the QuickBooks export.
 - **Ledger page:** the operator's page shows `user-<uuid>` agents without their email yet.
 - **Intent latency:** a first look costs one or two Claude calls (about 1.2 to 2.6 seconds each), well above the 300 ms target; caching makes repeats instant. Embeddings for tier 1 would be faster.
 - **Provenance:** `found_at` is declared by the agent. Sentinel does not see the pages the agent read.
-- **Delivery:** intent binding checks what is being bought, not what arrives. A seller that describes one thing and delivers another is caught only by the seller list.
+- **Delivery:** only sellers that offer escrow can be refunded. An exact seller that delivers badly is recorded and held next time (`bad_deliveries`), but keeps the money. Data cannot be returned, so a voided delivery is withheld from the agent instead.
+- **Escrow gas and trust:** Sentinel's operator pays the gas for every escrow call. A seller has to trust Sentinel not to void good deliveries; the rules are deterministic and every verdict is kept with the response hash, but a neutral operator (the spec's reserved `policy` type) would be stronger.
 - **CIMD:** client ID metadata documents are not supported yet; registration is DCR only.
 - **Fresh sign in:** consent does not yet require a recent sign in.

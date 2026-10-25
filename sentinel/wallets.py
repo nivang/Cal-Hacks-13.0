@@ -8,8 +8,8 @@ this process.
 
 open_user_wallet(user_id) is how production code opens a wallet, and the only way. A pay call only looks the
 account up (create=False), so paying can never mint an empty wallet; only the first sign in creates one
-(create=True). There is no default wallet: a call that cannot name its user has nothing to sign with. The shared
-test wallet lives in demo/ (demo.DEMO_ACCOUNT), which opens it through cdp_wallet directly.
+(create=True). There is no default wallet: a call that cannot name its user has nothing to sign with. Scripts outside
+this package that need a fixed test account open it by name through cdp_wallet.
 
 Adding another wallet means one opener here and one entry in WALLETS; the guard, the ledger and the MCP tools do
 not change. Pick one with SENTINEL_WALLET (default cdp, the only one built in).
@@ -37,7 +37,7 @@ async def cdp_wallet(name: str, create: bool = False) -> AsyncIterator[ClientEvm
     """Open the CDP server account with this name and yield it as an x402 signer.
 
     Only looks the account up, so a missing one is an error; create=True gets or creates it instead (first sign
-    in, and the demo). The lookup is bounded by CDP_TIMEOUT_S. The CDP client stays open while the caller holds
+    in, and test scripts). The lookup is bounded by CDP_TIMEOUT_S. The CDP client stays open while the caller holds
     the wallet, since every signature is a CDP call. Keys come from the CDP_* env vars; only this process holds them.
     """
     async with CdpClient() as cdp:

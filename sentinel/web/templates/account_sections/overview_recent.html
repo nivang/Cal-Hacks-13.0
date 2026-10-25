@@ -1,6 +1,7 @@
-{% if waiting and (waiting.tasks or waiting.held) %}
+{% if waiting and (waiting.tasks or waiting.held or waiting.escrow) %}
 <p class="mt-4 rounded-md border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900" role="status">
   {% if waiting.held %}{{ waiting.held }} payment{{ "s" if waiting.held != 1 }} held for you.{% endif %}
+  {% if waiting.escrow %}{{ waiting.escrow }} escrow deliver{{ "ies" if waiting.escrow != 1 else "y" }} waiting for your review.{% endif %}
   {% if waiting.tasks %}{{ waiting.tasks }} task{{ "s" if waiting.tasks != 1 }} waiting for you to confirm.{% endif %}
   <a href="/account/tasks" class="font-medium underline">Open Tasks</a>
 </p>

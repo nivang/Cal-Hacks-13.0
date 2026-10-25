@@ -3,11 +3,11 @@
     python -m demo.agent "I'm researching a 5 day trip to Tokyo, keep data costs under $3"
 
 Claude (the Claude API tool runner) gets the task and four tools, the same core the MCP server uses: start_task,
-find_services, quote and pay. It searches the local marketplace (demo/sellers.py), sees what Sentinel would decide for
+find_services, quote and pay. It searches the local marketplace (test_site/app.py), sees what Sentinel would decide for
 each service, buys what the task needs, and reports. Every tool call prints a line, so the audience sees what Sentinel
 let through and what it stopped. Pays as research-agent from the shared demo wallet, like demo.run; the agent's task
 is confirmed at the budget stated in the request (default $3), as the owner would on the Tasks page.
-Needs the sellers (uvicorn demo.sellers:app --port 4000), ANTHROPIC_API_KEY and SENTINEL_ALLOW_LOCAL_URLS=1.
+Needs the sellers (uvicorn test_site.app:app --port 4000), ANTHROPIC_API_KEY and SENTINEL_ALLOW_LOCAL_URLS=1.
 """
 import asyncio
 import json

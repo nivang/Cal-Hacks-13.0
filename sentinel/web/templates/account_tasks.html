@@ -11,6 +11,8 @@
 {{ no_wallet() }}
 {% else %}
 
+{% if loading %}{{ placeholder("tasks_escrow", "Escrow deliveries") }}{% else %}{% include "account_sections/tasks_escrow.html" %}{% endif %}
+
 {% if loading %}{{ placeholder("tasks_held", "Held for you") }}{% else %}{% include "account_sections/tasks_held.html" %}{% endif %}
 
 {% if loading %}{{ placeholder("tasks_list", "Your agent’s tasks") }}{% else %}{% include "account_sections/tasks_list.html" %}{% endif %}

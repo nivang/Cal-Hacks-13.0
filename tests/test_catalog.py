@@ -59,7 +59,7 @@ def test_search_ranks_matches_first_and_keeps_the_rest_up_to_the_limit():
 
 def test_the_catalog_url_comes_from_the_environment(monkeypatch):
     monkeypatch.delenv(discovery.ENV_VAR, raising=False)
-    assert discovery.catalog_url() == discovery.DEFAULT_URL
+    assert discovery.catalog_url() == ""  # no default: nothing to search until a catalog is set up
     monkeypatch.setenv(discovery.ENV_VAR, " https://bazaar.example/discovery/resources ")
     assert discovery.catalog_url() == "https://bazaar.example/discovery/resources"
 
