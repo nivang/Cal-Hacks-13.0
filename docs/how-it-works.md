@@ -17,7 +17,7 @@ Sentinel holds the wallet so the agent never does. Every payment request passes 
 | `sentinel/escrow.py` | x402 auth-capture on Base Sepolia: PaymentInfo, its hash and nonce, the buyer's ReceiveWithAuthorization, `check_terms`, the escrow calldata, `payment_state`, and the operator account that sends authorize, capture and void |
 | `sentinel/delivery.py` | Pure delivery check: did the paid response match what the seller promised (status, type, JSON, promised fields, no injection); the judge's answer mapped to pass or refund |
 | `sentinel/wallets.py` | The wallet that signs: `open_user_wallet(user_id)`, each user's own CDP account named by their uuid, behind x402's signer interface |
-| `sentinel/guard.py` | Pure policy: ALLOW or BLOCK for one quote; an unapproved seller is paid only through escrow |
+| `sentinel/guard.py` | Pure policy: ALLOW or BLOCK for one quote; an unapproved seller is paid through escrow when it offers it, else directly after every other check |
 | `sentinel/intent.py` | Pure intent binding: the tier 0 rules on a task, how tier 1 and tier 2 answers map to ALLOW or BLOCK, and the quoted JSON case the judge reads |
 | `sentinel/judge.py` | Claude Haiku 5.5 reads a task into a mandate (`extract`), checks a purchase against it (`classify`, tier 1), judges what tier 1 cannot settle (`decide`, tier 2), rates the offers of a price comparison (`rate`) and checks an escrowed delivery against the seller's promise (`check_delivery`); any failure raises `JudgeError` |
 | `sentinel/catalog.py` | Reads the paid service catalog (x402 Bazaar shape), ranks it against a query, and previews each listing under a task (`find`, `preview`) |

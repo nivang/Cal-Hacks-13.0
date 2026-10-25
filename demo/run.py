@@ -1,6 +1,7 @@
 """Command line demo of the three guard moments against the test site (test_site/app.py).
 
-    python -m demo.run seed  approve CorpData and OpenWire for every agent and book the opening balance; pays nothing
+    python -m demo.run seed  approve CorpData and OpenWire, block PremiumIntel, for every agent, and book the opening
+                             balance; pays nothing
     python -m demo.run buy   Acme Robotics' funding history for $0.10 from approved CorpData: ALLOW, settles on Base
                              Sepolia
     python -m demo.run surge CorpData suddenly quotes 4x the usual price: BLOCK (price_jump; run buy first)
@@ -68,21 +69,23 @@ API = "/test-site/api"
 ACME = "?company=Acme+Robotics"
 FUNDING = f"{API}/company/funding{ACME}"
 APPROVED = {"CorpData": "SELLER_A_ADDRESS", "OpenWire": "SELLER_B_ADDRESS"}
+BLOCKED = {"PremiumIntel": "SELLER_C_ADDRESS"}  # the marketplace's scammer: unlisted sellers are otherwise paid
 SCENARIOS = ("seed", "buy", "surge", "scam", "intent", "overpriced", "escrow", "void", "escrow-refund", "compare")
 COMPARE_TASK = "Find recent news about Acme Robotics, with summaries and source links; keep data costs under $1."
 COMPARE_REASON = "Need recent company news and sources for the Acme Robotics briefing; compare the offers."
 
 
 async def bootstrap_books(conn: db.Connection, wallet_address: str) -> None:
-    """Seed the approved sellers from env and book the wallet's current USDC as owner funding, once.
+    """Seed the approved sellers and the blocked scammer from env and book the wallet's current USDC as owner funding,
+    once.
 
     Rows seeded earlier under other names (DataCo, CartCo...) keep their status and take the marketplace's names.
     """
     db.seed_sellers(conn, [
-        {"name": name, "pay_to": os.environ[var], "network": NETWORK, "asset": USDC_BASE_SEPOLIA, "status": "approved"}
-        for name, var in APPROVED.items()
+        {"name": name, "pay_to": os.environ[var], "network": NETWORK, "asset": USDC_BASE_SEPOLIA, "status": status}
+        for names, status in ((APPROVED, "approved"), (BLOCKED, "blocked")) for name, var in names.items()
     ])
-    for name, var in APPROVED.items():
+    for name, var in {**APPROVED, **BLOCKED}.items():
         conn.execute("UPDATE sellers SET name = %s WHERE agent_id IS NULL AND lower(pay_to) = lower(%s)",
                      (name, os.environ[var]))
     if not ledger.has_entries(conn):
