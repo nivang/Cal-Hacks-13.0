@@ -57,7 +57,7 @@ SITE_CSP = CSP_BEFORE_FORM + "form-action 'self'" + CSP_AFTER_FORM
 
 SITE_PATHS = frozenset({
     "/", "/signin", "/auth/verify", "/account", "/account/wallet", "/account/signout-everywhere", "/signout",
-    "/account/payments", "/account/payments.csv", "/account/rules", "/account/rules/limits",
+    "/account/live", "/account/payments", "/account/payments.csv", "/account/rules", "/account/rules/limits",
     "/account/rules/sellers", "/account/books", "/account/tasks", "/account/tasks/confirm", "/account/tasks/revoke",
     "/account/tasks/allow", "/account/tasks/capture", "/account/tasks/void",
     "/oauth/consent", "/healthz", "/favicon.ico", "/authorize",
@@ -533,11 +533,63 @@ def create_app(
 
     section_names = {
         "/account": {"overview_spending", "overview_cap", "overview_wallet", "overview_setup", "overview_recent"},
+        "/account/live": {"live_feed"},
         "/account/payments": {"payments_list"},
         "/account/rules": {"rules_limits", "rules_sellers", "seller_wallet"},
         "/account/tasks": {"tasks_escrow", "tasks_held", "tasks_list"},
         "/account/books": {"books_summary", "books_journal", "books_totals"},
     }
+
+    LIVE_SECTIONS = {"payments_list", "live_feed"}  # pages left open on a screen: they poll for changes
+
+    def live_data(conn: db.Connection, view: Mapping[str, Any], section: str) -> dict[str, Any]:
+        """The data of one polling section, read on the caller's connection."""
+        if section == "live_feed":
+            return books.live_view(conn, view["agent_id"])
+        groups = books.payments_by_task(conn, view["agent_id"])
+        return {"groups": groups, "payments": [row for group in groups for row in group["rows"]],
+                "csv_limit": f"{books.CSV_LIMIT:,}"}
+
+    async def live_section(request: Request, path: str, section: str) -> Response:
+        """A polling section in one database checkout: session, account, change tag, then the data.
+
+        Over a slow link every checkout and query is a round trip, so this does them all on one connection. The
+        response carries an ETag from books.fingerprint; a poll that sends the same tag back gets 304 and no body.
+        """
+        raw = request.cookies.get(session_cookie)
+        session = auth.read_session(settings, raw) if raw is not None else None
+        if session is None:
+            return sign_in_redirect(path, raw is not None)
+        sent = request.headers.get("if-none-match")
+
+        def load(conn: db.Connection) -> tuple[dict[str, Any], str | None, dict[str, Any] | None] | None:
+            user = users.session_user(conn, session.user_id, session.epoch)
+            if user is None:
+                return None
+            view = users.account_view(conn, user["id"], False)
+            if view["agent_id"] is None:
+                return view, None, {}
+            tag, expired = books.fingerprint(conn, view["agent_id"])
+            if expired:  # an approval ran out: mark it, then read the tag again
+                link_approvals.expire(conn, view["agent"])
+                tag, _ = books.fingerprint(conn, view["agent_id"])
+            etag = f'W/"{section}-{tag}"'
+            if sent == etag:
+                return view, etag, None
+            return view, etag, live_data(conn, view, section)
+
+        loaded = await run_db(load)
+        if loaded is None:
+            return sign_in_redirect(path, True)
+        view, etag, data = loaded
+        if data is None and etag is not None:
+            return Response(status_code=304, headers={"ETag": etag})
+        tab = path.rsplit("/", 1)[-1]
+        response = page(request, "account_fragment.html",
+                        {**account_context(session, view, tab), "section": section, **(data or {})})
+        if etag is not None:
+            response.headers["ETag"] = etag
+        return response
 
     async def account_section(
         request: Request, path: str, session: auth.Session, user: Mapping[str, Any], section: str,
@@ -568,11 +620,6 @@ def create_app(
             elif section == "overview_recent":
                 context["recent"] = await run_db(books.recent_payments, aid)
                 context["waiting"] = await run_db(mandates.count_pending, aid)
-            elif section == "payments_list":
-                await run_db(link_approvals.expire, view["agent"])
-                groups = await run_db(books.payments_by_task, aid)
-                context.update(groups=groups, payments=[row for group in groups for row in group["rows"]],
-                               csv_limit=f"{books.CSV_LIMIT:,}")
             elif section == "rules_sellers":
                 sellers = await run_db(books.list_sellers, aid)
                 context["lazy_wallets"] = True
@@ -623,6 +670,7 @@ def create_app(
                 return sign_in_redirect(path, False), None, {}
             tab, title = {
                 "/account": ("overview", "Your account"),
+                "/account/live": ("live", "Live"),
                 "/account/payments": ("payments", "Payments"),
                 "/account/tasks": ("tasks", "Tasks"),
                 "/account/rules": ("rules", "Rules"),
@@ -639,10 +687,12 @@ def create_app(
                 "csrf": auth.csrf_token(settings, session.value, "account"),
                 "full_url": str(request.url.include_query_params(full="1")),
             }), None, {}
+        section = request.headers.get("x-sentinel-section")
+        if section in LIVE_SECTIONS and section in section_names.get(path, set()):
+            return await live_section(request, path, section), None, {}
         session, user, stale = await current(request)
         if session is None or user is None:
             return sign_in_redirect(path, stale), None, {}
-        section = request.headers.get("x-sentinel-section")
         if section:
             return await account_section(request, path, session, user, section), None, {}
         view = await run_db(users.account_view, user["id"])
@@ -681,6 +731,16 @@ def create_app(
             "claude_command": f"claude mcp add --transport http sentinel {settings.resource_url}",
         }
         return page(request, "account.html", context)
+
+    @app.get("/account/live")
+    async def account_live(request: Request) -> Response:
+        """Live: each payment moving through Sentinel's checks as it happens, for a screen left open."""
+        refusal, session, view = await account_get(request, "/account/live")
+        if refusal is not None or session is None:
+            return refusal or forbidden(request)
+        aid = view["agent_id"]
+        found = await run_db(books.live_view, aid) if aid is not None else {}
+        return page(request, "account_live.html", {**account_context(session, view, "live"), **found})
 
     @app.get("/account/payments")
     async def account_payments(request: Request) -> Response:
