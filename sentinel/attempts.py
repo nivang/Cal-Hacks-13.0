@@ -11,7 +11,7 @@ from typing import Any
 from sentinel import guard
 from sentinel.db import Connection, agent_id, insert, usdc
 
-LIVE_STATUSES = ["settled", "approved"]  # attempts that count as spent or in flight
+LIVE_STATUSES = ["settled", "approved", "escrowed"]  # attempts that count as spent, in flight or held in escrow
 ATOMIC = "* 1000000"  # SQL: whole USDC (numeric) to integer atomic units
 # What intent binding records with a payment made under a task (migration 010).
 INTENT_COLUMNS = ("mandate_id", "found_at", "seller_description", "intent_tier", "intent_verdict", "intent_reason",
@@ -65,6 +65,14 @@ def set_attempt_status(conn: Connection, attempt_id: int, status: str) -> None:
     conn.execute("UPDATE payment_attempts SET status = %s WHERE id = %s", (status, attempt_id))
 
 
+def note_delivery(conn: Connection, attempt_id: int, verdict: str, reason: str) -> None:
+    """Record the delivery check's verdict on a payment that settled without escrow (nothing can be given back)."""
+    conn.execute(
+        "UPDATE payment_attempts SET delivery_verdict = %s, delivery_reason = %s WHERE id = %s",
+        (verdict, reason, attempt_id),
+    )
+
+
 def load_agent(conn: Connection, name: str) -> dict[str, Any]:
     """Return the agent's name, per payment cap and weekly budget (atomic units) as a dict that builds guard.Agent."""
     row = conn.execute(
@@ -106,8 +114,8 @@ def load_history(conn: Connection, agent: str, quote: dict[str, Any], policy: di
         (aid, quote["pay_to"], quote["url"], policy["price_jump_window"]),
     ).fetchall()
     paid_to = conn.execute(
-        "SELECT DISTINCT pay_to FROM payment_attempts WHERE agent_id = %s AND url = %s AND status = 'settled'"
-        " AND pay_to IS NOT NULL",
+        "SELECT DISTINCT pay_to FROM payment_attempts WHERE agent_id = %s AND url = %s"
+        " AND status IN ('settled', 'escrowed') AND pay_to IS NOT NULL",
         (aid, quote["url"]),
     ).fetchall()
     known = [r["pay_to"] for r in conn.execute(
@@ -161,7 +169,9 @@ def get_attempt(conn: Connection, attempt_id: int, agent: str) -> dict[str, Any]
     """
     return conn.execute(
         f"SELECT a.id, a.status, a.url, a.pay_to, (a.amount {ATOMIC})::bigint AS amount, a.decision, a.rule_fired,"
-        " a.tx_hash, a.reason, a.mandate_id FROM payment_attempts a WHERE a.id = %s AND a.agent_id = %s",
+        " a.tx_hash, a.reason, a.mandate_id, a.delivery_reason, e.held AS escrow_held, e.void_tx"
+        " FROM payment_attempts a LEFT JOIN escrow_payments e ON e.attempt_id = a.id"
+        " WHERE a.id = %s AND a.agent_id = %s",
         (attempt_id, agent_id(conn, agent)),
     ).fetchone()
 

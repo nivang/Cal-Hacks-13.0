@@ -9,8 +9,15 @@ decided in wallets.py; this file only sees the x402 signer interface.
 A payment made under a task (Task, from the MCP pay tool) is also checked against the owner's intent once the guard
 allows it: review_intent runs intent.py's tiers (rules, then the judge's fast check, then the judge) and may block
 the payment or hold it for the owner (PaymentHeld). Without a task (the command line demo) only the guard runs.
+
+When the seller offers x402 auth-capture with Sentinel as operator (escrow.check_terms), the money is held in escrow
+instead of paid outright: _pay_escrow holds it, fetches the data, checks the delivery (delivery.py, then the judge),
+and captures (seller paid), voids (buyer refunded) or leaves it held for the owner. settle_held and sweep finish held
+payments later. Sellers without escrow are paid with exact as before; their deliveries are checked by the rules and
+recorded, but nothing can be given back.
 """
 import logging
+import time
 from dataclasses import asdict, dataclass, replace
 from typing import Any
 
@@ -19,8 +26,9 @@ from x402 import x402Client
 from x402.http import x402HTTPClient
 from x402.mechanisms.evm import ClientEvmSigner
 from x402.mechanisms.evm.exact import ExactEvmScheme
+from x402.schemas import PaymentPayload
 
-from sentinel import attempts, chain, db, guard, intent, judge, ledger, mandates
+from sentinel import attempts, chain, db, delivery, escrow, guard, intent, judge, ledger, mandates
 
 log = logging.getLogger("sentinel.payments")
 
@@ -33,7 +41,9 @@ class PayResult:
     """Outcome of a request: the HTTP status and body, plus the quote and tx hash if a payment was made.
 
     settled is True only when the seller returned the data and the payment was booked. A free resource
-    has no quote and no attempt_id, since nothing was paid or recorded.
+    has no quote and no attempt_id, since nothing was paid or recorded. An escrowed payment says what became of the
+    hold (escrow: captured, voided, held for the owner, or processing while Sentinel retries) and the delivery check's
+    verdict; a voided or held one carries no body, since the seller is not paid for it.
     """
 
     status: int
@@ -43,6 +53,8 @@ class PayResult:
     attempt_id: int | None = None
     settled: bool = False
     content_type: str | None = None
+    escrow: str | None = None
+    verdict: delivery.Verdict | None = None
 
 
 class PaymentRejected(Exception):
@@ -101,12 +113,28 @@ class PaymentFailed(Exception):
         self.attempt_id, self.tx_hash = attempt_id, tx_hash
 
 
-def select_requirement(payment_required: Any) -> Any:
-    """Pick the Base Sepolia USDC option from the seller's accepts list, or raise PaymentRejected."""
-    for requirement in payment_required.accepts:
-        if requirement.network == NETWORK and requirement.asset.lower() == USDC_BASE_SEPOLIA.lower():
+def select_requirement(payment_required: Any, operator: str | None = None, now: int | None = None) -> Any:
+    """Pick what to pay with from the seller's accepts list, or raise PaymentRejected.
+
+    An auth-capture offer Sentinel can hold in escrow comes first (only when Sentinel has an operator, and only if
+    escrow.check_terms passes it), then the Base Sepolia USDC exact option.
+    """
+    accepts = payment_required.accepts
+    refused = None
+    if operator is not None:
+        now = int(time.time()) if now is None else now
+        for requirement in accepts:
+            if getattr(requirement, "scheme", "exact") == escrow.SCHEME:
+                refused = escrow.check_terms(requirement, operator, now, guard.POLICY)
+                if refused is None:
+                    return requirement
+    for requirement in accepts:
+        if getattr(requirement, "scheme", "exact") == "exact" and requirement.network == NETWORK \
+                and requirement.asset.lower() == USDC_BASE_SEPOLIA.lower():
             return requirement
-    offered = [(r.network, r.asset) for r in payment_required.accepts]
+    if refused is not None:
+        raise PaymentRejected("escrow_terms", f"The seller's escrow offer is not safe to hold. {refused}")
+    offered = [(getattr(r, "scheme", "exact"), r.network, r.asset) for r in accepts]
     raise PaymentRejected("payment_option", f"The seller offers no Base Sepolia USDC payment option: {offered}")
 
 
@@ -342,21 +370,24 @@ def _log_preview(
 
 async def pay_for(
     url: str, signer: ClientEvmSigner, *, agent: str, reason: str | None = None, task: Task | None = None,
+    operator: escrow.EscrowOperator | None = None,
 ) -> PayResult:
     """Fetch url, paying the seller if it returns 402 and the guard (and, under a task, intent binding) allows it.
 
     signer is the wallet that signs: the calling user's own, from wallets.open_user_wallet(). agent is that
     user's agent, whose limits and history the guard applies; there is no default, so every caller names one.
+    operator is Sentinel's escrow operator (escrow.open_operator); without one, escrow offers are ignored.
     Returns the response and, if paid, the tx hash. Raises PaymentRejected when the guard or intent binding stops
     the payment, PaymentHeld when it is held for the owner, and PaymentFailed when an approved payment does not
     complete.
     """
     with db.connection() as conn:
-        return await _pay_with(conn, url, signer, agent, reason, task)
+        return await _pay_with(conn, url, signer, agent, reason, task, operator)
 
 
 async def _pay_with(
     conn: db.Connection, url: str, signer: ClientEvmSigner, agent: str, reason: str | None, task: Task | None = None,
+    operator: escrow.EscrowOperator | None = None,
 ) -> PayResult:
     """The payment flow itself, on a borrowed connection. Split out so pay_for can manage the pool."""
     client = x402Client()
@@ -372,7 +403,7 @@ async def _pay_with(
             first.headers.get, first.json() if first.content else None
         )
         try:
-            requirement = select_requirement(payment_required)
+            requirement = select_requirement(payment_required, operator.address if operator else None)
         except PaymentRejected as e:
             e.attempt_id = attempts.record_attempt(
                 conn, agent, url, reason, status="blocked", decision=guard.BLOCK, rule_fired=str(e)
@@ -380,6 +411,9 @@ async def _pay_with(
             raise
         quote = build_quote(url, requirement)
         attempt_id = await authorize_task(conn, agent, reason, quote, task, seller_from(payment_required))
+        if operator is not None and getattr(requirement, "scheme", "exact") == escrow.SCHEME:
+            return await _pay_escrow(conn, session, http, operator, signer, agent, payment_required, requirement,
+                                     quote, attempt_id, task)
 
         try:
             # Sign only the requirement we vetted, not whatever else the seller listed.
@@ -404,6 +438,158 @@ async def _pay_with(
         except Exception as e:
             # Money moved but the books did not take it. Leave the attempt approved so it stands out.
             raise PaymentFailed("payment went through but could not be recorded", attempt_id, tx_hash) from e
+        verdict = delivery.check(paid.status_code, content_type, paid.content, delivery.promise_from(payment_required))
+        if verdict is not None:  # paid already, so only recorded: it counts against the seller (intent bad_deliveries)
+            attempts.note_delivery(conn, attempt_id, verdict.outcome, f"{verdict.rule}: {verdict.detail}")
         return PayResult(paid.status_code, paid.text, tx_hash, quote, attempt_id, True, content_type)
     attempts.set_attempt_status(conn, attempt_id, "failed")
     return PayResult(paid.status_code, paid.text, tx_hash, quote, attempt_id, False)
+
+
+async def _pay_escrow(
+    conn: db.Connection, session: httpx.AsyncClient, http: x402HTTPClient, operator: escrow.EscrowOperator,
+    signer: ClientEvmSigner, agent: str, payment_required: Any, requirement: Any, quote: guard.Quote,
+    attempt_id: int, task: Task | None,
+) -> PayResult:
+    """Hold the money in escrow, fetch what was paid for, check it, then capture, void or hold for the owner.
+
+    If the call is cancelled while the hold is being sent, the money may sit in escrow with no record here; the buyer
+    can then reclaim it onchain after the capture deadline (at most escrow_max_hold_s).
+    """
+    info = escrow.payment_info(requirement, signer.address, int(time.time()), escrow.new_salt())
+    payment = escrow.info_hash(info)
+    try:
+        signature = "0x" + signer.sign_typed_data(*escrow.receive_typed_data(info)).hex()
+        # Built before the hold, so nothing that could fail is left between holding the money and asking for the data.
+        proof = PaymentPayload(
+            payload={
+                "authorization": {
+                    "from": info.payer, "to": escrow.EIP3009_COLLECTOR, "value": str(info.max_amount),
+                    "validAfter": "0", "validBefore": str(info.pre_approval_expiry),
+                    "nonce": escrow.signature_nonce(info),
+                },
+                "signature": signature, "salt": str(info.salt),
+            },
+            accepted=requirement, resource=getattr(payment_required, "resource", None),
+        )
+        http.encode_payment_signature_header(proof)  # fails here, not after the hold, if the proof cannot be sent
+        authorize_tx = await operator.authorize(info, signature)
+    except BaseException as e:
+        attempts.set_attempt_status(conn, attempt_id, "failed")  # releases the in flight lock
+        if not isinstance(e, Exception):
+            raise
+        log.warning("escrow hold failed for request %s: %s", attempt_id, e)
+        raise PaymentFailed("Sentinel could not hold the payment in escrow", attempt_id) from e
+    try:
+        ledger.hold_attempt(conn, attempt_id, info.to_json(), payment, info.authorization_expiry, info.refund_expiry,
+                            authorize_tx)
+    except Exception as e:
+        # The money is held onchain but not in the books. Leave the attempt approved so it stands out.
+        raise PaymentFailed("the payment is held in escrow but could not be recorded", attempt_id, authorize_tx) from e
+
+    proof.payload["authorizeTx"] = authorize_tx
+    try:
+        paid = await session.get(quote.url, headers=http.encode_payment_signature_header(proof))
+        status, content_type, body = paid.status_code, paid.headers.get("content-type"), paid.content
+    except httpx.HTTPError:
+        status, content_type, body = 0, None, b""
+    verdict = await check_delivery(conn, agent, task, quote.url, delivery.promise_from(payment_required), status,
+                                   content_type, body)
+    log.info("escrow: request %s delivery %s (%s)", attempt_id, verdict.outcome, verdict.rule)
+    held = verdict.outcome == delivery.UNSURE
+    ledger.record_delivery(conn, attempt_id, body, content_type, verdict.outcome, verdict.rule, verdict.detail, held)
+    if held:
+        return PayResult(status, "", None, quote, attempt_id, False, content_type, "held", verdict)
+    outcome, tx = await _finish(conn, operator, attempt_id, info, verdict.outcome == delivery.PASS, "sentinel")
+    if outcome == "captured":
+        text = body.decode("utf-8", errors="replace")
+        return PayResult(status, text, tx, quote, attempt_id, True, content_type, outcome, verdict)
+    return PayResult(status, "", tx, quote, attempt_id, False, content_type, outcome, verdict)
+
+
+async def check_delivery(
+    conn: db.Connection, agent: str, task: Task | None, url: str, promise: delivery.Promise, status: int,
+    content_type: str | None, body: bytes,
+) -> delivery.Verdict:
+    """The delivery rules, then (under a task) the judge. Any judge failure holds the payment for the owner."""
+    verdict = delivery.check(status, content_type, body, promise)
+    if verdict is not None:
+        return verdict
+    if task is None:
+        return delivery.without_task()
+    row = mandates.get(conn, task.mandate_id, db.agent_id(conn, agent))
+    if row is None:
+        return delivery.unavailable()
+    try:
+        opinion = await task.judge.check_delivery(delivery.case(mandates.to_mandate(row), promise, url, body))
+    except judge.JudgeError:
+        return delivery.unavailable()
+    return delivery.from_judge(opinion.verdict, opinion.reason)
+
+
+async def _finish(
+    conn: db.Connection, operator: escrow.EscrowOperator, attempt_id: int, info: escrow.PaymentInfo, capture: bool,
+    decided_by: str,
+) -> tuple[str, str | None]:
+    """Capture or void a hold onchain and book it. Returns (captured or voided, tx hash), or (processing, None) when
+    the chain call failed, for the sweeper to try again. Raises PaymentFailed when the chain moved but the books did
+    not take it."""
+    try:
+        tx = await (operator.capture(info, info.max_amount) if capture else operator.void(info))
+    except escrow.EscrowError as e:
+        log.warning("escrow %s failed for request %s: %s", "capture" if capture else "void", attempt_id, e)
+        return "processing", None
+    try:
+        (ledger.capture_attempt if capture else ledger.void_attempt)(conn, attempt_id, tx, decided_by)
+    except Exception as e:
+        raise PaymentFailed("the escrow settled but could not be recorded", attempt_id, tx) from e
+    return ("captured" if capture else "voided"), tx
+
+
+async def settle_held(
+    conn: db.Connection, operator: escrow.EscrowOperator, attempt_id: int, agent_id: int, capture: bool,
+    decided_by: str = "owner",
+) -> str:
+    """The owner's Capture or Void on a payment held in escrow (Tasks page). Returns captured, voided or processing.
+
+    Raises LookupError when this agent has no such payment still in escrow.
+    """
+    row = conn.execute(
+        "SELECT e.payment_info FROM escrow_payments e JOIN payment_attempts a ON a.id = e.attempt_id"
+        " WHERE e.attempt_id = %s AND a.agent_id = %s AND a.status = 'escrowed' AND e.state = 'authorized'",
+        (attempt_id, agent_id),
+    ).fetchone()
+    if row is None:
+        raise LookupError("That payment is not held in escrow.")
+    info = escrow.PaymentInfo.from_json(row["payment_info"])
+    return (await _finish(conn, operator, attempt_id, info, capture, decided_by))[0]
+
+
+async def sweep(conn: db.Connection, operator: escrow.EscrowOperator, policy: dict[str, int] = guard.POLICY) -> int:
+    """Finish what is still in escrow. Returns how many holds it settled.
+
+    A passed delivery whose capture failed is captured again and a failed one voided again. A held one (or one whose
+    delivery was never checked, after a crash) is voided once its capture deadline is escrow_deadline_margin_s away,
+    so the buyer never waits for the reclaim window.
+    """
+    margin = policy["escrow_deadline_margin_s"]
+    rows = conn.execute(
+        "SELECT e.attempt_id, e.payment_info, e.verdict, e.held,"
+        " e.capture_deadline <= now() + make_interval(secs => %s) AS due,"
+        " e.created_at <= now() - make_interval(secs => %s) AS stale"
+        " FROM escrow_payments e JOIN payment_attempts a ON a.id = e.attempt_id"
+        " WHERE e.state = 'authorized' AND a.status = 'escrowed' ORDER BY e.capture_deadline",
+        (margin, margin),
+    ).fetchall()
+    settled = 0
+    for row in rows:
+        info = escrow.PaymentInfo.from_json(row["payment_info"])
+        if row["verdict"] in (delivery.PASS, delivery.FAIL) and not row["held"]:
+            outcome, _ = await _finish(conn, operator, row["attempt_id"], info, row["verdict"] == delivery.PASS,
+                                       "sentinel")
+        elif row["due"] or (row["verdict"] is None and row["stale"]):
+            outcome, _ = await _finish(conn, operator, row["attempt_id"], info, False, "deadline")
+        else:
+            continue
+        settled += outcome != "processing"
+    return settled

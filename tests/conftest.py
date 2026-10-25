@@ -221,18 +221,21 @@ class FakeJudge:
     """A Judge with no model behind it. Records every case it was shown.
 
     Knobs: fit (tier 1 verdict, or a dict of URL substring -> verdict, default fits), decision (tier 2 verdict),
-    draft (fields to override in the mandate draft), and fail_extract / fail_classify / fail_decide (raise JudgeError).
+    delivered (the delivery check's verdict, default delivered), draft (fields to override in the mandate draft), and
+    fail_extract / fail_classify / fail_decide / fail_delivery (raise JudgeError).
     """
 
     def __init__(self) -> None:
         """Everything fits; nothing fails."""
         self.fit: str | dict[str, str] = "fits"
         self.decision = "allow"
+        self.delivered = "delivered"
         self.draft: dict[str, Any] = {}
-        self.fail_extract = self.fail_classify = self.fail_decide = False
+        self.fail_extract = self.fail_classify = self.fail_decide = self.fail_delivery = False
         self.tasks: list[str] = []
         self.classified: list[dict[str, Any]] = []
         self.decided: list[dict[str, Any]] = []
+        self.deliveries: list[dict[str, Any]] = []
 
     async def extract(self, task: str) -> judge.MandateDraft:
         """A fixed mandate for any task, with the draft knob applied."""
@@ -262,6 +265,13 @@ class FakeJudge:
         if self.fail_decide:
             raise judge.JudgeError("decide failed")
         return judge.JudgeOpinion(verdict=self.decision, reason=f"The judge says {self.decision}.")  # type: ignore[arg-type]
+
+    async def check_delivery(self, case: dict[str, Any]) -> judge.DeliveryOpinion:
+        """The delivery check from the delivered knob."""
+        self.deliveries.append(case)
+        if self.fail_delivery:
+            raise judge.JudgeError("delivery check failed")
+        return judge.DeliveryOpinion(verdict=self.delivered, reason=f"The check says {self.delivered}.")  # type: ignore[arg-type]
 
 
 @pytest.fixture

@@ -17,6 +17,8 @@ hard rule. Decisions come in tiers, fast to smart, and the first to decide wins:
             4. loop            this URL was already bought intent_loop_count times under this task -> BLOCK
             5. allowance       the owner allowed this exact held payment (Allow once) -> ALLOW
             5b. unused_wallet  the payee's wallet has no activity at all on Base Sepolia -> ESCALATE
+            5c. bad_deliveries this seller's deliveries failed Sentinel's delivery check bad_delivery_count times in
+                               the budget window (delivery.py; voided escrows and exact payments alike) -> ESCALATE
             6. split           this seller's spend in the split window + amount above the per payment cap, so one
                                purchase may be cut into small ones -> ESCALATE
             7. per_call        amount above intent_per_call_multiple x the task's per call estimate -> ESCALATE
@@ -122,6 +124,7 @@ class Session:
     purchases: tuple[Purchase, ...] = ()  # newest first
     listing: Listing | None = None  # what the catalog advertised for this URL under this task, if it was listed
     payee_unused: bool = False  # the payee's wallet never sent or received anything (payments.payee_profile)
+    seller_bad_deliveries: int = 0  # this agent's payments to this seller whose delivery failed the check, recently
 
 
 @dataclass(frozen=True)
@@ -220,6 +223,13 @@ def tier0(
             ESCALATE, 0, "unused_wallet",
             f"The seller's wallet {payment.quote.pay_to} has no activity at all on Base Sepolia. A real seller "
             "usually has a history, so the owner decides.",
+        )
+
+    if session.seller_bad_deliveries >= policy["bad_delivery_count"]:
+        return Verdict(
+            ESCALATE, 0, "bad_deliveries",
+            f"This seller's last {session.seller_bad_deliveries} deliveries failed Sentinel's check (wrong or missing "
+            "data), so the owner decides.",
         )
 
     if session.seller_window_spend + amount > agent.per_payment_cap:

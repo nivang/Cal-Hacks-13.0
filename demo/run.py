@@ -6,10 +6,15 @@
     python -m demo.run intent  a task for the Q3 email report (read by Claude): DataCo's benchmarks fit and are paid,
                                then the approved InsightLab's crypto signals do not fit: BLOCK (off_task)
     python -m demo.run held    the same task expects about $0.10 a purchase, so a $1.00 report is held: ESCALATE
+    python -m demo.run escrow  DataCo offers escrow: $0.50 is held, the benchmarks pass the delivery check, captured
+    python -m demo.run void    DataCo Dining sends an HTML error page where it promised JSON: voided, money back
+    python -m demo.run escrow-held  a Tokyo trip task buys train times and gets weather data: Claude cannot vouch for
+                               it, so it stays in escrow for the owner, who then refunds it here
 
 Also seeds the approved sellers and the opening balance on first run. Real testnet payments, no simulation.
 Pays as research-agent from the shared test wallet (demo.DEMO_ACCOUNT), which is created on first use.
-intent and held need ANTHROPIC_API_KEY: Claude reads the task and judges the payments.
+intent, held and escrow-held need ANTHROPIC_API_KEY: Claude reads the task and judges the payments.
+The escrow modes also open the escrow operator (escrow.open_operator), which pays the gas.
 """
 import asyncio
 import os
@@ -20,14 +25,23 @@ from dotenv import load_dotenv
 from x402.mechanisms.evm import ClientEvmSigner
 
 from demo import DEMO_ACCOUNT
-from sentinel import ENV_FILE, attempts, chain, db, judge, ledger, mandates, wallets
-from sentinel.payments import NETWORK, USDC_BASE_SEPOLIA, PaymentHeld, PaymentRejected, Task, pay_for
+from sentinel import ENV_FILE, attempts, chain, db, escrow, judge, ledger, mandates, wallets
+from sentinel.payments import (
+    NETWORK,
+    USDC_BASE_SEPOLIA,
+    PaymentHeld,
+    PaymentRejected,
+    Task,
+    pay_for,
+    settle_held,
+)
 
 SELLERS_URL = "http://localhost:4000"
 AGENT = "research-agent"
 TASK = "Write the Q3 email marketing report. Buy the 2026 email open-rate benchmarks; about $0.10 per data purchase."
 REASON = "Need 2026 email open-rate benchmarks for the Q3 email marketing report the owner asked for."
-SCENARIOS = ("buy", "surge", "scam", "intent", "held")
+TRIP = "Plan a 5 day trip to Tokyo: flights, hotels, and how to get between neighborhoods by train."
+SCENARIOS = ("buy", "surge", "scam", "intent", "held", "escrow", "void", "escrow-held")
 
 
 async def bootstrap_books(conn: db.Connection, wallet_address: str) -> None:
@@ -48,32 +62,68 @@ async def set_price(path: str, price: str) -> None:
         await http.post(f"{SELLERS_URL}/admin/price", json={"path": path, "price": price})
 
 
-async def start_task(the_judge: judge.Judge) -> Task:
-    """Have Claude read TASK into a mandate for research-agent and confirm it with a $5 budget, as the owner would.
+async def start_task(the_judge: judge.Judge, text: str = TASK) -> Task:
+    """Have Claude read the task into a mandate for research-agent and confirm it with a $5 budget, as the owner would.
 
     The per call estimate is set to $0.10 here (not left to the model), so the held scenario always holds.
     """
-    draft = await the_judge.extract(TASK)
+    draft = await the_judge.extract(text)
     print(f"TASK     {draft.goal} | may buy: {', '.join(draft.expected_types)} | "
           f"out of scope: {', '.join(draft.out_of_scope)}")
     with db.connection() as conn, db.transaction(conn):
         aid = db.agent_id(conn, AGENT)
-        task_id = mandates.create(conn, aid, TASK, draft.goal, draft.expected_types, draft.out_of_scope, 5_000_000,
+        task_id = mandates.create(conn, aid, text, draft.goal, draft.expected_types, draft.out_of_scope, 5_000_000,
                                   100_000)
         mandates.confirm(conn, task_id, aid, 5_000_000, attempts.load_agent(conn, AGENT)["weekly_budget"])
     return Task(task_id, "owner", the_judge)
 
 
-async def attempt(signer: ClientEvmSigner, path: str, reason: str, task: Task | None = None) -> None:
-    """Pay for one path and print the outcome."""
+async def attempt(
+    signer: ClientEvmSigner, path: str, reason: str, task: Task | None = None,
+    operator: escrow.EscrowOperator | None = None,
+) -> int | None:
+    """Pay for one path and print the outcome. Returns the request id of a payment left in escrow for the owner."""
     try:
-        result = await pay_for(f"{SELLERS_URL}{path}", signer, agent=AGENT, reason=reason, task=task)
-        print(f"PAID     HTTP {result.status} {result.body}")
-        print(f"https://sepolia.basescan.org/tx/{result.tx_hash}")
+        result = await pay_for(f"{SELLERS_URL}{path}", signer, agent=AGENT, reason=reason, task=task,
+                               operator=operator)
     except PaymentHeld as e:
         print(f"HELD     {e}")
+        return None
     except PaymentRejected as e:
         print(f"BLOCKED  {e}")
+        return None
+    if result.verdict is not None:
+        print(f"CHECKED  {result.verdict.outcome} ({result.verdict.rule}): {result.verdict.detail}")
+    if result.escrow == "held":
+        print("ESCROW   held for the owner, the seller is not paid yet")
+        return result.attempt_id
+    if result.escrow == "voided":
+        print("REFUNDED the money went back, the data is withheld")
+    else:
+        print(f"PAID     HTTP {result.status} {result.body}" + (" (captured from escrow)" if result.escrow else ""))
+    if result.tx_hash:
+        print(f"https://sepolia.basescan.org/tx/{result.tx_hash}")
+    return None
+
+
+async def run_escrow(scenario: str, signer: ClientEvmSigner) -> None:
+    """The escrow scenarios: the operator holds the money until the delivery is checked."""
+    async with escrow.open_operator() as operator:
+        if scenario == "escrow":
+            await attempt(signer, "/benchmarks/email", "demo escrow", operator=operator)
+        elif scenario == "void":
+            await attempt(signer, "/travel/restaurants", "demo escrow void", operator=operator)
+        else:
+            with db.connection() as conn:
+                db.seed_sellers(conn, [{"name": "InsightLab", "pay_to": os.environ["SELLER_B_ADDRESS"],
+                                        "network": NETWORK, "asset": USDC_BASE_SEPOLIA, "status": "approved"}])
+            task = await start_task(judge.ClaudeJudge(), TRIP)
+            held = await attempt(signer, "/travel/train-times", "Need train departures between Shinjuku and Asakusa "
+                                 "for the itinerary.", task, operator)
+            if held is not None:
+                with db.connection() as conn:
+                    outcome = await settle_held(conn, operator, held, db.agent_id(conn, AGENT), False)
+                print(f"OWNER    refunds it: {outcome}")
 
 
 async def run(scenario: str) -> None:
@@ -83,7 +133,9 @@ async def run(scenario: str) -> None:
         with db.connection() as conn:
             db.init(conn)
             await bootstrap_books(conn, signer.address)
-        if scenario in ("intent", "held"):
+        if scenario in ("escrow", "void", "escrow-held"):
+            await run_escrow(scenario, signer)
+        elif scenario in ("intent", "held"):
             task = await start_task(judge.ClaudeJudge())
             if scenario == "intent":
                 await attempt(signer, "/benchmarks/email", REASON, task)

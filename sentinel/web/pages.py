@@ -56,7 +56,8 @@ RULE_LABELS = {
     "injection": "Seller tried to instruct the agent", "unlisted_url": "URL not from the catalog",
     "bait_switch": "Bait and switch",
     "listing_changed": "Sells something other than listed", "flagged_wallet": "Wallet flagged as a scam",
-    "unused_wallet": "Wallet has no history",
+    "unused_wallet": "Wallet has no history", "bad_deliveries": "Seller's deliveries keep failing",
+    "escrow_terms": "Escrow terms not safe",
 }
 ADDRESS = re.compile(r"0x[0-9a-fA-F]{40}")
 
@@ -66,7 +67,9 @@ def why(payment: Mapping[str, Any]) -> tuple[str, str]:
 
     A blocked or denied payment gets a friendly label for the guard's (or intent binding's) rule and its own sentence
     as detail. A held (escalated) one says it waits for the owner. A failed one says it did not complete (or, with a
-    tx hash, that it was paid but not recorded); an approved or pending one is in progress.
+    tx hash, that it was paid but not recorded); an approved or pending one is in progress. An escrowed one is held
+    while Sentinel checks the delivery (or waits for the owner); a voided one was refunded because the delivery failed
+    the check; a settled one whose delivery failed the check (paid without escrow) says so.
     """
     status = payment.get("status")
     if status in ("blocked", "denied"):
@@ -82,6 +85,15 @@ def why(payment: Mapping[str, Any]) -> tuple[str, str]:
     if status == "escalated":
         rule = (payment.get("rule") or "").strip()
         return f"Held for you: {RULE_LABELS.get(rule, 'needs your decision').lower()}", (payment.get("detail") or "")
+    _, _, delivery = (payment.get("delivery_reason") or "").partition(": ")
+    if status == "escrowed":
+        if payment.get("delivery_verdict") == "unsure":
+            return "In escrow, waiting for you on Tasks", delivery
+        return "In escrow while Sentinel checks the delivery", ""
+    if status == "voided":
+        return "Refunded: the delivery failed the check", delivery
+    if status == "settled" and payment.get("delivery_verdict") == "fail":
+        return "Paid, but the delivery failed the check (no escrow)", delivery
     return "", ""
 
 
