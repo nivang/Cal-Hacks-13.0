@@ -37,6 +37,7 @@ from sentinel import (
     chain,
     db,
     guard,
+    injection_detector,
     judge,
     link_approvals,
     mandates,
@@ -330,6 +331,8 @@ def create_app(
 
     @asynccontextmanager
     async def sweeper(_app: Any) -> AsyncIterator[None]:
+        # A configured but unusable detector must prevent startup, not silently disable the screen.
+        await asyncio.to_thread(injection_detector.initialize)
         task = asyncio.create_task(sweep_forever()) if open_operator is not None else None
         try:
             yield

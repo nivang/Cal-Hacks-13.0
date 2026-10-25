@@ -262,7 +262,8 @@ async def test_the_watcher_tells_the_agent_once_the_owner_answers(make_desk, con
     request_id = int(next(t for t in sent(desk) if "/account/approvals/" in t).rsplit("/", 1)[1])
     with connect() as conn:
         link_approvals.decide(conn, identity.agent, request_id, identity.user_id, "yes")
-    await asyncio.wait_for(asyncio.gather(*desk.background), 5)
+    # Resuming runs the real payment checks against the remote test database.
+    await asyncio.wait_for(asyncio.gather(*desk.background), 30)
     assert sent(desk)[-1] == "Got it: Acme raised a Series B."
     assert len(pay_spy.calls) == 2
 
@@ -373,4 +374,3 @@ def test_from_env_is_off_without_a_secret_and_refuses_a_short_one(settings):
     assert texting.from_env({}, settings.base_url, key) is None
     with pytest.raises(ValueError):
         texting.from_env({texting.SECRET_VAR: "short"}, settings.base_url, key)
-
