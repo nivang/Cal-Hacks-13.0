@@ -92,6 +92,14 @@ def set_agent_limits(conn: Connection, agent: str, per_payment_cap: int, weekly_
         raise LookupError(f"no agent named {agent}")
 
 
+def set_auto_buy(conn: Connection, agent: str, on: bool) -> None:
+    """Turn the agent's auto buy on or off: on, the recommended best value of a price comparison is bought without
+    asking even when it is the pricier option (every other check still runs); off, it is held for the owner."""
+    updated = conn.execute("UPDATE agents SET auto_buy_best_value = %s WHERE name = %s", (on, agent)).rowcount
+    if updated == 0:
+        raise LookupError(f"no agent named {agent}")
+
+
 def list_sellers(conn: Connection) -> list[dict[str, Any]]:
     """Every seller on the operator's list (agent_id null), approved first, then by name."""
     return conn.execute(
@@ -113,17 +121,21 @@ def list_agents(conn: Connection, budget_window_days: int) -> list[dict[str, Any
 def list_attempts(conn: Connection, limit: int = 200, agent_id: int | None = None) -> list[dict[str, Any]]:
     """The newest payment attempts with agent, seller name and who listed that seller. Amount in atomic units.
 
-    rule_fired is split into rule and detail. seller is None when the address was never on a list that applies to the
-    attempt's agent. When several seller rows share an address, one is picked per attempt (the attempt's own agent's
-    row first, then the operator's), so an attempt never repeats. agent_id limits the log to one agent.
+    rule_fired is split into rule and detail. Escrowed attempts carry their escrow row (escrow_state, escrow_held,
+    authorize_tx, capture_tx, void_tx, capture_deadline, decided_by), None otherwise. seller is None when the
+    address was never on a list that applies to the attempt's agent. When several seller rows share an address, one
+    is picked per attempt (the attempt's own agent's row first, then the operator's), so an attempt never repeats.
+    agent_id limits the log to one agent.
     """
     rows = conn.execute(
         f"SELECT a.id, a.created_at, ag.name AS agent, a.reason, s.name AS seller, a.pay_to,"
         f" (a.amount {ATOMIC})::bigint AS amount, a.decision, a.rule_fired, a.status, a.tx_hash, a.response_hash,"
         " a.url, s.added_by AS seller_listed_by, s.added_at AS seller_listed_at, a.mandate_id AS task_id, a.found_at,"
         " a.intent_tier, a.intent_verdict, a.intent_reason, COALESCE(a.preview, false) AS found_while_searching,"
-        " a.delivery_verdict, a.delivery_reason"
+        " a.delivery_verdict, a.delivery_reason, e.state AS escrow_state, e.held AS escrow_held,"
+        " e.authorize_tx, e.capture_tx, e.void_tx, e.capture_deadline, e.decided_by"
         " FROM payment_attempts a JOIN agents ag ON ag.id = a.agent_id"
+        " LEFT JOIN escrow_payments e ON e.attempt_id = a.id"
         " LEFT JOIN LATERAL (SELECT x.name, x.added_by, x.added_at FROM sellers x"
         "  WHERE lower(x.pay_to) = lower(a.pay_to) AND x.network = %s AND lower(x.asset) = lower(%s)"
         "  AND (x.agent_id IS NULL OR x.agent_id = a.agent_id)"

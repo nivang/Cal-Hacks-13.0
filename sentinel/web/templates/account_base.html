@@ -17,11 +17,11 @@
   <div id="sidebar-content" class="sidebar-content">
     <nav aria-label="Account" class="sidebar-navigation">
       <p class="sidebar-section-label">Workspace</p>
-      {% set activity = tab in ("tasks", "payments", "books") %}
+      {% set activity = tab in ("live", "tasks", "payments", "books") %}
       <ul class="sidebar-links">
         {% for key, label, href, path in [
           ("overview", "Overview", "/account", "M3 3h7v7H3z M14 3h7v7h-7z M3 14h7v7H3z M14 14h7v7h-7z"),
-          ("activity", "Activity", "/account/tasks", "M3 12h4l3-8 4 16 3-8h4"),
+          ("activity", "Activity", "/account/live", "M3 12h4l3-8 4 16 3-8h4"),
           ("rules", "Settings", "/account/rules", "M4 6h16 M4 12h16 M4 18h16 M8 3v6 M16 9v6 M10 15v6")
         ] %}
         <li>
@@ -34,7 +34,7 @@
           {% if key == "activity" %}
           <nav aria-label="Activity views" class="sidebar-subnavigation">
             <ul>
-              {% for view, title, url in [("tasks", "Tasks", "/account/tasks"), ("payments", "Payments", "/account/payments"), ("books", "Books", "/account/books")] %}
+              {% for view, title, url in [("live", "Live", "/account/live"), ("tasks", "Tasks", "/account/tasks"), ("payments", "Payments", "/account/payments"), ("books", "Books", "/account/books")] %}
               <li><a href="{{ url }}"{% if view == tab %} aria-current="page"{% endif %} class="sidebar-sublink{% if view == tab %} is-active{% endif %}">{{ title }}</a></li>
               {% endfor %}
             </ul>

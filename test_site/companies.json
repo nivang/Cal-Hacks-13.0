@@ -1,0 +1,73 @@
+{
+  "acme robotics": {
+    "name": "Acme Robotics",
+    "website": "https://acmerobotics.example",
+    "hq": "Oakland, California",
+    "founded": 2017,
+    "industry": "Warehouse automation robots",
+    "summary": "Builds autonomous mobile robots that pick and move inventory in warehouses, sold as a monthly subscription.",
+    "ceo": "Dana Whitfield",
+    "executives": [
+      {"name": "Dana Whitfield", "title": "CEO and co-founder"},
+      {"name": "Marcus Oyelaran", "title": "CTO and co-founder"},
+      {"name": "Priya Raman", "title": "CFO (joined 2025)"},
+      {"name": "Tom Albrecht", "title": "VP Operations"}
+    ],
+    "funding": [
+      {"date": "2018-04-12", "round": "Seed", "amount_usd": 3200000, "lead": "Northstar Ventures"},
+      {"date": "2020-06-30", "round": "Series A", "amount_usd": 18000000, "lead": "Helios Capital"},
+      {"date": "2022-09-15", "round": "Series B", "amount_usd": 55000000, "lead": "Granite Peak Partners"},
+      {"date": "2024-11-04", "round": "Series C", "amount_usd": 120000000, "lead": "Meridian Growth"},
+      {"date": "2026-07-21", "round": "Venture debt", "amount_usd": 30000000, "lead": "Bay Harbor Credit"}
+    ],
+    "headcount": [
+      {"month": "2025-10", "employees": 452}, {"month": "2025-11", "employees": 468},
+      {"month": "2025-12", "employees": 481}, {"month": "2026-01", "employees": 497},
+      {"month": "2026-02", "employees": 503}, {"month": "2026-03", "employees": 462},
+      {"month": "2026-04", "employees": 465}, {"month": "2026-05", "employees": 471},
+      {"month": "2026-06", "employees": 480}, {"month": "2026-07", "employees": 488},
+      {"month": "2026-08", "employees": 494}, {"month": "2026-09", "employees": 501}
+    ],
+    "departments": {"Engineering": 214, "Field operations": 131, "Sales": 68, "Support": 52, "G&A": 36},
+    "open_roles": 37,
+    "news": [
+      {"date": "2026-10-08", "outlet": "Robotics Business Review", "title": "Acme Robotics signs 40 site deal with Pacific Grocers",
+       "summary": "A three year deployment across Pacific Grocers' West Coast distribution centers, Acme's largest contract to date."},
+      {"date": "2026-09-17", "outlet": "Supply Chain Dive", "title": "OSHA cites Acme Robotics customer site over robot aisle injury",
+       "summary": "OSHA proposed a $41,000 penalty after a worker was struck in a shared robot aisle at a customer warehouse in Reno."},
+      {"date": "2026-07-22", "outlet": "TechCrunch", "title": "Acme Robotics takes $30M in venture debt to fund fleet expansion",
+       "summary": "The debt facility from Bay Harbor Credit funds robots leased to customers rather than new equity."},
+      {"date": "2026-03-11", "outlet": "The Information", "title": "Acme Robotics lays off 8 percent of staff",
+       "summary": "About 40 roles cut, mostly in sales and a paused European expansion; the company said it is focusing on US grocery."},
+      {"date": "2025-11-19", "outlet": "Reuters", "title": "Kinetix Automation sues Acme Robotics over picking arm patent",
+       "summary": "Kinetix alleges Acme's gripper infringes two patents; Acme called the suit meritless."}
+    ],
+    "litigation": [
+      {"court": "U.S. District Court, N.D. California", "case_no": "3:25-cv-08812", "filed": "2025-11-18",
+       "type": "Patent infringement", "parties": "Kinetix Automation, Inc. v. Acme Robotics, Inc.",
+       "status": "Pending; claim construction hearing set for 2026-12-03",
+       "summary": "Alleges the Acme Grip 3 end effector infringes U.S. Patents 11,204,553 and 11,488,120."},
+      {"court": "Superior Court of California, Alameda County", "case_no": "RG26-117734", "filed": "2026-04-02",
+       "type": "Employment (WARN Act)", "parties": "Lopez et al. v. Acme Robotics, Inc.",
+       "status": "Pending; mediation scheduled",
+       "summary": "Former employees claim the March 2026 layoff lacked required 60 day notice."}
+    ],
+    "filings": [
+      {"agency": "SEC", "form": "Form D", "date": "2024-11-06", "summary": "Notice of exempt offering: $120M Series C equity."},
+      {"agency": "OSHA", "form": "Citation and notification of penalty", "date": "2026-09-12",
+       "summary": "One serious citation at a customer site in Reno, NV (inspection 1789234); $41,000 proposed, contested."},
+      {"agency": "FCC", "form": "Equipment authorization", "date": "2026-02-20", "summary": "Grant for the AR-7 robot's 5 GHz radio module."},
+      {"agency": "California Secretary of State", "form": "Statement of Information", "date": "2026-05-30",
+       "summary": "Lists Priya Raman as CFO and a new principal address in Oakland."}
+    ]
+  },
+  "globex logistics": {
+    "name": "Globex Logistics",
+    "website": "https://globex.example",
+    "hq": "Columbus, Ohio",
+    "founded": 2009,
+    "industry": "Freight brokerage software",
+    "summary": "A digital freight broker matching shippers with carriers.",
+    "ceo": "Hank Scorpio"
+  }
+}

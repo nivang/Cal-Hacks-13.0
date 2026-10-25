@@ -7,6 +7,9 @@ can never read or change another's task or held payment. Amounts go in and out a
 """
 from collections.abc import Sequence
 from typing import Any
+from urllib.parse import urlsplit, urlunsplit
+
+from psycopg.types.json import Jsonb
 
 from sentinel import guard, intent
 from sentinel.attempts import ATOMIC, LIVE_STATUSES
@@ -68,9 +71,11 @@ def to_mandate(row: dict[str, Any]) -> intent.Mandate:
 def spend(conn: Connection, mandate_id: int) -> int:
     """What this task has spent or has in flight, in atomic units."""
     row = conn.execute(
-        f"SELECT (COALESCE(SUM(amount), 0) {ATOMIC})::bigint AS total FROM payment_attempts"
-        " WHERE mandate_id = %s AND status = ANY(%s)",
-        (mandate_id, LIVE_STATUSES),
+        f"SELECT (COALESCE((SELECT SUM(amount) FROM payment_attempts"
+        f" WHERE mandate_id = %s AND status = ANY(%s)), 0) {ATOMIC})::bigint"
+        " + COALESCE((SELECT SUM(COALESCE(actual_charge, max_charge)) FROM apify_runs"
+        " WHERE mandate_id = %s), 0)::bigint AS total",
+        (mandate_id, LIVE_STATUSES, mandate_id),
     ).fetchone()
     return int(row["total"]) if row else 0
 
@@ -115,8 +120,58 @@ def session_facts(
         allowance_id=find_allowance(conn, mandate_id, quote),
         purchases=tuple(intent.Purchase(r["url"], int(r["amount"]), r["status"], r["reason"]) for r in history),
         listing=listing_for(conn, mandate_id, quote.url),
+        comparison=comparison_for(conn, mandate_id, quote.url, policy["compare_ttl_s"]),
         seller_bad_deliveries=int(bad["n"]) if bad else 0,
     )
+
+
+# Price comparisons (compare.py, migration 016)
+
+COMPARISON_LIMIT = 50  # shown on the Tasks page
+
+
+def save_comparison(
+    conn: Connection, mandate_id: int, query: str, calls: int, results: int, offers: list[dict[str, Any]],
+    buyable_keys: Sequence[str], best: tuple[str, str, int] | None, cheapest: tuple[str, str, int] | None,
+    explanation: str,
+) -> int:
+    """Store one comparison: every offer as shown, the keys pay() could buy, the best and cheapest (key, name, cost)."""
+    row = conn.execute(
+        "INSERT INTO price_comparisons (mandate_id, query, calls, results, offers, buyable_keys, best_key, best_name,"
+        " best_cost, cheapest_key, cheapest_name, cheapest_cost, explanation)"
+        " VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING id",
+        (mandate_id, query, calls, results, Jsonb(offers), list(buyable_keys),
+         best[0] if best else None, best[1] if best else None, usdc(best[2]) if best else None,
+         cheapest[0] if cheapest else None, cheapest[1] if cheapest else None,
+         usdc(cheapest[2]) if cheapest else None, explanation),
+    ).fetchone()
+    assert row is not None
+    return int(row["id"])
+
+
+def comparison_for(conn: Connection, mandate_id: int, url: str, ttl_s: int) -> intent.Comparison | None:
+    """The newest comparison under this task, younger than ttl_s, that offered this URL (by intent.url_key)."""
+    row = conn.execute(
+        f"SELECT id, best_key, best_name, cheapest_key, cheapest_name, (cheapest_cost {ATOMIC})::bigint AS cheapest,"
+        " calls, explanation FROM price_comparisons WHERE mandate_id = %s AND %s = ANY(buyable_keys)"
+        " AND created_at > now() - make_interval(secs => %s) ORDER BY id DESC LIMIT 1",
+        (mandate_id, intent.url_key(url), ttl_s),
+    ).fetchone()
+    if row is None:
+        return None
+    return intent.Comparison(row["id"], row["best_key"], row["best_name"], row["cheapest_key"], row["cheapest_name"],
+                             row["cheapest"], int(row["calls"]), row["explanation"])
+
+
+def list_comparisons(conn: Connection, agent_id: int, limit: int = COMPARISON_LIMIT) -> list[dict[str, Any]]:
+    """This agent's newest comparisons, for the Tasks page, with costs in atomic units."""
+    return conn.execute(
+        f"SELECT c.id, c.mandate_id, c.query, c.calls, c.results, c.offers, c.best_name,"
+        f" (c.best_cost {ATOMIC})::bigint AS best_cost, c.cheapest_name, (c.cheapest_cost {ATOMIC})::bigint AS"
+        " cheapest_cost, c.explanation, c.created_at FROM price_comparisons c JOIN mandates m ON m.id = c.mandate_id"
+        " WHERE m.agent_id = %s ORDER BY c.id DESC LIMIT %s",
+        (agent_id, limit),
+    ).fetchall()
 
 
 def remember_listings(conn: Connection, mandate_id: int, listings: Sequence[Any]) -> None:
@@ -132,12 +187,22 @@ def remember_listings(conn: Connection, mandate_id: int, listings: Sequence[Any]
         )
 
 
+def endpoint(url: str) -> str:
+    """url without its query string or fragment: the endpoint a catalog lists, whatever parameters the agent sets."""
+    return urlunsplit(urlsplit(url)._replace(query="", fragment=""))
+
+
 def listing_for(conn: Connection, mandate_id: int, url: str) -> intent.Listing | None:
-    """What the catalog advertised for this URL under this task, or None if it was never listed."""
+    """What the catalog advertised for this URL under this task, or None if it was never listed.
+
+    A catalog lists endpoints (https://seller/funding) and agents call them with parameters
+    (https://seller/funding?company=Acme), so a URL with a query string falls back to its endpoint's listing; an exact
+    listing wins. The parameters never change the seller, the price or the wallet the listing promised.
+    """
     row = conn.execute(
         f"SELECT (listed_amount {ATOMIC})::bigint AS amount, listed_pay_to, name, description FROM listings_seen"
-        " WHERE mandate_id = %s AND url = %s",
-        (mandate_id, url),
+        " WHERE mandate_id = %s AND url = ANY(%s) ORDER BY url = %s DESC LIMIT 1",
+        (mandate_id, [url, endpoint(url)], url),
     ).fetchone()
     if row is None:
         return None
@@ -187,17 +252,38 @@ def remember(conn: Connection, mandate_id: int, pay_to: str, url: str, verdict: 
 # Account pages
 
 
+WITH_SPENT = (  # spent counts live payments plus Apify runs (atomic units, the run's actual or capped charge)
+    f"SELECT {COLUMNS}, (COALESCE(s.total, 0) {ATOMIC})::bigint"
+    " + COALESCE((SELECT SUM(COALESCE(actual_charge, max_charge)) FROM apify_runs ar"
+    " WHERE ar.mandate_id = m.id), 0)::bigint AS spent FROM mandates m"
+    " LEFT JOIN LATERAL (SELECT SUM(amount) AS total FROM payment_attempts p"
+    "  WHERE p.mandate_id = m.id AND p.status = ANY(%s)) s ON true"
+)
+
+
 def list_for_agent(conn: Connection, agent_id: int, limit: int = TASK_LIMIT) -> list[dict[str, Any]]:
     """This agent's newest tasks with what each has spent, the provisional ones first."""
     rows = conn.execute(
-        f"SELECT {COLUMNS}, (COALESCE(s.total, 0) {ATOMIC})::bigint AS spent FROM mandates m"
-        " LEFT JOIN LATERAL (SELECT SUM(amount) AS total FROM payment_attempts p"
-        "  WHERE p.mandate_id = m.id AND p.status = ANY(%s)) s ON true"
-        " WHERE m.agent_id = %s ORDER BY m.id DESC LIMIT %s",
-        (LIVE_STATUSES, agent_id, limit),
+        WITH_SPENT + " WHERE m.agent_id = %s ORDER BY m.id DESC LIMIT %s", (LIVE_STATUSES, agent_id, limit),
     ).fetchall()
+    purchases = conn.execute("SELECT * FROM apify_runs WHERE agent_id = %s ORDER BY id DESC LIMIT 100",
+                             (agent_id,)).fetchall()
+    for purchase in purchases:
+        charge = purchase["actual_charge"]
+        purchase["charge_usd"] = format(usdc(charge), ".6f") if charge is not None else None
+    for row in rows:
+        row["apify_purchases"] = [p for p in purchases if p["mandate_id"] == row["id"]]
     rows.sort(key=lambda r: (r["status"] != intent.PROVISIONAL or r["expired"], -r["id"]))
     return rows
+
+
+def list_by_ids(conn: Connection, agent_id: int, ids: Sequence[int]) -> list[dict[str, Any]]:
+    """These tasks of this agent with what each has spent, in one query (ids of other agents are ignored)."""
+    if not ids:
+        return []
+    return conn.execute(
+        WITH_SPENT + " WHERE m.agent_id = %s AND m.id = ANY(%s)", (LIVE_STATUSES, agent_id, list(ids)),
+    ).fetchall()
 
 
 def confirm(conn: Connection, mandate_id: int, agent_id: int, budget: int, weekly_budget: int) -> None:

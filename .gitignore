@@ -10,3 +10,6 @@ dist/
 node_modules/
 data/injection/generated/
 artifacts/injection/
+
+# The storefront build is committed so the demo needs no Node
+!test_site/storefront/dist/

@@ -25,7 +25,7 @@ from conftest import ASSET, DATACO, NETWORK, SCAMMER, TASK, TEST_BASE_URL, FakeJ
 from fastmcp import Client, FastMCP
 from fastmcp.client.elicitation import ElicitResult
 from fastmcp.server.auth import AccessToken
-from test_discovery import TESTNET_SELLER, Directory
+from test_discovery import APIFY, TESTNET_SELLER, Directory
 
 from sentinel import attempts, db, guard, ledger, mandates, mcp_server, payments
 from sentinel.guard import Quote
@@ -155,10 +155,12 @@ def make_server(conn, connect, settings, opener, fake_judge) -> Callable[..., Fa
 
     def build(
         pay_fn: Callable[..., Any] | None = None, judge_: FakeJudge | None = None, discover_fetch: Any = None,
+        apify_client_factory: Any = None,
     ) -> FastMCP:
         return mcp_server.create_server(
             auth=SentinelOAuthProvider(settings, connect), pay_fn=pay_fn or fake_pay_for(conn), open_signer=opener,
             connect=connect, judge_=judge_ or fake_judge, discover_fetch=discover_fetch or Directory(),
+            apify_client_factory=apify_client_factory,
         )
 
     return build
@@ -198,11 +200,11 @@ def count_attempts(conn) -> int:
 
 
 @pytest.mark.anyio
-async def test_the_server_exposes_exactly_the_eight_tools(make_server, alice):
+async def test_the_server_exposes_exactly_the_eleven_tools(make_server, alice):
     async with Client(make_server()) as client:
         tools = {t.name: t for t in await client.list_tools()}
-    assert set(tools) == {"start_task", "find_services", "quote", "pay", "payment_status",
-                          "discover", "apify_actor", "resume_payment"}
+    assert set(tools) == {"start_task", "find_services", "quote", "compare_prices", "pay", "payment_status",
+                          "discover", "apify_actor", "resume_payment", "run_apify_actor", "apify_run_status"}
 
 
 @pytest.mark.anyio
@@ -238,7 +240,7 @@ async def test_a_vague_reason_is_rejected_before_any_payment_logic_runs(conn, ma
 async def test_explicit_task_id_reaches_the_payment_backend(make_server, alice, fake_judge):
     seen = []
 
-    async def inspect_payment(url, signer, *, agent, reason, task):
+    async def inspect_payment(url, signer, *, agent, reason, task, **options):
         seen.append((url, agent, reason, task))
         return PayResult(200, "free resource")
 
@@ -284,8 +286,9 @@ async def test_the_reason_is_saved_with_the_attempt_for_the_owner(conn, make_ser
 
 
 @pytest.mark.anyio
-async def test_unknown_seller_is_blocked_with_a_request_id_and_nothing_is_paid(conn, make_server, alice):
-    server = make_server(fake_pay_for(conn, amount=9_000_000, pay_to=SCAMMER))
+async def test_unknown_seller_waits_for_approval_with_a_request_id_and_nothing_is_paid(conn, make_server, alice):
+    # Under the $1.00 a task may spend before the owner confirms it, so the approval step is what decides.
+    server = make_server(fake_pay_for(conn, amount=500_000, pay_to=SCAMMER))
     r = await call(server, "pay", url="http://seller.test/premium", reason=REASON)
     assert r["status"] == "APPROVAL_REQUIRED" and r["request_id"] and r["approval_url"]
     assert conn.execute("SELECT COUNT(*) AS n FROM journal_entries").fetchone()["n"] == 0
@@ -324,11 +327,11 @@ async def test_payment_status_returns_the_paid_body_later(make_server, alice):
 
 
 @pytest.mark.anyio
-async def test_payment_status_shows_an_unlisted_seller_as_blocked(conn, make_server, alice):
-    server = make_server(fake_pay_for(conn, amount=9_000_000, pay_to=SCAMMER))
-    blocked = await call(server, "pay", url=URL, reason=REASON)
-    again = await call(server, "payment_status", request_id=blocked["request_id"])
-    assert again["status"] == "APPROVAL_REQUIRED" and again["request_id"] == blocked["request_id"]
+async def test_payment_status_shows_an_unlisted_seller_waiting_for_approval(conn, make_server, alice):
+    server = make_server(fake_pay_for(conn, amount=500_000, pay_to=SCAMMER))
+    waiting = await call(server, "pay", url=URL, reason=REASON)
+    again = await call(server, "payment_status", request_id=waiting["request_id"])
+    assert again["status"] == "APPROVAL_REQUIRED" and again["request_id"] == waiting["request_id"]
 
 
 @pytest.mark.anyio
@@ -633,7 +636,7 @@ def startup(monkeypatch) -> Startup:
     monkeypatch.setattr(db, "close_pool", close_pool)
     monkeypatch.setattr(mcp_server.uvicorn, "run", lambda app, **kw: seen.runs.append((app, kw)))
 
-    def create_app(settings: Settings) -> str:
+    def create_app(settings: Settings, **options: Any) -> str:
         seen.apps.append(settings)
         return "the app"
 
@@ -941,7 +944,8 @@ async def test_find_services_shows_the_agent_only_what_it_may_buy_and_logs_the_r
     task_id = (await start(make_server(), budget_usd="1"))["task_id"]  # the $0.60 guide is over half
     r = await call(make_server(), "find_services", task_id=task_id, query="Tokyo flights")
     assert r["status"] == "OK" and "do not look for them or mention them" in r["message"]
-    assert [(s["name"], s["verdict"], s["price_usdc"]) for s in r["services"]] == [("Flights", "OK", "0.25")]
+    assert [(s["name"], s["verdict"], s["price_usdc"]) for s in r["services"]] == [("Flights", "OK", "0.25"),
+                                                                                   ("Tips", "FREE", None)]
     logged = conn.execute(
         "SELECT url, status, rule_fired, preview, mandate_id FROM payment_attempts ORDER BY id"
     ).fetchall()
@@ -954,6 +958,14 @@ async def test_find_services_shows_the_agent_only_what_it_may_buy_and_logs_the_r
     assert conn.execute("SELECT count(*) AS n FROM journal_entries").fetchone()["n"] == 0
     await call(make_server(), "find_services", task_id=task_id, query="Tokyo flights")  # searching again
     assert count_attempts(conn) == 3
+
+
+@pytest.mark.anyio
+async def test_find_services_also_shows_free_sources_so_the_agent_can_try_them_first(make_server, alice, market):
+    task_id = (await start(make_server()))["task_id"]
+    r = await call(make_server(), "find_services", task_id=task_id, query="tips")
+    assert r["services"][0]["verdict"] == "FREE" and r["services"][0]["name"] == "Tips"  # the best match first
+    assert "1 are free" in r["message"]
 
 
 @pytest.mark.anyio
@@ -1080,6 +1092,24 @@ async def test_a_url_the_agent_claims_came_from_the_catalog_but_never_did_is_blo
     r = await call(make_server(), "pay", task_id=task_id, url="http://market.test/made-up", reason=REASON,
                    found_at="sentinel discovery")
     assert r["status"] == "BLOCKED" and r["rule"] == "unlisted_url"
+
+
+@pytest.mark.anyio
+async def test_a_listed_endpoint_called_with_parameters_keeps_its_listing(conn, make_server, alice, market):
+    task_id = (await start(make_server()))["task_id"]
+    await call(make_server(), "find_services", task_id=task_id, query="flights")
+    paid = await call(make_server(fake_pay_for(conn, amount=250_000)), "pay", task_id=task_id,
+                      url="http://market.test/flights?from=SFO&to=HND", reason=REASON, found_at="sentinel discovery")
+    assert paid["status"] == "SETTLED"  # not unlisted_url: the catalog listed the endpoint
+
+
+@pytest.mark.anyio
+async def test_parameters_do_not_hide_a_bait_and_switch(conn, make_server, alice, traps):
+    task_id = (await start(make_server()))["task_id"]
+    await call(make_server(), "find_services", task_id=task_id, query="travel")
+    r = await call(make_server(), "pay", task_id=task_id, url="http://market.test/esim?days=7", reason=REASON,
+                   found_at="sentinel discovery")
+    assert r["status"] == "BLOCKED" and r["rule"] == "bait_switch"
 
 
 @pytest.mark.anyio
@@ -1314,3 +1344,129 @@ async def test_unknown_off_task_purchase_is_blocked_without_asking_human(conn, m
         result = (await client.call_tool("pay", arguments)).structured_content
     assert result["status"] == "BLOCKED" and result["rule"] == "off_task"
     assert conn.execute("SELECT count(*) AS n FROM approvals").fetchone()["n"] == 0
+
+
+# compare_prices: the best value across every source, and the pricier_pick hold
+
+HOTELS = {
+    "/hotels/lite": (DATACO, 50_000, "Hotels Lite", "Tokyo hotel names, 5 hotels."),
+    "/hotels/mid": (DATACO, 100_000, "Hotels Mid", "Tokyo hotel prices for 20 hotels."),
+    "/hotels/pro": (DATACO, 150_000, "Hotels Pro", "Tokyo hotel nightly prices, ratings and areas for 50 hotels."),
+    "/hotels/cheap": (SCAMMER, 20_000, "Hotels Cheap", "Tokyo hotel prices."),  # unlisted seller: blocked
+}
+QUIET_DIRECTORIES = {"cdp_testnet": {"resources": []}, "cdp": {"resources": []}, "agentic": {"services": []},
+                     "payapi": {"results": []}, "apify": {"data": {"items": []}}}
+PRO = "http://market.test/hotels/pro"
+HOTEL_REASON = "Need Tokyo hotel prices for the owner's 5 day trip plan; this was Sentinel's best value pick."
+
+
+@pytest.fixture
+def hotels(market, fake_judge):
+    """The marketplace with four hotel sellers. The judge rates Pro clearly better, the rest of the market off task."""
+    MARKET.update(HOTELS)
+    fake_judge.scores = {"Lite": (8, 3), "Mid": (8, 6), "Pro": (10, 10), "Flights": (2, 2), "Guide": (3, 3)}
+    yield market
+    for path in HOTELS:
+        MARKET.pop(path, None)
+
+
+async def compare_hotels(make_server, task_id, directory=None, **extra):
+    return await call(make_server(discover_fetch=directory or Directory(**QUIET_DIRECTORIES)), "compare_prices",
+                      task_id=task_id, query="Tokyo hotel prices", **extra)
+
+
+@pytest.mark.anyio
+async def test_compare_prices_recommends_the_clearly_better_pricier_offer_and_pay_holds_it(conn, make_server, alice,
+                                                                                         hotels):
+    task_id = (await start(make_server(), budget_usd="1"))["task_id"]
+    r = await compare_hotels(make_server, task_id)
+    assert r["status"] == "OK" and r["needs_owner"] is True
+    assert r["best_buyable"]["name"] == "Hotels Pro" and r["best_buyable"]["price_checked"] is True
+    assert r["cheapest_buyable"]["name"] == "Hotels Lite" and r["cheapest_buyable"]["job_cost_usdc"] == "0.05"
+    assert "the owner decides" in r["message"] and PRO in r["message"]
+    assert "Hotels Cheap" not in {o["name"] for o in r["offers"]}  # stopped by the guard: not shown to the agent
+    held = await call(make_server(fake_pay_for(conn, amount=150_000)), "pay", task_id=task_id, url=PRO,
+                      reason=HOTEL_REASON, found_at="sentinel discovery")
+    assert held["status"] == "ESCALATED" and held["rule"] == "pricier_pick" and "Hotels Lite" in held["message"]
+    mandates.allow_once(conn, held["request_id"], db.agent_id(conn, alice.agent), alice.user_id)
+    paid = await call(make_server(fake_pay_for(conn, amount=150_000)), "pay", task_id=task_id, url=PRO,
+                      reason=HOTEL_REASON, found_at="sentinel discovery")
+    assert paid["status"] == "SETTLED"
+
+
+@pytest.mark.anyio
+async def test_with_auto_buy_on_the_recommended_pick_is_bought_and_an_unrecommended_pricier_one_is_held(
+    conn, make_server, alice, hotels,
+):
+    conn.execute("UPDATE agents SET auto_buy_best_value = true WHERE name = %s", (alice.agent,))
+    task_id = (await start(make_server(), budget_usd="1"))["task_id"]
+    r = await compare_hotels(make_server, task_id)
+    assert "without asking" in r["message"]
+    paid = await call(make_server(fake_pay_for(conn, amount=150_000)), "pay", task_id=task_id, url=PRO,
+                      reason=HOTEL_REASON, found_at="sentinel discovery")
+    assert paid["status"] == "SETTLED"
+    mid = await call(make_server(fake_pay_for(conn, amount=100_000)), "pay", task_id=task_id,
+                     url="http://market.test/hotels/mid", reason=HOTEL_REASON, found_at="sentinel discovery")
+    assert mid["status"] == "ESCALATED" and mid["rule"] == "pricier_pick"
+
+
+@pytest.mark.anyio
+async def test_when_the_cheapest_is_the_best_value_it_is_bought_without_asking(conn, make_server, alice, hotels,
+                                                                              fake_judge):
+    fake_judge.scores = {"Hotels": (8, 8), "Flights": (2, 2), "Guide": (2, 2)}
+    task_id = (await start(make_server(), budget_usd="1"))["task_id"]
+    r = await compare_hotels(make_server, task_id)
+    assert r["best_buyable"]["name"] == "Hotels Lite" and r["needs_owner"] is False and "Buy it with" in r["message"]
+    paid = await call(make_server(fake_pay_for(conn, amount=50_000)), "pay", task_id=task_id,
+                      url="http://market.test/hotels/lite", reason=HOTEL_REASON, found_at="sentinel discovery")
+    assert paid["status"] == "SETTLED"
+
+
+@pytest.mark.anyio
+async def test_the_comparison_is_stored_for_the_owner_with_the_offers_sentinel_stopped(conn, make_server, alice,
+                                                                                       hotels):
+    task_id = (await start(make_server(), budget_usd="1"))["task_id"]
+    r = await compare_hotels(make_server, task_id, calls=2)
+    (row,) = mandates.list_comparisons(conn, db.agent_id(conn, alice.agent))
+    assert row["id"] == r["comparison_id"] and row["mandate_id"] == task_id and row["calls"] == 2
+    assert (row["best_name"], row["best_cost"], row["cheapest_name"], row["cheapest_cost"]) == (
+        "Hotels Pro", 300_000, "Hotels Lite", 100_000)
+    stopped = next(o for o in row["offers"] if o["name"] == "Hotels Cheap")
+    assert stopped["verdict"] == "BLOCKED" and not stopped["recommended"]
+    assert conn.execute("SELECT count(*) AS n FROM journal_entries").fetchone()["n"] == 0
+
+
+@pytest.mark.anyio
+async def test_a_judge_failure_recommends_nothing(make_server, alice, hotels, fake_judge):
+    fake_judge.fail_rate = True
+    task_id = (await start(make_server(), budget_usd="1"))["task_id"]
+    r = await compare_hotels(make_server, task_id)
+    assert r["best_buyable"] is None and r["best"] is None
+    assert r["message"].startswith("Nothing Sentinel can buy fits")
+
+
+@pytest.mark.anyio
+async def test_an_apify_actor_can_be_the_best_value_and_the_agent_can_run_it_on_credit(
+    make_server, alice, hotels, fake_judge, monkeypatch,
+):
+    monkeypatch.setenv("APIFY_TOKEN", "apify_api_test")
+    fake_judge.scores = {**fake_judge.scores, "Google Maps": (10, 10)}
+    directory = Directory(**{**QUIET_DIRECTORIES, "apify": APIFY_LISTING})
+    task_id = (await start(make_server(), budget_usd="1"))["task_id"]
+    r = await compare_hotels(make_server, task_id, directory=directory, results_needed=10)
+    assert r["best"]["name"] == "Google Maps Scraper" and r["best"]["buyable"] is False
+    assert r["best"]["job_cost_usdc"] == "0.04" and r["best"]["pay_with"] == "apify_credit"
+    assert r["best_buyable"]["name"] == "Hotels Pro"
+    assert "run_apify_actor" in r["message"]
+
+
+@pytest.mark.anyio
+async def test_compare_prices_needs_the_callers_own_task(conn, make_server, alice, tokens, hotels):
+    theirs = (await start(make_server()))["task_id"]
+    tokens.use(provision(conn, "bob@example.com"))
+    r = await compare_hotels(make_server, theirs)
+    assert r["status"] == "FAILED" and count_attempts(conn) == 0
+
+
+APIFY_LISTING = {"data": {"items": [{**APIFY["data"]["items"][0],  # type: ignore[index]
+                                    "description": "Tokyo hotel listings with prices and ratings from Google Maps."}]}}

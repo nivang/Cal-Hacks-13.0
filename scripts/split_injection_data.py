@@ -39,12 +39,12 @@ def split_rows(rows: list[dict], seed: int = 42, validation_fraction: float = 0.
     def join(i: int, j: int) -> None:
         parents[find(j)] = find(i)
 
-    seen = {}
+    seen: dict[tuple[str, ...], int] = {}
     shingles = []
     for i, row in enumerate(rows):
         text = normalize(row["text"])
         shingles.append({text[j:j + 5] for j in range(max(1, len(text) - 4))})
-        keys = [("text", text)]
+        keys: list[tuple[str, ...]] = [("text", text)]
         if row.get("group"):
             keys.append(("group", row["group"]))
         for p in row["provenance"]:
@@ -65,7 +65,7 @@ def split_rows(rows: list[dict], seed: int = 42, validation_fraction: float = 0.
     clusters = defaultdict(list)
     for i, row in enumerate(rows):
         clusters[find(i)].append(row)
-    result = {name: [] for name in ("train", "validation", "test", "quarantine")}
+    result: dict[str, list[dict]] = {name: [] for name in ("train", "validation", "test", "quarantine")}
     candidates = []
     for cluster in clusters.values():
         cluster_id = hashlib.sha256("\n".join(sorted(normalize(r["text"]) for r in cluster)).encode()).hexdigest()
@@ -80,7 +80,7 @@ def split_rows(rows: list[dict], seed: int = 42, validation_fraction: float = 0.
     random.Random(seed).shuffle(candidates)
     totals = Counter(r["label"] for cluster in candidates for r in cluster)
     targets = {label: count * validation_fraction for label, count in totals.items()}
-    counts = Counter()
+    counts: Counter[int] = Counter()
     for cluster in candidates:
         added = Counter(r["label"] for r in cluster)
         before = sum((counts[label] - target) ** 2 for label, target in targets.items())
