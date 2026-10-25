@@ -85,7 +85,10 @@ def load_agent(conn: Connection, name: str) -> dict[str, Any]:
     return row
 
 
-def load_history(conn: Connection, agent: str, quote: dict[str, Any], policy: dict[str, int]) -> dict[str, Any]:
+def load_history(
+    conn: Connection, agent: str, quote: dict[str, Any], policy: dict[str, int],
+    exclude_id: int | None = None,
+) -> dict[str, Any]:
     """Read the ledger facts guard.evaluate needs for this agent and quote.
 
     Returns seller_status, week_spend, seller_settled, duplicate, duplicate_of, lookalike_of and url_paid_to as a dict
@@ -126,8 +129,10 @@ def load_history(conn: Connection, agent: str, quote: dict[str, Any], policy: di
     duplicate = conn.execute(
         "SELECT id FROM payment_attempts WHERE agent_id = %s AND lower(pay_to) = lower(%s) AND url = %s"
         " AND amount = %s AND created_at >= now() - make_interval(secs => %s) AND status = ANY(%s)"
+        " AND id <> %s"
         " ORDER BY id DESC LIMIT 1",
-        (aid, quote["pay_to"], quote["url"], usdc(quote["amount"]), policy["duplicate_window_s"], LIVE_STATUSES),
+        (aid, quote["pay_to"], quote["url"], usdc(quote["amount"]), policy["duplicate_window_s"],
+         [*LIVE_STATUSES, "pending", "authorized"], exclude_id or 0),
     ).fetchone()
     return {
         "seller_status": seller["status"] if seller else None,
@@ -184,7 +189,8 @@ def get_attempt(conn: Connection, attempt_id: int, agent: str) -> dict[str, Any]
     """
     return conn.execute(
         f"SELECT a.id, a.status, a.url, a.pay_to, (a.amount {ATOMIC})::bigint AS amount, a.decision, a.rule_fired,"
-        " a.tx_hash, a.reason, a.mandate_id FROM payment_attempts a WHERE a.id = %s AND a.agent_id = %s",
+        " a.tx_hash, a.reason, a.mandate_id, a.approval_expires_at, a.quote_json FROM payment_attempts a"
+        " WHERE a.id = %s AND a.agent_id = %s",
         (attempt_id, agent_id(conn, agent)),
     ).fetchone()
 

@@ -24,6 +24,7 @@ class FakeX402Client:
 
     fail_signing = False
     payload_error = None
+    sign_calls = 0
 
     def register(self, *_args):
         pass
@@ -31,6 +32,7 @@ class FakeX402Client:
     async def create_payment_payload(self, _payment_required):
         if self.payload_error:
             raise self.payload_error
+        self.sign_calls += 1
         if self.fail_signing:
             raise RuntimeError("signing exploded")
         return "payload"
@@ -243,3 +245,49 @@ async def test_other_x402_selection_errors_are_blocked_without_claiming_a_dollar
     assert results.from_attempt(row, None).rule == "payment_option"
     seller["client"].payload_error = None
     assert (await pay(conn)).settled  # the refused attempt released its lock
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("allow", [False, True])
+async def test_unknown_seller_cannot_sign_until_human_yes(conn, seller, allow):
+    from sentinel import link_approvals
+
+    FakeHTTPClient.accepts = [SimpleNamespace(**{**vars(REQUIREMENT), "pay_to": "0x" + "a" * 40})]
+    with pytest.raises(payments.ApprovalRequired) as caught:
+        await payments._pay_with(conn, URL, object(), "research-agent", "Find benchmarks", interactive=True)
+    request_id = caught.value.attempt_id
+    assert seller["client"].sign_calls == 0
+    link_approvals.decide(conn, "research-agent", request_id, "human", "yes" if allow else "no")
+    if allow:
+        result = await payments._pay_with(conn, URL, object(), "research-agent", "Find benchmarks",
+                                           approval_id=request_id)
+        assert result.settled and seller["client"].sign_calls == 1
+    else:
+        with pytest.raises(payments.PaymentRejected):
+            await payments._pay_with(conn, URL, object(), "research-agent", "Find benchmarks", approval_id=request_id)
+        assert seller["client"].sign_calls == 0
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("change", ["price", "unsupported", "free"])
+async def test_changed_terms_after_yes_never_reach_signer(conn, seller, change):
+    from sentinel import link_approvals
+
+    original = SimpleNamespace(**{**vars(REQUIREMENT), "pay_to": "0x" + "a" * 40})
+    FakeHTTPClient.accepts = [original]
+    with pytest.raises(payments.ApprovalRequired) as caught:
+        await payments._pay_with(conn, URL, object(), "research-agent", "Find benchmarks", interactive=True)
+    request_id = caught.value.attempt_id
+    link_approvals.decide(conn, "research-agent", request_id, "human", "yes")
+    if change == "free":
+        seller["paywalled"] = False
+        result = await payments._pay_with(conn, URL, object(), "research-agent", "Find benchmarks",
+                                           approval_id=request_id)
+        assert result.quote is None
+    else:
+        fields = {"amount": "600000"} if change == "price" else {"network": "eip155:1"}
+        FakeHTTPClient.accepts = [SimpleNamespace(**{**vars(original), **fields})]
+        with pytest.raises(payments.PaymentRejected):
+            await payments._pay_with(conn, URL, object(), "research-agent", "Find benchmarks", approval_id=request_id)
+    assert seller["client"].sign_calls == 0
+    assert link_approvals.get(conn, "research-agent", request_id)["status"] == "blocked"

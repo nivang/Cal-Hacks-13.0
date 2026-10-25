@@ -7,9 +7,9 @@ One process (`python -m sentinel.mcp_server`) serves the sign in site, the OAuth
 1. Open the site and sign in with an email address. Sentinel mails a link (on a local run it prints it in the server's terminal). The link works once and expires in 15 minutes; opening it shows a "Sign in as ..." button, and only that button spends it, so mail scanners cannot.
 2. The first sign in creates the user's own wallet: a CDP server account named by their user id, plus their own agent (`user-<uuid>`) and cash account in the books, with the default limits ($10 per payment, $50 per week). The account page shows the wallet address with a Basescan link. If Coinbase does not answer in time, the user stays signed in and the account page offers **Create my wallet** to retry.
 3. Fund the wallet with Base Sepolia USDC (see [Funding](#funding)); the Overview page has a **Fund it** button.
-4. Open **Rules** on the account page and approve the sellers the agent may pay (a name and the address from the vendor), and change the per payment cap and weekly budget if the defaults do not suit. Until a seller is approved every payment is blocked.
+4. Open **Rules** on the account page and approve the sellers the agent may pay (a name and the address from the vendor), and change the per payment cap and weekly budget if the defaults do not suit. Unlisted sellers instead require a one purchase Yes/No approval; explicit blocks always stop payment.
 5. Add Sentinel to the AI app with the MCP URL from the account page. The app opens a browser tab; the user signs in if needed and sees a consent page naming where the approval goes. **Allow** connects the app; **Deny** tells it no.
-6. From then on every `pay` call signs with that user's own wallet, under the same guard rules, within that user's limits, and only to sellers that user approved (or the operator approved for everyone). The **Payments** and **Books** pages show what happened, and the Overview checklist ticks the three steps off.
+6. From then on every `pay` call signs with that user's own wallet, under the same guard rules, within that user's limits, and only to approved sellers or a specific purchase the user approves in the native form or authenticated browser page. The **Payments** and **Books** pages show what happened, and the Overview checklist ticks the three steps off.
 
 **Sign out everywhere** on the account page ends every browser session and disconnects every app the user approved at once. An app reconnects by going through consent again.
 
@@ -81,7 +81,7 @@ Open the site at the host named in `PUBLIC_BASE_URL` (`localhost` and `127.0.0.1
 - `ANTHROPIC_API_KEY` for the intent judge (Claude Haiku 5.5). Without it the server will not start; if the API is down, payments under a task are held for the owner, never paid.
 - A Resend domain, with `RESEND_API_KEY` and `MAIL_FROM` on it. Give each deployment and database its own Resend key (the idempotency keys are per link id, which repeats across databases).
 - Run `python -m sentinel.db migrate` before starting a new version; the server refuses to start while migrations are pending.
-- Several replicas are fine: sessions, links, codes, tokens and the rate limits all live in Postgres. The in flight payment limits (2 per user, 6 overall) are per process.
+- Use sticky routing for legacy MCP sessions when running several replicas; see [link approvals](link-approvals.md). Otherwise, sessions, links, codes, tokens and the rate limits all live in Postgres. The in flight payment limits (2 per user, 6 overall) are per process.
 
 Start it with `python -m sentinel.mcp_server --host 0.0.0.0` (it reads `PORT` when the platform sets one). `GET /healthz` is a liveness check that does not touch the database. The operator ledger page (`sentinel.ledger_app`, port 5001: macOS uses 5000 for AirPlay) is a separate process with its own password; users do not need it.
 
@@ -103,5 +103,6 @@ Every user funds their own wallet: [faucet.circle.com](https://faucet.circle.com
 - **An error page instead of a redirect at /authorize**: Sentinel sends errors back only to Claude's own callbacks and loopback; any other app gets the page, so `/authorize` is never an open redirector.
 - **The app gets 401s or asks to connect again**: the grant was revoked (sign out everywhere, a replayed code or a reused refresh token) or is older than 90 days. Access tokens last an hour and the app refreshes them on its own; when the grant is gone, connect again.
 - **FAILED "could not open your wallet"**: CDP failed or did not answer in time (about 15 seconds). Nothing was paid; try again.
-- **BLOCKED (seller)**: the seller is not approved. Approve it on the Rules page of the account (unless the operator blocked it, which a user cannot undo).
+- **APPROVAL_REQUIRED**: answer the native form, or open `approval_url` and sign in. After browser approval call `resume_payment(request_id)`. See [link approvals](link-approvals.md).
+- **BLOCKED (seller)**: an applicable seller block cannot be overridden by a purchase approval.
 - **Claude Desktop with mcp-remote times out**: sign in on the site first and keep `--auth-timeout 300`.

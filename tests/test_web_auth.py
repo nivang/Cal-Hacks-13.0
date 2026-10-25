@@ -19,7 +19,7 @@ from typing import Any
 import httpx
 import pytest
 import uvicorn.config
-from conftest import BROWSER_IP, TEST_BASE_URL, access_token_for, form_value, sign_in
+from conftest import BROWSER_IP, TEST_BASE_URL, access_token_for, form_value, mcp_request, sign_in
 from fastmcp.utilities.asgi_transport import run_asgi_lifespan
 
 from sentinel import db
@@ -1025,10 +1025,7 @@ async def post_with_origin(
 
 async def mcp_status(client: httpx.AsyncClient, access_token: str) -> int:
     """The status /mcp answers a tools/list with this bearer token."""
-    response = await client.post(
-        "/mcp", json={"jsonrpc": "2.0", "id": 1, "method": "tools/list"},
-        headers={"Authorization": f"Bearer {access_token}", "Accept": "application/json, text/event-stream"},
-    )
+    response = await mcp_request(client, access_token, {"jsonrpc": "2.0", "id": 1, "method": "tools/list"})
     return response.status_code
 
 

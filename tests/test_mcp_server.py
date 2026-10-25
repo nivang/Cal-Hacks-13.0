@@ -23,6 +23,7 @@ import httpx
 import pytest
 from conftest import ASSET, DATACO, NETWORK, SCAMMER, TASK, TEST_BASE_URL, FakeJudge
 from fastmcp import Client, FastMCP
+from fastmcp.client.elicitation import ElicitResult
 from fastmcp.server.auth import AccessToken
 from test_discovery import TESTNET_SELLER, Directory
 
@@ -134,11 +135,13 @@ def opener() -> FakeOpener:
 def fake_pay_for(conn, amount=500_000, pay_to=DATACO, body=b'{"vendor":"DataCo","open_rate":0.214}', calls=None):
     """A pay function with the real guard, intent review and ledger but no network: authorize, then settle."""
 
-    async def fake_pay(url, signer, agent, reason, task=None):
+    async def fake_pay(url, signer, agent, reason, task=None, **options):
         if calls is not None:
             calls.append((url, signer, agent, reason))
         quote = Quote(url, pay_to, amount, ASSET, NETWORK, 300)
-        attempt_id = await payments.authorize_task(conn, agent, reason, quote, task)
+        attempt_id = await payments.authorize_task(conn, agent, reason, quote, task,
+                                                  interactive=options.get("interactive", False),
+                                                  approval_id=options.get("approval_id"))
         tx = f"0xtx{attempt_id}"
         ledger.settle_attempt(conn, attempt_id, tx, body, "application/json")
         return PayResult(200, body.decode(), tx, quote, attempt_id, True, "application/json")
@@ -195,10 +198,11 @@ def count_attempts(conn) -> int:
 
 
 @pytest.mark.anyio
-async def test_the_server_exposes_exactly_the_seven_tools(make_server, alice):
+async def test_the_server_exposes_exactly_the_eight_tools(make_server, alice):
     async with Client(make_server()) as client:
         tools = {t.name: t for t in await client.list_tools()}
-    assert set(tools) == {"start_task", "find_services", "quote", "pay", "payment_status", "discover", "apify_actor"}
+    assert set(tools) == {"start_task", "find_services", "quote", "pay", "payment_status",
+                          "discover", "apify_actor", "resume_payment"}
 
 
 @pytest.mark.anyio
@@ -283,8 +287,7 @@ async def test_the_reason_is_saved_with_the_attempt_for_the_owner(conn, make_ser
 async def test_unknown_seller_is_blocked_with_a_request_id_and_nothing_is_paid(conn, make_server, alice):
     server = make_server(fake_pay_for(conn, amount=9_000_000, pay_to=SCAMMER))
     r = await call(server, "pay", url="http://seller.test/premium", reason=REASON)
-    assert r["status"] == "BLOCKED" and r["request_id"] and r["rule"] == "seller"
-    assert SCAMMER in r["message"] and "Only the owner can add sellers" in r["message"]
+    assert r["status"] == "APPROVAL_REQUIRED" and r["request_id"] and r["approval_url"]
     assert conn.execute("SELECT COUNT(*) AS n FROM journal_entries").fetchone()["n"] == 0
 
 
@@ -325,7 +328,7 @@ async def test_payment_status_shows_an_unlisted_seller_as_blocked(conn, make_ser
     server = make_server(fake_pay_for(conn, amount=9_000_000, pay_to=SCAMMER))
     blocked = await call(server, "pay", url=URL, reason=REASON)
     again = await call(server, "payment_status", request_id=blocked["request_id"])
-    assert again["status"] == "BLOCKED" and again["rule"] == "seller" and again["request_id"] == blocked["request_id"]
+    assert again["status"] == "APPROVAL_REQUIRED" and again["request_id"] == blocked["request_id"]
 
 
 @pytest.mark.anyio
@@ -366,7 +369,7 @@ async def test_unknown_request_id_is_not_found(make_server, alice):
 
 @pytest.mark.anyio
 async def test_free_url_is_reported_as_free(make_server, alice):
-    async def free(url, signer, agent, reason, task=None):
+    async def free(url, signer, agent, reason, **options):
         return PayResult(200, "hello")
 
     r = await call(make_server(free), "pay", url=URL, reason=REASON)
@@ -375,7 +378,7 @@ async def test_free_url_is_reported_as_free(make_server, alice):
 
 @pytest.mark.anyio
 async def test_failed_payment_gives_a_request_id_and_hides_the_internals(make_server, alice):
-    async def boom(url, signer, agent, reason, task=None):
+    async def boom(url, signer, agent, reason, **options):
         raise payments.PaymentFailed("secret internal detail: db password 123", 42)
 
     r = await call(make_server(boom), "pay", url=URL, reason=REASON)
@@ -385,7 +388,7 @@ async def test_failed_payment_gives_a_request_id_and_hides_the_internals(make_se
 
 @pytest.mark.anyio
 async def test_unexpected_error_is_reported_without_leaking_details(make_server, alice, opener):
-    async def boom(url, signer, agent, reason, task=None):
+    async def boom(url, signer, agent, reason, **options):
         raise RuntimeError("connection string postgresql://user:hunter2@host")
 
     r = await call(make_server(boom), "pay", url=URL, reason=REASON)
@@ -395,7 +398,7 @@ async def test_unexpected_error_is_reported_without_leaking_details(make_server,
 
 @pytest.mark.anyio
 async def test_unreachable_url_says_nothing_was_paid(make_server, alice):
-    async def unreachable(url, signer, agent, reason, task=None):
+    async def unreachable(url, signer, agent, reason, **options):
         raise httpx.ConnectError("refused")
 
     r = await call(make_server(unreachable), "pay", url=URL, reason=REASON)
@@ -406,7 +409,7 @@ async def test_unreachable_url_says_nothing_was_paid(make_server, alice):
 async def test_unreachable_url_logs_only_scheme_and_host(make_server, alice, caplog):
     secret_url = "http://seller.test/benchmarks/email?token=s3cr3t"
 
-    async def unreachable(url, signer, agent, reason, task=None):
+    async def unreachable(url, signer, agent, reason, **options):
         raise httpx.ConnectError(f"refused {url}")
 
     with caplog.at_level(logging.WARNING, logger="sentinel.mcp"):
@@ -423,7 +426,7 @@ async def test_unreachable_url_logs_only_scheme_and_host(make_server, alice, cap
 async def test_unsafe_urls_are_refused_before_any_request(make_server, alice, opener, url):
     called = []
 
-    async def spy(url, signer, agent, reason, task=None):
+    async def spy(url, signer, agent, reason, **options):
         called.append(url)
         return PayResult(200, "")
 
@@ -527,7 +530,7 @@ async def test_a_user_may_have_only_two_payments_in_flight(make_server, alice, o
     release = asyncio.Event()
     entered = []
 
-    async def blocking(url, signer, agent, reason, task=None):  # no database work: calls run concurrently
+    async def blocking(url, signer, agent, reason, **options):
         entered.append(url)
         await release.wait()
         return PayResult(200, "ok")
@@ -793,9 +796,9 @@ async def test_an_approved_seller_selling_something_off_task_is_blocked(conn, ma
 
 
 @pytest.mark.anyio
-async def test_the_guard_runs_first_so_an_unlisted_seller_never_reaches_the_judge(conn, make_server, alice, fake_judge):
+async def test_unlisted_seller_still_checks_intent_before_requesting_approval(conn, make_server, alice, fake_judge):
     r = await call(make_server(fake_pay_for(conn, pay_to=SCAMMER)), "pay", url=URL, reason=REASON)
-    assert r["status"] == "BLOCKED" and r["rule"] == "seller" and fake_judge.classified == []
+    assert r["status"] == "APPROVAL_REQUIRED" and len(fake_judge.classified) == 1
 
 
 @pytest.mark.anyio
@@ -1223,3 +1226,91 @@ async def test_the_wallet_profile_is_cached_so_the_explorer_is_asked_once_an_hou
     assert fake_chain.asked == [DATACO]
     cached = conn.execute("SELECT profile FROM wallet_profiles WHERE address = %s", (DATACO.lower(),)).fetchone()
     assert cached["profile"]["token_transfers"] == 120
+@pytest.mark.anyio
+@pytest.mark.parametrize("mode", ["legacy", "auto"])
+@pytest.mark.parametrize("action,choice,status", [
+    ("accept", "No", "DENIED"), ("decline", None, "DENIED"),
+    ("cancel", None, "CANCELLED"), ("accept", "Yes", "SETTLED"),
+])
+async def test_unknown_seller_native_human_decision(conn, make_server, alice, opener, mode, action, choice, status):
+    seen = []
+
+    async def answer(message, response_type, params, context):
+        seen.append(message)
+        # The initial wallet and DB payment context are closed before asking the human.
+        assert opener.closed == 1
+        assert conn.execute("SELECT count(*) AS n FROM journal_entries").fetchone()["n"] == 0
+        return ElicitResult(action=action, content={"value": choice} if choice else None)
+
+    server = make_server(fake_pay_for(conn, pay_to="0x" + "a" * 40))
+    async with Client(server, elicitation_handler=answer, mode=mode) as client:
+        arguments = await with_task(client, "pay", {"url": URL, "reason": REASON})
+        result = await client.call_tool("pay", arguments)
+        assert result.structured_content["status"] == status
+        assert len(seen) == 1 and "0.50 test USDC" in seen[0] and "Recipient:" in seen[0]
+        assert conn.execute("SELECT count(*) AS n FROM approvals").fetchone()["n"] == 1
+        assert conn.execute("SELECT count(*) AS n FROM journal_entries").fetchone()["n"] == (status == "SETTLED")
+        # Neither status checks nor resuming a consumed/refused request can pay it again.
+        again = await client.call_tool("resume_payment", {"request_id": result.structured_content["request_id"]})
+        assert again.structured_content["status"] == status
+        assert conn.execute("SELECT count(*) AS n FROM journal_entries").fetchone()["n"] == (status == "SETTLED")
+
+
+@pytest.mark.anyio
+async def test_agent_cannot_resume_without_a_human_decision(conn, make_server, alice):
+    server = make_server(fake_pay_for(conn, pay_to="0x" + "a" * 40))
+    async with Client(server) as client:
+        arguments = await with_task(client, "pay", {"url": URL, "reason": REASON})
+        result = await client.call_tool("pay", arguments)
+        assert result.structured_content["status"] == "APPROVAL_REQUIRED"
+        resumed = await client.call_tool("resume_payment", {"request_id": result.structured_content["request_id"]})
+        assert resumed.structured_content["status"] == "APPROVAL_REQUIRED"
+        assert conn.execute("SELECT count(*) AS n FROM journal_entries").fetchone()["n"] == 0
+
+
+@pytest.mark.anyio
+async def test_approval_expiring_during_resume_returns_expired_without_settling(conn, make_server, alice):
+    inner = fake_pay_for(conn, pay_to="0x" + "a" * 40)
+
+    async def expire_on_resume(url, signer, agent, reason, **options):
+        request_id = options.get("approval_id")
+        if request_id:
+            conn.execute("UPDATE payment_attempts SET approval_expires_at = clock_timestamp() - interval '1 second'"
+                         " WHERE id = %s", (request_id,))
+        return await inner(url, signer, agent, reason, **options)
+
+    async def yes(*args):
+        return ElicitResult(action="accept", content={"value": "Yes"})
+
+    async with Client(make_server(expire_on_resume), elicitation_handler=yes) as client:
+        arguments = await with_task(client, "pay", {"url": URL, "reason": REASON})
+        result = await client.call_tool("pay", arguments)
+    assert result.structured_content["status"] == "EXPIRED"
+    assert conn.execute("SELECT count(*) AS n FROM journal_entries").fetchone()["n"] == 0
+
+
+@pytest.mark.anyio
+async def test_native_yes_cannot_bypass_a_task_revoked_while_waiting(conn, make_server, alice):
+    async def revoke_then_yes(*args):
+        conn.execute("UPDATE mandates SET status = 'revoked'")
+        return ElicitResult(action="accept", content={"value": "Yes"})
+
+    server = make_server(fake_pay_for(conn, pay_to="0x" + "a" * 40))
+    async with Client(server, elicitation_handler=revoke_then_yes) as client:
+        arguments = await with_task(client, "pay", {"url": URL, "reason": REASON})
+        result = (await client.call_tool("pay", arguments)).structured_content
+    assert result["status"] == "BLOCKED" and result["rule"] == "no_mandate"
+    assert conn.execute("SELECT count(*) AS n FROM journal_entries").fetchone()["n"] == 0
+
+
+@pytest.mark.anyio
+async def test_unknown_off_task_purchase_is_blocked_without_asking_human(conn, make_server, alice, fake_judge):
+    fake_judge.fit = "off_task"
+    async def unexpected_form(*args):
+        pytest.fail("An off-task purchase must not request seller approval")
+    server = make_server(fake_pay_for(conn, pay_to="0x" + "a" * 40))
+    async with Client(server, elicitation_handler=unexpected_form) as client:
+        arguments = await with_task(client, "pay", {"url": URL, "reason": REASON})
+        result = (await client.call_tool("pay", arguments)).structured_content
+    assert result["status"] == "BLOCKED" and result["rule"] == "off_task"
+    assert conn.execute("SELECT count(*) AS n FROM approvals").fetchone()["n"] == 0

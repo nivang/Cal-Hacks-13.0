@@ -12,6 +12,7 @@ call_tool starts a task first when a pay call names none, as an agent does. Plai
 register, connect_flow, call_tool, provision_user, access_token_for) are imported by the tests like ASSET.
 """
 import hashlib
+import json
 import os
 import re
 import secrets
@@ -297,12 +298,15 @@ class PaySpy:
 
     async def __call__(
         self, url: str, signer: Any, *, agent: str, reason: str | None = None, task: payments.Task | None = None,
+        **options: Any,
     ) -> PayResult:
         """Same signature as payments.pay_for."""
         self.calls.append((url, signer, agent, reason))
         self.tasks.append(task)
         quote = Quote(url, self.pay_to, self.amount, ASSET, NETWORK, 300)
-        attempt_id = await payments.authorize_task(self.conn, agent, reason, quote, task)
+        attempt_id = await payments.authorize_task(self.conn, agent, reason, quote, task,
+                                                  interactive=options.get("interactive", False),
+                                                  approval_id=options.get("approval_id"))
         tx = f"0xtx{attempt_id}"
         ledger.settle_attempt(self.conn, attempt_id, tx, self.body, "application/json")
         return PayResult(200, self.body.decode(), tx, quote, attempt_id, True, "application/json")
@@ -484,23 +488,45 @@ async def call_tool(
     client: httpx.AsyncClient, access_token: str, tool: str, arguments: dict[str, Any]
 ) -> dict[str, Any]:
     """Call one MCP tool over HTTP (JSON-RPC tools/call to /mcp with the bearer token) and return its structured
-    result. A tool error (no structured content) returns the raw result: {"isError": True, "content": [...]}.
-    A pay call without a task_id first starts a task with TASK, as an agent would."""
+    result. A tool error returns the raw result. Payments automatically start a task when omitted."""
     if tool == "pay" and "task_id" not in arguments:
         started = await call_tool(client, access_token, "start_task", {"task": TASK})
         if started.get("task_id"):
             arguments = {"task_id": started["task_id"], **arguments}
-    response = await client.post(
-        "/mcp",
-        json={"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": tool, "arguments": arguments}},
-        headers={"Authorization": f"Bearer {access_token}", "Accept": "application/json, text/event-stream"},
-    )
+    response = await mcp_request(client, access_token, {
+        "jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": tool, "arguments": arguments},
+    })
     assert response.status_code == 200, response.text
     body = response.json()
     assert "result" in body, body
     result = body["result"]
     structured = result.get("structuredContent")
     return dict(structured) if structured is not None else dict(result)
+
+
+async def mcp_request(client: httpx.AsyncClient, token: str, payload: dict[str, Any]) -> httpx.Response:
+    """A minimal real legacy HTTP MCP client: initialize, notify, then decode the result's SSE event."""
+    headers = {"Authorization": f"Bearer {token}", "Accept": "application/json, text/event-stream"}
+    initialized = await client.post("/mcp", headers=headers, json={
+        "jsonrpc": "2.0", "id": 0, "method": "initialize", "params": {
+            "protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": {"name": "test", "version": "1"},
+        },
+    })
+    if initialized.status_code != 200:
+        return initialized
+    session = initialized.headers.get("mcp-session-id")
+    if session:
+        headers["mcp-session-id"] = session
+    headers["mcp-protocol-version"] = "2025-06-18"
+    await client.post("/mcp", headers=headers, json={"jsonrpc": "2.0", "method": "notifications/initialized"})
+    response = await client.post("/mcp", headers=headers, json=payload)
+    if response.status_code == 200 and "text/event-stream" in response.headers.get("content-type", ""):
+        for line in response.text.splitlines():
+            if line.startswith("data: "):
+                body = json.loads(line[6:])
+                if body.get("id") == payload.get("id") and ("result" in body or "error" in body):
+                    return httpx.Response(200, json=body, request=response.request)
+    return response
 
 
 async def provision_user(connect: Callable[[], Any], email: str) -> users.Identity:

@@ -808,7 +808,7 @@ async def test_the_per_user_in_flight_limit_holds_over_http(browser, mailer, fak
     release = asyncio.Event()
     entered = []
 
-    async def blocking(self, url, signer, *, agent, reason=None, task=None):  # no database work while calls overlap
+    async def blocking(self, url, signer, *, agent, reason=None, **options):  # no database work while calls overlap
         entered.append(agent)
         await release.wait()
         return PayResult(200, "ok")

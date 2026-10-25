@@ -58,7 +58,9 @@
         <td class="px-3 py-2"><span class="block max-w-[14rem] truncate" title="{{ p.reason or '' }}">{{ p.reason or "" }}</span>
           <span class="block max-w-[14rem] truncate text-xs text-stone-500" title="{{ p.url }}">{{ p.url }}</span></td>
         <td class="whitespace-nowrap px-3 py-2 text-right tabular-nums">{{ p.amount | usd }}</td>
-        <td class="px-3 py-2">{{ status_badge(p.status) }}</td>
+        <td class="px-3 py-2">{{ status_badge(p.status) }}
+          {% if p.status in ("pending", "authorized") %}<a class="mt-1 block underline" href="/account/approvals/{{ p.id }}">Review approval</a>{% endif %}
+        </td>
         <td class="px-3 py-2">
           {% set w = p | why %}
           {% if w[0] %}<div class="max-w-[16rem] break-words"><span class="text-sm font-medium">{{ w[0] }}</span>{% if w[1] %}

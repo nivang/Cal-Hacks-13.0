@@ -18,7 +18,7 @@ Sentinel is an MCP server that holds the wallet so the agent never does. Claude 
 
 | Check | Catches |
 |---|---|
-| Approved sellers only | Any wallet the user (or operator) has not approved |
+| Seller permission | Explicitly blocked sellers; unknown sellers require a human purchase approval |
 | Lookalike address | A payee that imitates an approved wallet (same start and end): address poisoning |
 | Payee swapped | A URL already paid to one wallet that now asks to be paid at another |
 | Bait and switch | A paywall that asks more than its catalog listing, or pays a different wallet than listed |
@@ -54,6 +54,8 @@ In `.env` fill in the CDP keys, the seller addresses, `DATABASE_URL` and `ANTHRO
    ```
 
 2. **Sign in** at http://localhost:8000 with your email (the link prints in terminal 1). Your first sign in creates your own wallet; fund it at [faucet.circle.com](https://faucet.circle.com) (Base Sepolia, USDC). On **Rules**, approve DataCo and InsightLab from the demo card.
+
+Unlisted sellers that pass spending and intent checks ask for a native Yes/No approval, with an authenticated browser fallback. See [link approvals](docs/link-approvals.md).
 
 3. **Connect Claude.** Claude Code: `claude mcp add --transport http sentinel http://localhost:8000/mcp`, then `/mcp` and Allow. Claude Desktop and claude.ai: [docs/onboarding.md](docs/onboarding.md).
 
@@ -107,6 +109,8 @@ Honest limits of what is built: the injection rule matches phrases, so subtle at
 - BLOCKED (seller): approve the seller on the Rules page.
 - BLOCKED (over the task's budget): the task is not confirmed and has spent its $1. Confirm it on the Tasks page.
 - ESCALATED (held): open Tasks, read why, and Allow once if it is fine.
+- APPROVAL_REQUIRED: answer the native form, or open the approval URL and sign in. After a browser Yes, ask your agent to continue the request.
+- BLOCKED (seller): the seller is explicitly blocked, or the noninteractive command-line demo refused an unlisted seller.
 - More: [docs/onboarding.md](docs/onboarding.md#troubleshooting).
 
 ## Development

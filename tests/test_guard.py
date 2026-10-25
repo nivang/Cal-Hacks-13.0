@@ -161,3 +161,16 @@ def test_seller_attacks_are_checked_first():
 def test_a_payee_the_explorer_flags_as_a_scam_is_blocked_even_when_approved():
     d = evaluate(AGENT, quote(500_000), history(payee_flagged=True))
     assert (d.decision, d.rule) == (BLOCK, "flagged_wallet") and DATACO in d.detail
+def test_unknown_seller_needs_human_approval_only_after_spending_checks_pass():
+    decision = evaluate(AGENT, quote(500_000), history(seller_status=None), interactive=True)
+    assert decision.decision == "APPROVAL_REQUIRED"
+    assert evaluate(AGENT, quote(15 * USDC), history(seller_status=None), interactive=True).rule == "cap"
+    assert evaluate(AGENT, quote(500_000), history(seller_status=None, week_spend=50 * USDC),
+                    interactive=True).rule == "budget"
+    assert evaluate(AGENT, quote(500_000), history(seller_status="blocked"),
+                    interactive=True, authorized=True).decision == BLOCK
+
+
+def test_one_time_approval_only_bypasses_unknown_seller_rule():
+    assert evaluate(AGENT, quote(500_000), history(seller_status=None), authorized=True).decision == ALLOW
+    assert evaluate(AGENT, quote(15 * USDC), history(seller_status=None), authorized=True).rule == "cap"

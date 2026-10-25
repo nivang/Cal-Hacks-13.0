@@ -21,7 +21,7 @@ from x402.http import x402HTTPClient
 from x402.mechanisms.evm import ClientEvmSigner
 from x402.mechanisms.evm.exact import ExactEvmScheme
 
-from sentinel import attempts, chain, db, guard, intent, judge, ledger, mandates
+from sentinel import attempts, chain, db, guard, intent, judge, ledger, link_approvals, mandates
 
 log = logging.getLogger("sentinel.payments")
 
@@ -102,6 +102,14 @@ class PaymentFailed(Exception):
         self.attempt_id, self.tx_hash = attempt_id, tx_hash
 
 
+class ApprovalRequired(Exception):
+    """A quote passed spending checks, but needs a human decision before signing."""
+
+    def __init__(self, attempt_id: int):
+        self.attempt_id = attempt_id
+        super().__init__("This purchase needs the user's approval.")
+
+
 def select_requirement(payment_required: Any) -> Any:
     """Pick the Base Sepolia USDC option from the seller's accepts list, or raise PaymentRejected."""
     for requirement in payment_required.accepts:
@@ -113,7 +121,7 @@ def select_requirement(payment_required: Any) -> Any:
 
 def build_quote(url: str, requirement: Any) -> guard.Quote:
     """Normalize an x402 payment requirement into a Quote (amount as an integer in atomic units)."""
-    return guard.Quote(
+    quote = guard.Quote(
         url=url,
         pay_to=requirement.pay_to,
         amount=int(requirement.amount),
@@ -121,6 +129,9 @@ def build_quote(url: str, requirement: Any) -> guard.Quote:
         network=requirement.network,
         timeout_s=requirement.max_timeout_seconds,
     )
+    if quote.amount <= 0 or quote.timeout_s <= 0:
+        raise PaymentRejected("quote", "The seller returned an invalid amount or expiry.")
+    return quote
 
 
 def decide(
@@ -183,22 +194,132 @@ def record(
         raise PaymentRejected("duplicate", detail, blocked_id, live_id) from None
 
 
-def authorize(conn: db.Connection, agent: str, reason: str | None, quote: guard.Quote) -> int:
-    """Run the guard and record the attempt. Returns the approved attempt id, or raises PaymentRejected."""
-    return record(conn, agent, reason, quote, decide(conn, agent, quote))
+def authorize(
+    conn: db.Connection, agent: str, reason: str | None, quote: guard.Quote,
+    *, interactive: bool = False, approval_id: int | None = None,
+    review: Review | None = None, profile: chain.WalletProfile | None = None, task: Task | None = None,
+    seller: intent.Seller | None = None,
+) -> int:
+    """Admit one payment under the agent lock, or record a block / pending approval before raising.
+
+    A block leaves a row in the log so the ledger shows what did not happen, and the exception carries its id.
+    """
+    quote_dict = asdict(quote)
+    with db.transaction(conn):
+        # Serializes budget checks and one-time consumption across processes, including different URLs.
+        conn.execute("SELECT id FROM agents WHERE name = %s FOR UPDATE", (agent,)).fetchone()
+        link_approvals.expire(conn, agent)
+        original = link_approvals.get(conn, agent, approval_id) if approval_id else None
+        if approval_id and (original is None or original["status"] != "authorized"):
+            attempt_id = approval_id
+            decision = guard.Decision(guard.BLOCK, "approval", "That approval is unavailable, expired or already used.")
+        else:
+            history = guard.History(**attempts.load_history(conn, agent, quote_dict, guard.POLICY, approval_id),
+                                    payee_flagged=bool(profile and profile.flagged))
+            decision = guard.evaluate(
+                guard.Agent(**attempts.load_agent(conn, agent)), quote, history,
+                interactive=interactive, authorized=original is not None,
+            )
+            if original and (original["quote_json"] != quote_dict or original["reason"] != reason):
+                decision = guard.Decision(
+                    guard.BLOCK, "quote_changed", "The quote changed. A new approval is required.",
+                )
+            if original and task and (original.get("mandate_id") != task.mandate_id
+                                      or original.get("found_at") != task.found_at):
+                decision = guard.Decision(guard.BLOCK, "approval", "The approval belongs to another task.")
+            if decision.decision != guard.BLOCK and task is not None:
+                review = _recheck_task(conn, agent, quote, reason or "", task, review, profile, seller)
+            if quote.amount <= 0 or quote.timeout_s <= 0:
+                decision = guard.Decision(guard.BLOCK, "quote", "The seller returned an invalid amount or expiry.")
+            rule = f"{decision.rule}: {decision.detail}"
+            statuses = {guard.BLOCK: "blocked", guard.APPROVAL_REQUIRED: "pending", guard.ALLOW: "approved"}
+            status = statuses[decision.decision]
+            facts = review.columns() if review else ({"mandate_id": task.mandate_id, "found_at": task.found_at}
+                                                     if task else {})
+            if review and decision.decision != guard.BLOCK and review.verdict.decision != intent.ALLOW:
+                verdict = review.verdict
+                status = "escalated" if verdict.decision == intent.ESCALATE else "blocked"
+                decision = guard.Decision(guard.BLOCK, verdict.rule, verdict.detail)
+                rule = f"{verdict.rule}: {verdict.detail}"
+
+            if original:
+                attempt_id = int(original["id"])
+                conn.execute(
+                    "UPDATE payment_attempts SET status = %s, decision = %s, rule_fired = %s WHERE id = %s",
+                    (status, decision.decision, rule, attempt_id),
+                )
+                for column, value in facts.items():
+                    # Names come only from Review.columns / fixed task facts.
+                    if column not in attempts.INTENT_COLUMNS:
+                        raise ValueError("Unknown intent column")
+                    conn.execute(f"UPDATE payment_attempts SET {column} = %s WHERE id = %s", (value, attempt_id))
+            else:
+                attempt_id = attempts.record_attempt(conn, agent, quote.url, reason, quote_dict,
+                                                     status, decision.decision, rule, facts)
+            if status == "approved" and review and review.verdict.allowance_id is not None:
+                if not mandates.use_allowance(conn, review.verdict.allowance_id, attempt_id):
+                    decision = guard.Decision(guard.BLOCK, "allowance", "That Allow once was already used.")
+                    attempts.set_attempt_status(conn, attempt_id, "blocked")
+            if status == "pending":
+                conn.execute(
+                    "UPDATE payment_attempts SET approval_expires_at = clock_timestamp() + make_interval(secs => %s)"
+                    " WHERE id = %s",
+                    (min(quote.timeout_s, link_approvals.MAX_WAIT_S), attempt_id),
+                )
+    # Raise only after the transaction commits, so denials and pending requests stay in the audit log.
+    assert attempt_id is not None
+    if decision.decision == guard.APPROVAL_REQUIRED:
+        raise ApprovalRequired(attempt_id)
+    if decision.decision == guard.BLOCK:
+        held = review and review.verdict.decision == intent.ESCALATE and decision.rule == review.verdict.rule
+        error = PaymentHeld if held else PaymentRejected
+        raise error(decision.rule, decision.detail, attempt_id, decision.related_id)
+    return attempt_id
+
+
+def _recheck_task(
+    conn: db.Connection, agent: str, quote: guard.Quote, reason: str, task: Task,
+    review: Review | None, profile: chain.WalletProfile | None, seller: intent.Seller | None,
+) -> Review:
+    """Refresh deterministic intent facts under the admission lock, without model or network calls."""
+    aid = db.agent_id(conn, agent)
+    row = mandates.get(conn, task.mandate_id, aid)
+    description = review.seller_description if review else None
+    if row is None:
+        return Review(intent.Verdict(intent.BLOCK, 0, "no_mandate", "There is no such task for this agent."),
+                      task.mandate_id, task.found_at, description)
+    payment = intent.Payment(quote, reason, task.found_at, seller or intent.Seller(description=description))
+    session = mandates.session_facts(conn, task.mandate_id, aid, quote, guard.POLICY)
+    if profile is not None and profile.unused:
+        session = replace(session, payee_unused=True)
+    verdict = intent.tier0(mandates.to_mandate(row), payment, session,
+                           guard.Agent(**attempts.load_agent(conn, agent)), guard.POLICY)
+    if verdict is None:
+        # A tier 0 Allow once cannot outlive its allowance between review and admission.
+        verdict = (review.verdict if review and (review.verdict.tier > 0 or review.verdict.decision != intent.ALLOW)
+                   else intent.unavailable(1))
+    return Review(verdict, task.mandate_id, task.found_at, description)
 
 
 async def authorize_task(
     conn: db.Connection, agent: str, reason: str | None, quote: guard.Quote, task: Task | None,
-    seller: intent.Seller | None = None,
+    seller: intent.Seller | None = None, *, interactive: bool = False, approval_id: int | None = None,
 ) -> int:
-    """The guard first; when it allows and there is a task, the intent review; then record. Returns the attempt id."""
+    """Recheck both guard and intent, then admit under the same lock as approval consumption."""
     profile = await payee_profile(conn, quote) if task is not None else None
-    decision = decide(conn, agent, quote, profile)
+    original = link_approvals.get(conn, agent, approval_id) if approval_id else None
+    history = guard.History(**attempts.load_history(conn, agent, asdict(quote), guard.POLICY, approval_id),
+                            payee_flagged=bool(profile and profile.flagged))
+    decision = guard.evaluate(guard.Agent(**attempts.load_agent(conn, agent)), quote, history,
+                              interactive=interactive,
+                              authorized=bool(original and original["status"] == "authorized"))
     review = None
-    if decision.decision == guard.ALLOW and task is not None:
+    if decision.decision != guard.BLOCK and task is not None:
         review = await review_intent(conn, agent, quote, reason or "", task, seller or intent.Seller(), profile)
-    return record(conn, agent, reason, quote, decision, review)
+    # Never await a model or network while holding a row lock: another synchronous DB call
+    # on this event loop could otherwise prevent the lock holder from resuming.
+    return authorize(conn, agent, reason, quote, interactive=interactive, approval_id=approval_id,
+                     review=review, profile=profile, task=task, seller=seller)
 
 
 async def review_intent(
@@ -343,6 +464,7 @@ def _log_preview(
 
 async def pay_for(
     url: str, signer: ClientEvmSigner, *, agent: str, reason: str | None = None, task: Task | None = None,
+    interactive: bool = False, approval_id: int | None = None, connect: Any = db.connection,
 ) -> PayResult:
     """Fetch url, paying the seller if it returns 402 and the guard (and, under a task, intent binding) allows it.
 
@@ -352,12 +474,13 @@ async def pay_for(
     the payment, PaymentHeld when it is held for the owner, and PaymentFailed when an approved payment does not
     complete.
     """
-    with db.connection() as conn:
-        return await _pay_with(conn, url, signer, agent, reason, task)
+    with connect() as conn:
+        return await _pay_with(conn, url, signer, agent, reason, task, interactive=interactive, approval_id=approval_id)
 
 
 async def _pay_with(
     conn: db.Connection, url: str, signer: ClientEvmSigner, agent: str, reason: str | None, task: Task | None = None,
+    *, interactive: bool = False, approval_id: int | None = None,
 ) -> PayResult:
     """The payment flow itself, on a borrowed connection. Split out so pay_for can manage the pool."""
     client = x402Client()
@@ -367,6 +490,8 @@ async def _pay_with(
     async with httpx.AsyncClient() as session:
         first = await session.get(url)
         if first.status_code != 402:
+            if approval_id:
+                link_approvals.invalidate(conn, agent, approval_id, "The quoted resource is no longer paywalled.")
             return PayResult(first.status_code, first.text)  # free resource
 
         payment_required = http.get_payment_required_response(
@@ -374,13 +499,18 @@ async def _pay_with(
         )
         try:
             requirement = select_requirement(payment_required)
+            quote = build_quote(url, requirement)
         except PaymentRejected as e:
+            if approval_id:
+                link_approvals.invalidate(conn, agent, approval_id, "The seller no longer offers the approved payment.")
+                e.attempt_id = approval_id
+                raise
             e.attempt_id = attempts.record_attempt(
                 conn, agent, url, reason, status="blocked", decision=guard.BLOCK, rule_fired=str(e)
             )
             raise
-        quote = build_quote(url, requirement)
-        attempt_id = await authorize_task(conn, agent, reason, quote, task, seller_from(payment_required))
+        attempt_id = await authorize_task(conn, agent, reason, quote, task, seller_from(payment_required),
+                                          interactive=interactive, approval_id=approval_id)
 
         try:
             # Sign only the requirement we vetted, not whatever else the seller listed.
