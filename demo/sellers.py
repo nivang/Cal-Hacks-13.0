@@ -9,6 +9,11 @@ pricey premium guide, an unlisted seller, two free pages with hidden instruction
 attacking the buyer (TRAPS): a bait and switch price, a payee that imitates DataCo's address, seller text that
 instructs the agent, a 24 hour payment window, a paywall selling something other than its listing, and a seller
 paid at a wallet that has never been used (PocketWiFi; approve it on the Rules page to see its payment held).
+DataCo and InsightLab offer escrow (x402 auth-capture, demo/escrow_seller.py) next to exact on every route but the
+24 hour window trap, so Sentinel holds the money until it has checked the delivery. Two escrow routes deliver badly on
+purpose: /travel/restaurants sends an HTML error page (voided) and /travel/train-times sends weather data where it
+promised train times (held for the owner). Each route declares its output fields (x402 Bazaar extension), which is
+what the delivery check holds a seller to.
 /admin/price and /admin/payee change a route live (unauthenticated, only so the demo can show a price surge or a
 swapped payee); never expose this server publicly.
 Run with: uvicorn demo.sellers:app --port 4000
@@ -16,13 +21,15 @@ Run with: uvicorn demo.sellers:app --port 4000
 import hashlib
 import logging
 import os
+from collections.abc import Callable
 from decimal import Decimal
 from typing import Any
 
 from cdp.x402 import create_facilitator_config
 from dotenv import load_dotenv
 from fastapi import FastAPI, Request
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, JSONResponse, Response
+from x402.extensions.bazaar import OutputConfig, declare_discovery_extension
 from x402.http import HTTPFacilitatorClient, PaymentOption
 from x402.http.middleware.fastapi import PaymentMiddlewareASGI
 from x402.http.types import RouteConfig
@@ -30,6 +37,7 @@ from x402.mechanisms.evm.exact import ExactEvmServerScheme
 from x402.schemas import SettleFailureContext, VerifyFailureContext
 from x402.server import x402ResourceServer
 
+from demo.escrow_seller import PAID_PREFIX, EscrowMiddleware, paid_only
 from sentinel import ENV_FILE
 from sentinel.payments import USDC_BASE_SEPOLIA
 from sentinel.web.books import DEMO_FRESH_WALLET
@@ -115,6 +123,18 @@ CATALOG: dict[str, tuple[str, str, str, str, list[str], dict[str, Any]]] = {
                             {"device": "Pocket WiFi", "days": 5, "pickup": "Haneda"}),
     "/travel/sim-card": (B, "$0.15", "InsightLab Wallet", "Crypto wallet top up voucher.",
                          ["travel", "sim", "japan", "tokyo"], {"voucher": "XYZ"}),
+    "/travel/restaurants": (A, "$0.15", "DataCo Dining", "Restaurant picks by Tokyo neighborhood, with prices and "
+                            "opening hours.", ["travel", "restaurants", "food", "tokyo"],
+                            {"city": "Tokyo", "picks": [{"name": "Fuunji", "area": "Shinjuku", "usd": 12}]}),
+    "/travel/train-times": (B, "$0.10", "InsightLab Rail Times", "Train timetables between Tokyo stations: "
+                            "departures and journey times.", ["travel", "trains", "timetable", "tokyo"],
+                            {"route": "Shinjuku to Asakusa", "departures": ["08:02", "08:14", "08:26"]}),
+}
+# What an escrow route really sends when it delivers badly. The catalog body above is what it promises.
+BAD_DELIVERY: dict[str, Callable[[], Response]] = {
+    "/travel/restaurants": lambda: HTMLResponse("<html><body><h1>503 Service Unavailable</h1></body></html>"),
+    "/travel/train-times": lambda: JSONResponse({"route": "Tokyo weather this week",
+                                                 "departures": "Sunny, high 24C, 10 percent chance of rain"}),
 }
 # What the catalog advertises when it differs from what the paywall really asks: the bait and switch traps.
 LISTED: dict[str, dict[str, str]] = {
@@ -151,22 +171,40 @@ server.on_settle_failure(log_settle_failure)
 routes = {
     f"GET {path}": RouteConfig(
         accepts=[OPTS[path]], mime_type="application/json", service_name=name, description=description, tags=tags,
+        extensions=declare_discovery_extension(output=OutputConfig(example=body, schema={"required": list(body)})),
     )
-    for path, (_wallet, _price, name, description, tags, _body) in CATALOG.items()
+    for path, (_wallet, _price, name, description, tags, body) in CATALOG.items()
 }
+# Escrow next to exact for the two approved sellers, except the 24 hour window trap (that one is about exact).
+ESCROW = [path for path, (seller, *_rest) in CATALOG.items() if seller in (A, B) and path not in WINDOWS]
+
+
+def terms(path: str) -> Callable[[], tuple[str, int]]:
+    """Today's payee and price for path, read at request time so /admin/price and /admin/payee apply to escrow too."""
+    return lambda: (str(OPTS[path].pay_to), int(atomic(str(OPTS[path].price))))
+
 
 app = FastAPI()
 app.add_middleware(PaymentMiddlewareASGI, routes=routes, server=server)
+app.add_middleware(EscrowMiddleware, terms={path: terms(path) for path in ESCROW})
 
 
 def paid_route(path: str) -> None:
-    """Serve what a paid call to path returns (the middleware has already taken the payment)."""
+    """Serve what a paid call to path returns (a middleware has already taken the payment)."""
     body = CATALOG[path][5]
+    bad = BAD_DELIVERY.get(path)
 
-    async def handler() -> dict[str, Any]:
-        return body
+    async def handler() -> Any:
+        return bad() if bad is not None else body
+
+    async def escrow_handler(request: Request) -> Any:
+        if not paid_only(request.scope):
+            return JSONResponse({"detail": "Not Found"}, status_code=404)
+        return await handler()
 
     app.add_api_route(path, handler, methods=["GET"], name=path)
+    if path in ESCROW:
+        app.add_api_route(PAID_PREFIX + path, escrow_handler, methods=["GET"], name=PAID_PREFIX + path)
 
 
 for _path in CATALOG:

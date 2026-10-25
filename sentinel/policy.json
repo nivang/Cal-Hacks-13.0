@@ -15,5 +15,9 @@
   "intent_cache_ttl_s": 3600,
   "intent_mandate_ttl_s": 86400,
   "intent_allowance_ttl_s": 86400,
-  "intent_tasks_per_day": 50
+  "intent_tasks_per_day": 50,
+  "escrow_min_hold_s": 600,
+  "escrow_max_hold_s": 3600,
+  "escrow_deadline_margin_s": 300,
+  "bad_delivery_count": 2
 }
