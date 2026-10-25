@@ -115,6 +115,18 @@ Honest limits of what is built: the injection rule matches phrases, so subtle at
 
 ## Development
 
+Account pages show their layout and connection instructions before fetching authenticated data. Each spending,
+wallet, task, history, and books section loads independently and has its own retry. Seller wallet checks load
+after the seller controls; each request rechecks the live session. The no-JavaScript link still loads the full page.
+Restart the Python server after backend edits;
+templates and static files alone do not reload Python code. Styling is served locally from `sentinel/web/static/site.css`,
+so page navigation does not need a CDN or a browser CSS compiler. After changing Tailwind classes, rebuild it:
+
+```bash
+npm install --no-save --package-lock=false tailwindcss@4.3.3 @tailwindcss/cli@4.3.3
+npx tailwindcss -i sentinel/web/tailwind.css -o sentinel/web/static/site.css --minify
+```
+
 Before merging discovery or Apify changes, follow the [manual testing checklist](docs/manual-testing.md) for MCP setup, marketplace searches, Actor details, tasks, payments, and account checks.
 
 ```bash

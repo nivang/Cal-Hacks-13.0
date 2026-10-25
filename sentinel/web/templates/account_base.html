@@ -8,7 +8,7 @@
         <img src="/favicon.ico" alt="" width="20" height="20"> Sentinel
       </a>
       <div class="flex min-w-0 items-center gap-3 text-sm">
-        <span class="min-w-0 max-w-[9rem] truncate text-stone-600 sm:max-w-xs" title="{{ email }}">{{ email }}</span>
+        <span class="min-w-0 max-w-[9rem] truncate text-stone-600 sm:max-w-xs"{% if loading %} data-account-section="identity" aria-busy="true"{% else %} title="{{ email }}"{% endif %}>{% if loading %}<span data-loading-message role="status">Loading account…</span><button data-loading-retry type="button" hidden class="underline">Try again</button>{% else %}{{ email }}{% endif %}</span>
         <form method="post" action="/signout" class="shrink-0">
           <input type="hidden" name="csrf" value="{{ csrf }}">
           <button type="submit" class="rounded-md border border-stone-300 px-3 py-1 font-medium hover:bg-stone-100 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-stone-900">Sign out</button>

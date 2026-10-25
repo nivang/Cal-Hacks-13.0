@@ -921,7 +921,8 @@ COOKIE = "sentinel_session"
 EVIL = "http://evil.example"
 HTTPS_BASE = "https://sentinel.example.com"
 SITE_CSP = (
-    f"default-src 'none'; script-src {web_app.TAILWIND}; style-src 'self' 'unsafe-inline'; img-src 'self' data:; "
+    "default-src 'none'; script-src 'self'; connect-src 'self'; "
+    "style-src 'self' 'unsafe-inline'; img-src 'self' data:; "
     "base-uri 'none'; object-src 'none'; form-action 'self'; frame-ancestors 'none'"
 )
 
