@@ -15,6 +15,7 @@ from sentinel.attempts import ATOMIC, LIVE_STATUSES
 from sentinel.db import Connection, usdc
 
 TASK_LIMIT = 50  # tasks shown on the account page
+PREVIEW_CHARS = 600  # how much of a held delivery the Tasks page shows
 HELD_LIMIT = 50
 
 
@@ -97,6 +98,11 @@ def session_facts(
         " AND preview IS NOT TRUE ORDER BY id DESC LIMIT %s",
         (mandate_id, policy["intent_drift_window"]),
     ).fetchall()
+    bad = conn.execute(
+        "SELECT count(*) AS n FROM payment_attempts WHERE agent_id = %s AND lower(pay_to) = lower(%s)"
+        " AND delivery_verdict = 'fail' AND created_at >= now() - make_interval(days => %s)",
+        (agent_id, quote.pay_to, policy["budget_window_days"]),
+    ).fetchone()
     history = conn.execute(
         f"SELECT url, (amount {ATOMIC})::bigint AS amount, status, reason FROM payment_attempts"
         " WHERE mandate_id = %s AND amount IS NOT NULL AND preview IS NOT TRUE ORDER BY id DESC LIMIT %s",
@@ -112,10 +118,11 @@ def session_facts(
         purchases=tuple(intent.Purchase(r["url"], int(r["amount"]), r["status"], r["reason"]) for r in history),
         listing=listing_for(conn, mandate_id, quote.url),
         comparison=comparison_for(conn, mandate_id, quote.url, policy["compare_ttl_s"]),
+        seller_bad_deliveries=int(bad["n"]) if bad else 0,
     )
 
 
-# Price comparisons (compare.py, migration 015)
+# Price comparisons (compare.py, migration 016)
 
 COMPARISON_LIMIT = 50  # shown on the Tasks page
 
@@ -294,13 +301,27 @@ def list_held(conn: Connection, agent_id: int, limit: int = HELD_LIMIT) -> list[
         " WHERE a.agent_id = %s AND a.status = 'escalated' AND m.status <> 'revoked' AND m.expires_at > now()"
         " AND NOT EXISTS (SELECT 1 FROM allowances al WHERE al.attempt_id = a.id)"
         " AND NOT EXISTS (SELECT 1 FROM payment_attempts b WHERE b.mandate_id = a.mandate_id AND b.id > a.id"
-        "  AND lower(b.pay_to) = lower(a.pay_to) AND b.url = a.url AND b.status IN ('settled', 'approved'))"
+        "  AND lower(b.pay_to) = lower(a.pay_to) AND b.url = a.url AND b.status IN ('settled', 'approved', 'escrowed'))"
         " ORDER BY a.id DESC LIMIT %s",
         (agent_id, limit),
     ).fetchall()
     for r in rows:
         r["rule"], _, r["detail"] = (r.pop("rule_fired") or "").partition(": ")
     return rows
+
+
+def list_escrow_held(conn: Connection, agent_id: int, limit: int = HELD_LIMIT) -> list[dict[str, Any]]:
+    """Payments of this agent held in escrow for the owner, soonest deadline first, each with the start of what the
+    seller delivered (preview) so the owner can judge it."""
+    return conn.execute(
+        f"SELECT a.id, a.created_at, a.url, a.pay_to, (a.amount {ATOMIC})::bigint AS amount, a.reason,"
+        " e.verdict_reason AS detail, e.capture_deadline, m.goal, left(r.body, %s) AS preview"
+        " FROM escrow_payments e JOIN payment_attempts a ON a.id = e.attempt_id"
+        " LEFT JOIN mandates m ON m.id = a.mandate_id LEFT JOIN attempt_results r ON r.attempt_id = a.id"
+        " WHERE a.agent_id = %s AND a.status = 'escrowed' AND e.state = 'authorized' AND e.held"
+        " ORDER BY e.capture_deadline LIMIT %s",
+        (PREVIEW_CHARS, agent_id, limit),
+    ).fetchall()
 
 
 def allow_once(conn: Connection, attempt_id: int, agent_id: int, user_id: str, policy: dict[str, int] = guard.POLICY,

@@ -18,5 +18,9 @@
   "intent_tasks_per_day": 50,
   "compare_quality_margin": 15,
   "compare_min_fit": 50,
-  "compare_ttl_s": 3600
+  "compare_ttl_s": 3600,
+  "escrow_min_hold_s": 600,
+  "escrow_max_hold_s": 3600,
+  "escrow_deadline_margin_s": 300,
+  "bad_delivery_count": 2
 }

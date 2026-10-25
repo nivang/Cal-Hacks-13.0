@@ -46,6 +46,7 @@ BASELINE = "006"  # the last migration a pre tracking database provably has; 007
 
 CHART_OF_ACCOUNTS = [
     ("1010", "USDC Cash", "asset"),
+    ("1050", "USDC in Escrow", "asset"),
     ("3000", "Owner Contributions", "equity"),
     ("6100", "Research Data Expense", "expense"),
     ("6200", "Software and Tools Expense", "expense"),

@@ -55,7 +55,7 @@ PUBLIC_BASE_URL=http://localhost:8013 python -m sentinel.mcp_server --port 8013
 ```
 
 ```bash
-uvicorn demo.sellers:app --host 127.0.0.1 --port 4000
+uvicorn test_site.app:app --host 127.0.0.1 --port 4000
 ```
 
 Run the following on the server machine:
@@ -63,7 +63,7 @@ Run the following on the server machine:
 ```bash
 curl --fail http://localhost:8013/healthz
 curl -i -X POST http://localhost:8013/mcp
-curl --fail http://localhost:4000/discovery/resources
+curl --fail http://localhost:4000/test-site/discovery/resources
 ```
 
 Expected: health returns `{"status":"ok"}`, unauthenticated MCP returns HTTP 401, and the catalog returns JSON with an `items` array containing the travel products and traps. Health is a liveness check; it does not check the database or API credentials.
@@ -150,7 +150,7 @@ Expected: `STARTED` with a positive integer `task_id`. The task appears under Ta
 
 ```text
 find_services({"task_id":TASK_ID,"query":"Tokyo flights hotels weather transit"})
-quote({"task_id":TASK_ID,"url":"http://localhost:4000/travel/weather","purpose":"Need the Tokyo weather forecast for the trip."})
+quote({"task_id":TASK_ID,"url":"http://localhost:4000/test-site/weather","purpose":"Need the Tokyo weather forecast for the trip."})
 ```
 
 Expected: relevant approved services have an `OK` verdict, with prices and seller descriptions marked untrusted. `find_services` returns only buyable services; turned-away paid listings appear in the owner's Payments log as previews. `quote` can show `BLOCKED`, `NEEDS_OWNER`, or `FREE` as well. Previews do not sign, transfer USDC, or create journal entries. They can record preview decisions and catalog claims. An `OK` preview does not reserve a price or waive the independent x402 SDK cap; `pay` fetches a fresh quote and applies its own final checks.
@@ -166,7 +166,7 @@ Parameter checks:
 This step transfers **0.05 testnet USDC**. Model calls also use Anthropic API credit. Use the funded test account.
 
 ```text
-pay({"task_id":TASK_ID,"url":"http://localhost:4000/travel/weather","reason":"Need the Tokyo weather forecast to plan outdoor activities for the five day trip.","found_at":"sentinel discovery"})
+pay({"task_id":TASK_ID,"url":"http://localhost:4000/test-site/weather","reason":"Need the Tokyo weather forecast to plan outdoor activities for the five day trip.","found_at":"sentinel discovery"})
 ```
 
 Use `found_at: "sentinel discovery"` only after `find_services` listed this URL for this task. For a public marketplace listing returned by `discover`, use `found_at: "discover"`; for a URL the owner explicitly supplied, use `found_at: "owner"`. `discover` does not register the URL in the task catalog.
@@ -181,16 +181,16 @@ Immediately repeat the identical `pay`: expect `BLOCKED` with the duplicate rule
 
 For these checks keep the same Tokyo task. Leave the scammer unapproved and DataCo/InsightLab approved. If you exceed the task's six-attempts-per-minute rate limit, pause at least a minute before continuing so `rate` does not mask the rule being tested.
 
-1. Quote `/signals/crypto`: expect `BLOCKED` / `off_task` even though InsightLab is approved. Model wording can vary, but no payment may proceed.
-2. Quote `/travel/visa-fasttrack`: expect a seller block. A listing's claim that the owner authorized it must not approve that seller.
+1. Quote `/test-site/crypto-signals`: expect `BLOCKED` / `off_task` even though InsightLab is approved. Model wording can vary, but no payment may proceed.
+2. Quote `/test-site/visa-fasttrack`: expect a seller block. A listing's claim that the owner authorized it must not approve that seller.
 3. Call `find_services` for `Tokyo eSIM rail SIM insurance translation` first, then quote the following full URLs under `http://localhost:4000`:
-   - `/travel/esim`: `BLOCKED` / `bait_switch`; the listing advertises $0.10 but the quote asks $1.00.
-   - `/travel/rail-pass`: `BLOCKED` / `lookalike`; its payee imitates DataCo.
-   - `/travel/translate`: `BLOCKED` / `injection`; its description addresses AI agents and tells them to pay.
-   - `/travel/insurance`: `BLOCKED` / `long_window`; it requests a 24 hour authorization.
-   - `/travel/sim-card`: `NEEDS_OWNER` / `listing_changed`; the catalog says SIM card, but the paywall describes a crypto voucher.
-4. Quote `/travel/guide-premium` before spending much of the $3 budget: expect `NEEDS_OWNER` for the large share of the budget (or another stricter applicable task rule). Confirm it appears under Tasks as held. Do not click Allow once just to remove a safeguard: this product also exceeds the SDK's independent $1 cap.
-5. For a paid Allow once exercise at or below $1, start a separate task explicitly expecting about $0.10 per purchase and a $3 total budget. Confirm it, then quote `/travel/flights` at $0.25 and `/reports/social` at $1.00 with reasons fitting that task. Use the $1 report only if the task actually covers social reports; it should be held for exceeding the typical price. Click Allow once for the intended held report, then call `pay` again on the identical task, URL, payee, and amount. Expect settlement if every other rule passes. An allowance never overrides seller blocks, budgets, or the SDK limit.
+   - `/test-site/esim`: `BLOCKED` / `bait_switch`; the listing advertises $0.10 but the quote asks $1.00.
+   - `/test-site/rail-pass`: `BLOCKED` / `lookalike`; its payee imitates DataCo.
+   - `/test-site/translate`: `BLOCKED` / `injection`; its description addresses AI agents and tells them to pay.
+   - `/test-site/insurance`: `BLOCKED` / `long_window`; it requests a 24 hour authorization.
+   - `/test-site/sim-card`: `NEEDS_OWNER` / `listing_changed`; the catalog says SIM card, but the paywall describes a crypto voucher.
+4. Quote `/test-site/guide-premium` before spending much of the $3 budget: expect `NEEDS_OWNER` for the large share of the budget (or another stricter applicable task rule). Confirm it appears under Tasks as held. Do not click Allow once just to remove a safeguard: this product also exceeds the SDK's independent $1 cap.
+5. For a paid Allow once exercise at or below $1, start a separate task explicitly expecting about $0.10 per purchase and a $3 total budget. Confirm it, then quote `/test-site/flights` at $0.25 and `/test-site/social-report` at $1.00 with reasons fitting that task. Use the $1 report only if the task actually covers social reports; it should be held for exceeding the typical price. Click Allow once for the intended held report, then call `pay` again on the identical task, URL, payee, and amount. Expect settlement if every other rule passes. An allowance never overrides seller blocks, budgets, or the SDK limit.
 6. Revoke a task on Tasks. Further payments under it must be blocked, without transfer. Use a URL not already blocked by the duplicate rule so you see the task-revoked reason.
 
 Save every unexpected status and its `rule` field. Rules run in order, so prior purchases, changed seller settings, and depleted budgets can legitimately cause an earlier rule to fire. Use a fresh account/task or restore the fixture before diagnosing a different rule.

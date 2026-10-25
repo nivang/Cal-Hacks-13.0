@@ -74,7 +74,7 @@ browser CSRF and ownership, quote changes, expiry, replay and independent
 Postgres transactions competing for one authorization or the last budget funds.
 
 The command-line `demo.run` remains noninteractive and blocks unlisted sellers.
-To try the real chat gate locally, request the unlisted `/premium` fixture and
+To try the real chat gate locally, request the unlisted `/test-site/premium` fixture and
 choose No in the native form. Its quote is 9 test USDC; a lower cap blocks it
 before any prompt, as intended. Use a funded wallet and an appropriate explicit
 limit before testing Yes with a vendor you intend to pay.

@@ -244,6 +244,13 @@ def test_a_payee_wallet_with_no_activity_is_held_but_an_allowance_lets_it_throug
     assert run(session=replace(SESSION, payee_unused=True, allowance_id=3)).rule == "allowance"
 
 
+def test_a_seller_whose_deliveries_keep_failing_is_held():
+    assert run(session=replace(SESSION, seller_bad_deliveries=1)) is None
+    v = run(session=replace(SESSION, seller_bad_deliveries=2))
+    assert (v.decision, v.rule) == (intent.ESCALATE, "bad_deliveries") and "2 deliveries" in v.detail
+    assert run(session=replace(SESSION, seller_bad_deliveries=2, allowance_id=3)).rule == "allowance"
+
+
 # pricier_pick: a price comparison under this task found something cheaper
 
 PICK = intent.Comparison(

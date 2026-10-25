@@ -27,7 +27,7 @@ dependencies = [
 dev = ["pytest==9.1.1", "ruff==0.17.2", "mypy==2.4.0"]
 
 [tool.setuptools]
-packages = ["sentinel", "sentinel.web", "demo"]
+packages = ["sentinel", "sentinel.web", "demo", "test_site"]
 
 [tool.setuptools.package-data]
 sentinel = ["policy.json", "templates/*.html", "migrations/*.sql"]

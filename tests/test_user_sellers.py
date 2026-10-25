@@ -228,19 +228,7 @@ def test_list_payments_is_scoped_newest_first_and_recent_payments_is_the_head(co
     assert [r["id"] for r in books.recent_payments(conn, a_id)] == ids[::-1][:5]
 
 
-def test_demo_sellers_only_in_dev_mode_never_the_scammer_and_hidden_once_approved(conn):
-    a_id, _, _ = make_user(conn, "a@example.com")
-    env = {"SELLER_A_ADDRESS": NEW_SELLER, "SELLER_B_ADDRESS": "0x" + "4" * 40, "SELLER_C_ADDRESS": SCAMMER_ADDRESS}
-    assert books.demo_sellers(conn, a_id, False, env) == []
-    shown = books.demo_sellers(conn, a_id, True, env)
-    assert [d["name"] for d in shown] == ["DataCo", "InsightLab", "PocketWiFi (new wallet)"]
-    assert shown[2]["pay_to"] == books.DEMO_FRESH_WALLET
-    assert SCAMMER_ADDRESS not in [d["pay_to"] for d in shown]
-    books.upsert_seller(conn, a_id, "DataCo", NEW_SELLER)
-    assert [d["name"] for d in books.demo_sellers(conn, a_id, True, env)] == ["InsightLab", "PocketWiFi (new wallet)"]
-    assert [d["name"] for d in books.demo_sellers(conn, a_id, True, {"SELLER_A_ADDRESS": "nonsense"})] == [
-        "PocketWiFi (new wallet)",
-    ]
+
 
 
 def test_has_live_grant_needs_an_exchanged_unrevoked_unexpired_grant(conn, settings):

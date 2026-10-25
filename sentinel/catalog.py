@@ -1,13 +1,13 @@
 """Finding paid services for a task: a catalog in the x402 Bazaar discovery format, searched by keyword.
 
 The agent asks Sentinel what it could buy (MCP tool find_services); Sentinel reads the catalog at
-SENTINEL_DISCOVERY_URL (the local demo marketplace by default, demo/sellers.py), ranks the listings against the
+SENTINEL_DISCOVERY_URL (no default: find_services reports no catalog until one is set), ranks the listings against the
 agent's query, and mcp_server.py previews each one against the task (payments.preview) so the agent sees which it
 may buy before it buys anything. The catalog is seller written: names and descriptions are untrusted data. What a
 listing advertises (price, wallet, description) is stored per task (mandates.remember_listings) so the intent rules
 can catch a seller whose real 402 asks more, pays someone else, or sells something different.
 
-Bazaar shape, as served by GET /discovery/resources:
+Bazaar shape, as an x402 discovery endpoint serves it:
     {"x402Version": 2, "items": [{"resource": url, "type": "http", "accepts": [requirement, ...],
                                   "metadata": {"service_name": ..., "description": ..., "tags": [...]}}]}
 """
@@ -28,7 +28,6 @@ from sentinel.payments import NETWORK, USDC_BASE_SEPOLIA
 log = logging.getLogger("sentinel.discovery")
 Connect = Callable[[], AbstractContextManager[db.Connection]]
 
-DEFAULT_URL = "http://localhost:4000/discovery/resources"
 ENV_VAR = "SENTINEL_DISCOVERY_URL"
 MAX_RESULTS = 12
 PREVIEWS_AT_ONCE = 4  # listings checked at the same time (each holds a pooled connection)
@@ -55,8 +54,8 @@ class Listing:
 
 
 def catalog_url() -> str:
-    """Where the catalog lives: SENTINEL_DISCOVERY_URL, else the local demo marketplace."""
-    return (os.environ.get(ENV_VAR) or "").strip() or DEFAULT_URL
+    """Where the catalog lives: SENTINEL_DISCOVERY_URL, or "" when none is set up."""
+    return (os.environ.get(ENV_VAR) or "").strip()
 
 
 def parse(document: Any) -> list[Listing]:
@@ -186,6 +185,8 @@ async def find(
     Returns every preview (results.services_found keeps only the buyable ones for the agent), or a FAILED result when
     the catalog cannot be read.
     """
+    if not catalog_url():
+        return results.ServicesResult(status="FAILED", message="No service catalog is set up on this Sentinel.")
     try:
         source = await asyncio.to_thread(urls.validate_url, catalog_url())
     except ValueError:

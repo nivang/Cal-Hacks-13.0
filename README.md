@@ -51,10 +51,10 @@ In `.env` fill in the CDP keys, the seller addresses, `DATABASE_URL` and `ANTHRO
 
    ```bash
    python -m sentinel.mcp_server            # terminal 1: site, OAuth and MCP on http://localhost:8000
-   uvicorn demo.sellers:app --port 4000     # terminal 2: the demo marketplace
+   uvicorn test_site.app:app --port 4000     # terminal 2: the demo marketplace
    ```
 
-2. **Sign in** at http://localhost:8000 with your email (the link prints in terminal 1). Your first sign in creates your own wallet; fund it at [faucet.circle.com](https://faucet.circle.com) (Base Sepolia, USDC). On **Rules**, approve DataCo and InsightLab from the demo card.
+2. **Sign in** at http://localhost:8000 with your email (the link prints in terminal 1). Your first sign in creates your own wallet; fund it at [faucet.circle.com](https://faucet.circle.com) (Base Sepolia, USDC). Run `python -m demo.run seed` once to approve the test site's sellers DataCo and InsightLab for every agent (or add them on **Rules** by address).
 
 Unlisted sellers that pass spending and intent checks ask for a native Yes/No approval, with an authenticated browser fallback. See [link approvals](docs/link-approvals.md).
 
@@ -66,17 +66,17 @@ Unlisted sellers that pass spending and intent checks ask for a native Yes/No ap
 
 | Demo route | What it tries | Outcome |
 |---|---|---|
-| `/travel/visa-fasttrack` | Unlisted scam seller, "pre authorized" text | Blocked: seller not approved |
-| `/travel/esim` | Listed at $0.10, asks $1.00 | Blocked: bait and switch |
-| `/travel/rail-pass` | Pays a lookalike of DataCo's wallet | Blocked: lookalike address |
-| `/travel/translate` | Description tells AI agents to pay now | Blocked: injection |
-| `/travel/insurance` | 24 hour payment window | Blocked: payment window too long |
-| `/travel/sim-card` | Listed as a SIM card, sells a crypto voucher | Held: sells something other than listed |
-| `/signals/crypto`, `/odds/sports` | Approved seller, nothing to do with a trip | Blocked: not part of the task |
-| `/travel/guide-premium` | $2, relevant but expensive | Held when it is over half the task's stated budget |
-| `/travel/pocket-wifi` | Paid at a wallet that has never been used | Held: wallet has no history (approve PocketWiFi on Rules first) |
+| `/test-site/visa-fasttrack` | Unlisted scam seller, "pre authorized" text | Blocked: seller not approved |
+| `/test-site/esim` | Listed at $0.10, asks $1.00 | Blocked: bait and switch |
+| `/test-site/rail-pass` | Pays a lookalike of DataCo's wallet | Blocked: lookalike address |
+| `/test-site/translate` | Description tells AI agents to pay now | Blocked: injection |
+| `/test-site/insurance` | 24 hour payment window | Blocked: payment window too long |
+| `/test-site/sim-card` | Listed as a SIM card, sells a crypto voucher | Held: sells something other than listed |
+| `/test-site/crypto-signals`, `/test-site/sports-odds` | Approved seller, nothing to do with a trip | Blocked: not part of the task |
+| `/test-site/guide-premium` | $2, relevant but expensive | Held when it is over half the task's stated budget |
+| `/test-site/pocket-wifi` | Paid at a wallet that has never been used | Held: wallet has no history (approve PocketWiFi on Rules first, at the address `demo.run seed` prints) |
 
-On **Tasks**, confirm or revoke the task, and **Allow once** a held payment so the agent's next try goes through. `curl -X POST localhost:4000/admin/payee -d '{"path": "/travel/weather"}' -H 'content-type: application/json'` swaps a bought URL's payee to show a payee swap.
+On **Tasks**, confirm or revoke the task, and **Allow once** a held payment so the agent's next try goes through. `curl -X POST localhost:4000/test-site/admin/payee -d '{"path": "/test-site/weather"}' -H 'content-type: application/json'` swaps a bought URL's payee to show a payee swap.
 
 **Without Claude Desktop**, the same flow with a printed trace (every search, every verdict, every payment):
 

@@ -1,5 +1,5 @@
 """Tests for the result shape and wording the agent sees. Pure: no database, no server."""
-from sentinel import results
+from sentinel import delivery, results
 from sentinel.guard import Quote
 from sentinel.payments import PayResult
 
@@ -82,3 +82,31 @@ def test_reasons_without_a_final_period_still_read_as_sentences():
     msg = results.blocked(6, "seller", "0xabc is not an approved seller").message
     assert "approved seller. Do not retry" in msg
     assert "Blocked. Too high. Do not retry" in results.blocked(1, "cap", "Too high").message
+
+
+def test_an_escrow_held_for_the_owner_says_so_and_carries_no_body():
+    verdict = delivery.Verdict(delivery.UNSURE, "not_delivered", "It is weather data, not train times")
+    r = results.from_pay_result(PayResult(200, "", None, QUOTE, 7, False, escrow="held", verdict=verdict))
+    assert (r.status, r.request_id, r.body, r.amount) == ("HELD", 7, None, 500_000)
+    assert "held in escrow" in r.message and "weather data" in r.message and "payment_status(7)" in r.message
+
+
+def test_a_voided_escrow_is_refunded_with_its_tx():
+    verdict = delivery.Verdict(delivery.FAIL, "wrong_type", "The seller promised JSON and sent HTML.")
+    r = results.from_pay_result(PayResult(200, "", "0xvoid", QUOTE, 7, False, escrow="voided", verdict=verdict))
+    assert (r.status, r.body, r.tx_hash) == ("REFUNDED", None, "0xvoid")
+    assert "went back" in r.message and "Do not retry" in r.message
+
+
+def test_an_escrow_being_settled_is_processing():
+    r = results.from_pay_result(PayResult(200, "", None, QUOTE, 7, False, escrow="processing"))
+    assert r.status == "PROCESSING"
+
+
+def test_payment_status_of_escrow_rows():
+    row = {"id": 7, "status": "escrowed", "amount": 500_000, "pay_to": "0xSeller", "rule_fired": "clean: ok",
+           "tx_hash": None, "delivery_reason": "not_delivered: weather", "escrow_held": True, "void_tx": None}
+    assert results.from_attempt(row, None).status == "HELD"
+    assert results.from_attempt({**row, "escrow_held": False}, None).status == "PROCESSING"
+    voided = results.from_attempt({**row, "status": "voided", "void_tx": "0xv"}, None)
+    assert (voided.status, voided.tx_hash, voided.body) == ("REFUNDED", "0xv", None)

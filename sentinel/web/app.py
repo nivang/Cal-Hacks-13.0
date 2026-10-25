@@ -18,8 +18,8 @@ mail). Logs name user ids and client ids only: never links, tokens, cookies, CSR
 import asyncio
 import hmac
 import logging
-from collections.abc import Callable, Mapping
-from contextlib import AbstractAsyncContextManager, AbstractContextManager
+from collections.abc import AsyncIterator, Callable, Mapping
+from contextlib import AbstractAsyncContextManager, AbstractContextManager, asynccontextmanager
 from datetime import date
 from pathlib import Path
 from typing import Any, TypeVar
@@ -59,8 +59,7 @@ SITE_PATHS = frozenset({
     "/", "/signin", "/auth/verify", "/account", "/account/wallet", "/account/signout-everywhere", "/signout",
     "/account/payments", "/account/payments.csv", "/account/rules", "/account/rules/limits",
     "/account/rules/sellers", "/account/rules/auto-buy", "/account/books", "/account/tasks", "/account/tasks/confirm",
-    "/account/tasks/revoke",
-    "/account/tasks/allow",
+    "/account/tasks/revoke", "/account/tasks/allow", "/account/tasks/capture", "/account/tasks/void",
     "/oauth/consent", "/healthz", "/favicon.ico", "/authorize",
 })
 DONE_TEXT = {  # the ?done= values the Rules page shows a banner for; anything else is ignored
@@ -72,7 +71,10 @@ TASK_DONE_TEXT = {  # the ?done= values the Tasks page shows a banner for
     "confirm": "Confirmed. Your agent can now spend this task's full budget.",
     "revoke": "Revoked. Nothing more can be bought for that task.",
     "allow": "Allowed once. Tell your agent to try that payment again.",
+    "capture": "Paid. The seller has the money and your agent can collect the data.",
+    "void": "Refunded. The money is back in your wallet and the seller was not paid.",
 }
+SWEEP_EVERY_S = 60  # how often the server finishes what is still held in escrow
 WARN_PERCENT = 80  # the weekly budget bar turns amber from here
 MCP_PATHS = frozenset({"/mcp", "/mcp/"})
 MCP_ALLOW_HEADERS = "authorization, content-type, mcp-protocol-version, mcp-session-id, last-event-id"
@@ -277,21 +279,50 @@ def create_app(
     pay_fn: Callable[..., Any] = payments.pay_for,
     open_signer: OpenSigner = wallets.open_user_wallet,
     judge_: judge.Judge | None = None,
+    open_operator: mcp_server.OpenOperator | None = None,
 ) -> FastAPI:
     """Build the site, the OAuth server and /mcp as one app.
 
     connect: how requests borrow a database connection. mailer: where sign in links go (make_mailer(settings) when
-    None). pay_fn, open_signer and judge_ go to mcp_server.create_server (tests replace them). The pool is not touched
-    here; mcp_server.main() closes it when uvicorn stops.
+    None). pay_fn, open_signer and judge_ go to mcp_server.create_server (tests replace them). open_operator opens
+    Sentinel's escrow operator (escrow.open_operator, which main passes); with it, payments use escrow when a seller
+    offers it, the owner can pay or refund a held payment, and a background sweep finishes holds every SWEEP_EVERY_S.
+    The pool is not touched here; mcp_server.main() closes it when uvicorn stops.
     """
     mail = mailer if mailer is not None else make_mailer(settings)
     provider = oauth.SentinelOAuthProvider(settings, connect)
     server = mcp_server.create_server(auth=provider, pay_fn=pay_fn, open_signer=open_signer, connect=connect,
                                       judge_=judge_, approval_base_url=settings.base_url,
-                                      approval_state_key=settings.key("purchase-approval-state"))
+                                      approval_state_key=settings.key("purchase-approval-state"),
+                                      open_operator=open_operator)
     # Native legacy forms need stateful sessions and SSE to return the human's answer.
     mcp_app = server.http_app(path=oauth.MCP_PATH, json_response=False, stateless_http=False)
-    app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None, lifespan=combine_lifespans(mcp_app.lifespan))
+
+    async def sweep_forever() -> None:
+        """Every SWEEP_EVERY_S, finish what is still in escrow (payments.sweep). A failed round waits for the next."""
+        assert open_operator is not None
+        while True:
+            await asyncio.sleep(SWEEP_EVERY_S)
+            try:
+                async with open_operator() as operator:
+                    with connect() as conn:
+                        settled = await payments.sweep(conn, operator)
+                if settled:
+                    log.info("escrow sweep settled %s held payments", settled)
+            except Exception:
+                log.warning("escrow sweep failed; trying again next round", exc_info=True)
+
+    @asynccontextmanager
+    async def sweeper(_app: Any) -> AsyncIterator[None]:
+        task = asyncio.create_task(sweep_forever()) if open_operator is not None else None
+        try:
+            yield
+        finally:
+            if task is not None:
+                task.cancel()
+
+    app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None,
+                  lifespan=combine_lifespans(mcp_app.lifespan, sweeper))
     attach_strip_query()
 
     session_cookie = auth.session_cookie_name(settings)
@@ -574,13 +605,13 @@ def create_app(
         request: Request, session: auth.Session, view: Mapping[str, Any], *, status: int = 200,
         error: str | None = None, typed: Mapping[str, str] | None = None, confirm: Mapping[str, Any] | None = None,
     ) -> Response:
-        """Render Rules: limits, the sellers that apply to this agent and, in dev mode, the demo sellers."""
+        """Render Rules: limits and the sellers that apply to this agent."""
         aid = view["agent_id"]
 
-        def data(conn: db.Connection) -> tuple[list[dict[str, Any]], list[dict[str, str]]]:
-            return books.list_sellers(conn, aid), books.demo_sellers(conn, aid, settings.dev_mode)
+        def data(conn: db.Connection) -> list[dict[str, Any]]:
+            return books.list_sellers(conn, aid)
 
-        sellers, demo = await run_db(data) if aid is not None else ([], [])
+        sellers = await run_db(data) if aid is not None else []
 
         async def wallet(seller: dict[str, Any]) -> None:
             with connect() as conn:  # cached for an hour, so the page is quick after the first look
@@ -593,7 +624,7 @@ def create_app(
         done = request.query_params.get("done")
         context = {
             **account_context(session, view, "rules"),
-            "sellers": sellers, "demo": demo, "error": error,
+            "sellers": sellers, "error": error,
             "done": done if done in DONE_TEXT and error is None else None,
             "done_text": DONE_TEXT.get(done or "", ""),
             "typed_cap": typed.get("cap", results.usdc_text(view["per_payment_cap"]) if aid is not None else ""),
@@ -625,9 +656,10 @@ def create_app(
             for c in mandates.list_comparisons(conn, aid):
                 comparisons.setdefault(c["mandate_id"], []).append(c)
             return {"tasks": mandates.list_for_agent(conn, aid), "held": mandates.list_held(conn, aid),
-                    "comparisons": comparisons}
+                    "escrow_held": mandates.list_escrow_held(conn, aid), "comparisons": comparisons}
 
-        found = await run_db(data) if aid is not None else {"tasks": [], "held": [], "comparisons": {}}
+        empty: dict[str, Any] = {"tasks": [], "held": [], "escrow_held": [], "comparisons": {}}
+        found = await run_db(data) if aid is not None else empty
         done = request.query_params.get("done")
         context = {
             **account_context(session, view, "tasks"), **found, "error": error,
@@ -894,6 +926,44 @@ def create_app(
             mandates.allow_once(conn, form_id(form, "request_id"), view["agent_id"], user_id)
 
         return await task_action(request, allow, "allow")
+
+    async def escrow_action(request: Request, capture: bool) -> Response:
+        """Pay the seller (capture) or refund (void) one payment of the user's own agent held in escrow."""
+        refusal, user, form = await account_post(request, "/account/tasks")
+        if refusal is not None or user is None:
+            return refusal or forbidden(request)
+        view = await run_db(users.account_view, user["id"])
+        session, _, _ = await current(request)
+        if session is None:
+            return forbidden(request)
+        if view["agent_id"] is None or open_operator is None:
+            return await tasks_page(request, session, view, status=400,
+                                    error="Escrow is not set up on this server, so nothing can be paid or refunded.")
+        try:
+            attempt_id = form_id(form, "request_id")
+            async with open_operator() as operator:
+                with connect() as conn:
+                    outcome = await payments.settle_held(conn, operator, attempt_id, view["agent_id"], capture)
+        except (ValueError, LookupError) as exc:
+            return await tasks_page(request, session, view, status=400, error=str(exc))
+        except Exception:
+            log.warning("escrow %s failed for user %s", "capture" if capture else "void", user["id"], exc_info=True)
+            outcome = "processing"
+        if outcome == "processing":
+            return await tasks_page(request, session, view, status=502,
+                                    error="Coinbase did not confirm that in time. Try again in a minute.")
+        log.info("user %s: escrow %s request %s", user["id"], outcome, attempt_id)
+        return _redirect(f"/account/tasks?done={'capture' if capture else 'void'}")
+
+    @app.post("/account/tasks/capture")
+    async def capture_held(request: Request) -> Response:
+        """The owner pays the seller for a delivery Sentinel held in escrow."""
+        return await escrow_action(request, True)
+
+    @app.post("/account/tasks/void")
+    async def void_held(request: Request) -> Response:
+        """The owner refunds a payment Sentinel held in escrow; the seller is not paid."""
+        return await escrow_action(request, False)
 
     @app.post("/account/wallet")
     async def retry_wallet(request: Request) -> Response:

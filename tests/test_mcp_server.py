@@ -634,7 +634,7 @@ def startup(monkeypatch) -> Startup:
     monkeypatch.setattr(db, "close_pool", close_pool)
     monkeypatch.setattr(mcp_server.uvicorn, "run", lambda app, **kw: seen.runs.append((app, kw)))
 
-    def create_app(settings: Settings) -> str:
+    def create_app(settings: Settings, **options: Any) -> str:
         seen.apps.append(settings)
         return "the app"
 

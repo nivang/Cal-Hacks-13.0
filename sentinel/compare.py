@@ -234,7 +234,9 @@ async def compare(
         budget_left = max(0, intent.effective_budget(mandate) - mandates.spend(conn, mandate.id))
         auto_buy = bool(attempts.load_agent(conn, agent)["auto_buy_best_value"])
 
-    async def read_catalog() -> list[catalog.Listing]:
+    async def read_catalog() -> list[catalog.Listing] | None:
+        if not catalog.catalog_url():
+            return None  # no catalog set up on this Sentinel: the directories alone
         source = await asyncio.to_thread(urls.validate_url, catalog.catalog_url())
         return await catalog.fetch(source)
 
@@ -247,6 +249,8 @@ async def compare(
     found: list[Candidate] = []
     if isinstance(own, BaseException):
         sources["catalog"] = "unavailable"
+    elif own is None:
+        sources["catalog"] = "not set up"
     else:
         sources["catalog"] = "ok"
         found += from_catalog(own, query)

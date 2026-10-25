@@ -11,7 +11,7 @@ from urllib.parse import urlsplit
 
 
 def allow_local() -> bool:
-    """True when SENTINEL_ALLOW_LOCAL_URLS=1, which the local demo needs (the test sellers run on localhost)."""
+    """True when SENTINEL_ALLOW_LOCAL_URLS=1, for sellers running on this machine (local testing only)."""
     return os.environ.get("SENTINEL_ALLOW_LOCAL_URLS") == "1"
 
 
