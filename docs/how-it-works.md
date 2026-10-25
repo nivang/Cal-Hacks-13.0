@@ -40,7 +40,7 @@ Sentinel holds the wallet so the agent never does. Every payment request passes 
 | `sentinel/templates/` | Ledger page HTML |
 | `demo/__init__.py` | `DEMO_ACCOUNT = "sentinel"`: the only home of the shared test wallet |
 | `demo/run.py` | Runs the guard moments (buy, surge, scam), the intent ones (intent, held) and the escrow ones (escrow, void, escrow-held) as research-agent from the demo wallet |
-| `test_site/app.py` | Local test marketplace (a fixture, not part of Sentinel): trip data, traps, escrow next to exact for DataCo and InsightLab, and `/test-site/discovery/resources` |
+| `test_site/app.py` | Malicious Marketplace, a local x402 marketplace for agents (a fixture, not part of Sentinel): 34 pay per call and free APIs from `services.json`, answered by `data.py` from `companies.json` for any `?company=`, 15 traps, escrow next to exact for CorpData and OpenWire, `/test-site/discovery/resources`, and the React marketplace page at `/test-site` (`test_site/storefront/`, Reveal traps) |
 | `test_site/escrow_seller.py` | The seller side of escrow: adds the auth-capture offer to the 402 and serves a request only once the escrow holds the full price |
 | `demo/escrow_spike.py` | One escrow round trip outside the payment flow (`capture` or `void`); creates and funds the operator on first run |
 | `demo/agent.py` | A Claude API research agent that spends through Sentinel, with a printed trace |

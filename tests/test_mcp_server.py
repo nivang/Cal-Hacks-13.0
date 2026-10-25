@@ -941,7 +941,8 @@ async def test_find_services_shows_the_agent_only_what_it_may_buy_and_logs_the_r
     task_id = (await start(make_server(), budget_usd="1"))["task_id"]  # the $0.60 guide is over half
     r = await call(make_server(), "find_services", task_id=task_id, query="Tokyo flights")
     assert r["status"] == "OK" and "do not look for them or mention them" in r["message"]
-    assert [(s["name"], s["verdict"], s["price_usdc"]) for s in r["services"]] == [("Flights", "OK", "0.25")]
+    assert [(s["name"], s["verdict"], s["price_usdc"]) for s in r["services"]] == [("Flights", "OK", "0.25"),
+                                                                                   ("Tips", "FREE", None)]
     logged = conn.execute(
         "SELECT url, status, rule_fired, preview, mandate_id FROM payment_attempts ORDER BY id"
     ).fetchall()
@@ -954,6 +955,14 @@ async def test_find_services_shows_the_agent_only_what_it_may_buy_and_logs_the_r
     assert conn.execute("SELECT count(*) AS n FROM journal_entries").fetchone()["n"] == 0
     await call(make_server(), "find_services", task_id=task_id, query="Tokyo flights")  # searching again
     assert count_attempts(conn) == 3
+
+
+@pytest.mark.anyio
+async def test_find_services_also_shows_free_sources_so_the_agent_can_try_them_first(make_server, alice, market):
+    task_id = (await start(make_server()))["task_id"]
+    r = await call(make_server(), "find_services", task_id=task_id, query="tips")
+    assert r["services"][0]["verdict"] == "FREE" and r["services"][0]["name"] == "Tips"  # the best match first
+    assert "1 are free" in r["message"]
 
 
 @pytest.mark.anyio
@@ -1080,6 +1089,24 @@ async def test_a_url_the_agent_claims_came_from_the_catalog_but_never_did_is_blo
     r = await call(make_server(), "pay", task_id=task_id, url="http://market.test/made-up", reason=REASON,
                    found_at="sentinel discovery")
     assert r["status"] == "BLOCKED" and r["rule"] == "unlisted_url"
+
+
+@pytest.mark.anyio
+async def test_a_listed_endpoint_called_with_parameters_keeps_its_listing(conn, make_server, alice, market):
+    task_id = (await start(make_server()))["task_id"]
+    await call(make_server(), "find_services", task_id=task_id, query="flights")
+    paid = await call(make_server(fake_pay_for(conn, amount=250_000)), "pay", task_id=task_id,
+                      url="http://market.test/flights?from=SFO&to=HND", reason=REASON, found_at="sentinel discovery")
+    assert paid["status"] == "SETTLED"  # not unlisted_url: the catalog listed the endpoint
+
+
+@pytest.mark.anyio
+async def test_parameters_do_not_hide_a_bait_and_switch(conn, make_server, alice, traps):
+    task_id = (await start(make_server()))["task_id"]
+    await call(make_server(), "find_services", task_id=task_id, query="travel")
+    r = await call(make_server(), "pay", task_id=task_id, url="http://market.test/esim?days=7", reason=REASON,
+                   found_at="sentinel discovery")
+    assert r["status"] == "BLOCKED" and r["rule"] == "bait_switch"
 
 
 @pytest.mark.anyio
