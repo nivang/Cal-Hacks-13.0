@@ -1,5 +1,5 @@
-"""The seller side of escrow for the demo marketplace: offer x402 auth-capture next to exact, and deliver only once
-the money is held. A fixture, like sellers.py; a real seller would run the same few steps.
+"""The seller side of escrow for the test site: offer x402 auth-capture next to exact, and deliver only once
+the money is held. A fixture, like app.py; a real seller would run the same few steps.
 
 EscrowMiddleware sits outside x402's PaymentMiddlewareASGI. For an escrow route it:
   - adds an auth-capture offer, first, to the 402 that x402 builds (header and body), naming Sentinel's operator as
@@ -25,7 +25,7 @@ from x402.http.utils import safe_base64_decode, safe_base64_encode
 
 from sentinel import escrow
 
-log = logging.getLogger("demo.escrow_seller")
+log = logging.getLogger("test_site.escrow_seller")
 OPERATOR_ENV = "SENTINEL_OPERATOR_ADDRESS"
 HOLD_S = 1800  # capture deadline: half an hour to check the delivery
 REFUND_S = 3600

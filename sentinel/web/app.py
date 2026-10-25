@@ -604,13 +604,13 @@ def create_app(
         request: Request, session: auth.Session, view: Mapping[str, Any], *, status: int = 200,
         error: str | None = None, typed: Mapping[str, str] | None = None, confirm: Mapping[str, Any] | None = None,
     ) -> Response:
-        """Render Rules: limits, the sellers that apply to this agent and, in dev mode, the demo sellers."""
+        """Render Rules: limits and the sellers that apply to this agent."""
         aid = view["agent_id"]
 
-        def data(conn: db.Connection) -> tuple[list[dict[str, Any]], list[dict[str, str]]]:
-            return books.list_sellers(conn, aid), books.demo_sellers(conn, aid, settings.dev_mode)
+        def data(conn: db.Connection) -> list[dict[str, Any]]:
+            return books.list_sellers(conn, aid)
 
-        sellers, demo = await run_db(data) if aid is not None else ([], [])
+        sellers = await run_db(data) if aid is not None else []
 
         async def wallet(seller: dict[str, Any]) -> None:
             with connect() as conn:  # cached for an hour, so the page is quick after the first look
@@ -623,7 +623,7 @@ def create_app(
         done = request.query_params.get("done")
         context = {
             **account_context(session, view, "rules"),
-            "sellers": sellers, "demo": demo, "error": error,
+            "sellers": sellers, "error": error,
             "done": done if done in DONE_TEXT and error is None else None,
             "done_text": DONE_TEXT.get(done or "", ""),
             "typed_cap": typed.get("cap", results.usdc_text(view["per_payment_cap"]) if aid is not None else ""),

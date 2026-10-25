@@ -8,7 +8,6 @@ keep what was typed, isolation between two users, operator rows that stay untouc
 CSV, balanced books, the dev only demo sellers, the getting started checklist and the whole journey over /mcp.
 """
 import csv
-import dataclasses
 import io
 import json
 import re
@@ -484,45 +483,6 @@ async def test_the_books_page_shows_balanced_scoped_books(browser, mailer, conn,
     assert "No entries yet" in (await empty.get("/account/books")).text
 
 
-# Demo sellers (dev mode only)
-
-
-@pytest.mark.anyio
-async def test_demo_sellers_show_in_dev_mode_without_the_scammer_and_approving_one_works(
-    browser, mailer, conn, monkeypatch,
-):
-    scam = "0x" + "5" * 40
-    monkeypatch.setenv("SELLER_A_ADDRESS", SELLER)
-    monkeypatch.setenv("SELLER_B_ADDRESS", OTHER_SELLER)
-    monkeypatch.setenv("SELLER_C_ADDRESS", scam)
-    client = await signed_in(browser, mailer)
-    user = user_of(conn, client)
-    page = (await client.get("/account/rules")).text
-    assert "Demo sellers" in page and "InsightLab" in page and SELLER in page and OTHER_SELLER in page
-    assert scam not in page
-    token = form_value(page, "csrf")
-    response = await client.post("/account/rules/sellers", data={
-        "csrf": token, "name": "InsightLab", "pay_to": OTHER_SELLER, "status": "approved"})
-    assert response.status_code == 303
-    assert [(r["name"], r["pay_to"]) for r in own_sellers(conn, user)] == [("InsightLab", OTHER_SELLER)]
-    after = (await client.get("/account/rules")).text
-    card = after.split("Demo sellers")[1]  # InsightLab is approved now, so only the other demo seller is offered
-    assert OTHER_SELLER not in card and SELLER in card and OTHER_SELLER in after.split("Demo sellers")[0]
-
-
-@pytest.mark.anyio
-async def test_demo_sellers_never_show_outside_dev_mode(
-    settings, connect, mailer, fake_wallets, pay_spy, monkeypatch,
-):
-    monkeypatch.setenv("SELLER_A_ADDRESS", SELLER)
-    production = dataclasses.replace(settings, dev_mode=False)
-    async with serve(production, connect=connect, mailer=mailer, pay_fn=pay_spy) as make:
-        client = make()
-        await sign_in(client, mailer, "alice@example.com")
-        page = (await client.get("/account/rules")).text
-        assert "Demo sellers" not in page and SELLER not in page
-
-
 # Overview
 
 
@@ -849,13 +809,14 @@ async def test_the_rules_page_shows_each_sellers_wallet_history(browser, mailer,
 
 
 @pytest.mark.anyio
-async def test_the_demo_card_offers_a_fresh_wallet_and_approving_it_warns(browser, mailer, conn, fake_chain):
-    fake_chain.unused.add(books.DEMO_FRESH_WALLET)
+async def test_approving_a_wallet_with_no_history_warns(browser, mailer, conn, fake_chain):
+    fresh = "0x" + "7a" * 20
+    fake_chain.unused.add(fresh)
     client = await signed_in(browser, mailer)
-    page = (await client.get("/account/rules")).text
-    assert "PocketWiFi (new wallet)" in page and books.DEMO_FRESH_WALLET in page
-    response = await add_seller(client, "PocketWiFi (new wallet)", books.DEMO_FRESH_WALLET)
+    response = await add_seller(client, "PocketWiFi", fresh)
     assert response.status_code == 200 and "no activity at all on Base Sepolia" in response.text
+
+
 @pytest.mark.anyio
 async def test_purchase_approval_fallback_needs_session_csrf_and_ownership(conn, browser, mailer):
     from sentinel import link_approvals

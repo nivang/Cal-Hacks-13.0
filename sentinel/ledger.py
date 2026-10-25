@@ -4,7 +4,7 @@ Every entry is balanced and append only. Both rules are enforced by the database
 migrations/002 and 003), and balance is also checked here first for a clear error. A settlement
 updates the attempt and posts its entry in one transaction, so the books never drift from the
 payment log. It credits the paying agent's own cash account when it has one (each signed in user's
-agent does, 1010-<agent id>) and the shared 1010 USDC Cash otherwise (research-agent, the demo).
+agent does, 1010-<agent id>) and the shared 1010 USDC Cash otherwise (agents from before sign in, like research-agent).
 A payment held in escrow (escrow.py) books in three steps: hold_attempt (Dr escrow / Cr cash), then
 capture_attempt (Dr expense / Cr escrow) or void_attempt (Dr cash / Cr escrow), so escrow nets to zero once settled.
 Used by payments.py after a payment settles. Amounts are integer atomic units.

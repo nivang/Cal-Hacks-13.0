@@ -47,7 +47,7 @@ async def app(settings, connect, mailer, fake_wallets, pay_spy, fake_judge, oper
         yield application
 
 
-def held_in_escrow(conn, user, url="http://seller.test/travel/train-times") -> int:
+def held_in_escrow(conn, user, url="http://seller.test/test-site/train-times") -> int:
     """A payment of this user's agent held in escrow for the owner, with what the seller delivered."""
     attempt_id = payments.authorize(conn, user["agent"], "train times", Quote(url, DATACO, 300_000, ASSET, NETWORK,
                                                                                300))

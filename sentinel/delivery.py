@@ -134,5 +134,5 @@ def unavailable() -> Verdict:
 
 
 def without_task() -> Verdict:
-    """No task to judge against (the command line demo): the rules passed, so pay."""
+    """No task to judge against (a payment made outside a task): the rules passed, so pay."""
     return Verdict(PASS, "rules_passed", "The response passed every delivery rule.")

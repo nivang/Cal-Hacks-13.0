@@ -8,7 +8,8 @@ decided in wallets.py; this file only sees the x402 signer interface.
 
 A payment made under a task (Task, from the MCP pay tool) is also checked against the owner's intent once the guard
 allows it: review_intent runs intent.py's tiers (rules, then the judge's fast check, then the judge) and may block
-the payment or hold it for the owner (PaymentHeld). Without a task (the command line demo) only the guard runs.
+the payment or hold it for the owner (PaymentHeld). Without a task (a direct pay_for call, not the MCP tool) only
+the guard runs.
 
 When the seller offers x402 auth-capture with Sentinel as operator (escrow.check_terms), the money is held in escrow
 instead of paid outright: _pay_escrow holds it, fetches the data, checks the delivery (delivery.py, then the judge),
