@@ -17,7 +17,7 @@ import os
 import re
 from collections.abc import Callable
 from contextlib import AbstractContextManager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any
 
 import httpx
@@ -144,27 +144,38 @@ def search(listings: list[Listing], query: str, limit: int = MAX_RESULTS) -> lis
 async def preview(
     connect: Connect, agent: str, task: payments.Task, url: str, purpose: str, listing: Listing | None = None,
 ) -> results.ServiceView:
-    """What pay would decide for one URL under this task, as the agent sees it. Never pays, never records.
+    """What pay would decide for one URL under this task, as the agent sees it (check, below). Never pays."""
+    name = listing.name if listing else None
+    found = await check(connect, agent, task, url, purpose)
+    if found.rule in (BAD_URL, UNREACHABLE):
+        return results.service(url, found.verdict, found.detail, name=name)
+    says = listing.description if listing else found.seller.description
+    return results.service(url, found.verdict, found.detail, found.amount, name or found.seller.service_name, says)
+
+
+BAD_URL, UNREACHABLE = "url", "unreachable"
+
+
+async def check(connect: Connect, agent: str, task: payments.Task, url: str, purpose: str) -> payments.Preview:
+    """payments.preview for one URL with its failures as verdicts: BLOCKED for a URL Sentinel will not fetch (rule
+    url), UNREACHABLE when the seller could not be reached or checked (rule unreachable). A guard block is BLOCKED.
 
     The URL is checked first (urls.validate_url); the preview runs on a connection of its own.
     """
-    name = listing.name if listing else None
     try:
         safe_url = await asyncio.to_thread(urls.validate_url, url)
     except ValueError as e:
-        return results.service(url, "BLOCKED", str(e), name=name)
+        return payments.Preview(url, "BLOCKED", BAD_URL, str(e))
     try:
         with connect() as conn:
             found = await payments.preview(conn, agent, safe_url, purpose, task)
     except httpx.HTTPError as e:
         log.warning("could not preview a service (%s)", type(e).__name__)
-        return results.service(url, "UNREACHABLE", "Sentinel could not reach it.", name=name)
+        return payments.Preview(url, "UNREACHABLE", UNREACHABLE, "Sentinel could not reach it.")
     except Exception:
         log.exception("preview hit an unexpected error")
-        return results.service(url, "UNREACHABLE", "Sentinel could not check it.", name=name)
-    verdict = "BLOCKED" if found.verdict == guard.BLOCK else found.verdict
-    says = listing.description if listing else found.seller.description
-    return results.service(url, verdict, found.detail, found.amount, name or found.seller.service_name, says)
+        return payments.Preview(url, "UNREACHABLE", UNREACHABLE, "Sentinel could not check it.")
+    return replace(found, verdict="BLOCKED") if found.verdict == guard.BLOCK else found
 
 
 async def find(

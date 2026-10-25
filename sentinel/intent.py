@@ -23,6 +23,9 @@ hard rule. Decisions come in tiers, fast to smart, and the first to decide wins:
             8. big_share       one purchase above intent_big_share_percent of the task's budget -> ESCALATE
             9. drift           most recent decisions under this task needed the judge -> ESCALATE
             10. listing_changed the paywall describes a different product than the listing did -> ESCALATE
+            11. pricier_pick   a price comparison under this task offered this URL and the job costs more than the
+                               cheapest buyable option it found: held, unless it is the recommended best value and
+                               the owner turned on auto buy -> ESCALATE
   tier 1  a fast model check of the seller's description against the mandate (judge.classify), cached per task,
           seller and URL: fits -> ALLOW, off_task -> BLOCK, unsure -> tier 2. A link the agent found on a web page
           that the owner never named cannot be allowed here; it goes to tier 2.
@@ -110,6 +113,20 @@ class Listing:
 
 
 @dataclass(frozen=True)
+class Comparison:
+    """The latest price comparison under this task that offered this URL (mandates.comparison_for). Atomic units."""
+
+    id: int
+    best_key: str | None  # the recommended best value: URL without its query
+    best_name: str | None
+    cheapest_key: str | None  # the cheapest offer Sentinel could buy and recommend
+    cheapest_name: str | None
+    cheapest_cost: int | None  # what the job costs with it
+    calls: int  # the calls the comparison priced the job at
+    explanation: str
+
+
+@dataclass(frozen=True)
 class Session:
     """Facts about this task so far, gathered by mandates.session_facts. Amounts are atomic units."""
 
@@ -122,6 +139,7 @@ class Session:
     purchases: tuple[Purchase, ...] = ()  # newest first
     listing: Listing | None = None  # what the catalog advertised for this URL under this task, if it was listed
     payee_unused: bool = False  # the payee's wallet never sent or received anything (payments.payee_profile)
+    comparison: Comparison | None = None  # the latest price comparison under this task that offered this URL
 
 
 @dataclass(frozen=True)
@@ -262,7 +280,46 @@ def tier0(
             f"The catalog listed \"{clip(listing.description, 120)}\", but the paywall now sells "
             f"\"{clip(payment.seller.description, 120)}\". The owner decides.",
         )
-    return None
+    return pricier_pick(payment, session, agent)
+
+
+def url_key(url: str) -> str:
+    """A URL without its query and fragment: the product a price comparison offered, whatever inputs the agent sets."""
+    try:
+        parts = urlsplit(url)
+    except ValueError:
+        return url
+    return parts._replace(query="", fragment="").geturl()
+
+
+def pricier_pick(payment: Payment, session: Session, agent: guard.Agent) -> Verdict | None:
+    """Rule 11: a purchase that costs more than the cheapest buyable option its price comparison found is held.
+
+    The recommended best value goes through without asking only when the owner turned on auto buy. The job is priced
+    at the comparison's calls, so a purchase is compared like for like with the cheapest option.
+    """
+    pick = session.comparison
+    if pick is None or pick.cheapest_cost is None or pick.cheapest_key is None:
+        return None
+    key = url_key(payment.quote.url)
+    job = payment.quote.amount * max(1, pick.calls)
+    if key == pick.cheapest_key or job <= pick.cheapest_cost:
+        return None
+    if key == pick.best_key:
+        if agent.auto_buy_best_value:
+            return None
+        return Verdict(
+            ESCALATE, 0, "pricier_pick",
+            f"Sentinel's price comparison picked this as the best value, but at {guard.usd(job)} for the job it costs "
+            f"more than the cheapest option, {pick.cheapest_name or pick.cheapest_key} at "
+            f"{guard.usd(pick.cheapest_cost)}. {pick.explanation} The owner decides whether it is worth it.",
+        )
+    return Verdict(
+        ESCALATE, 0, "pricier_pick",
+        f"At {guard.usd(job)} for the job this costs more than the cheapest option Sentinel's price comparison found, "
+        f"{pick.cheapest_name or pick.cheapest_key} at {guard.usd(pick.cheapest_cost)}, and it is not the one Sentinel "
+        f"recommended ({pick.best_name or pick.best_key}). The owner decides.",
+    )
 
 
 def _differs(listed: str | None, now: str | None) -> bool:

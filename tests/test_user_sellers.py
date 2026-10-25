@@ -270,7 +270,8 @@ def test_every_why_label():
     assert why({"status": "denied", "rule": "cap", "detail": None})[0] == "Over your per payment cap"
     assert why({"status": "failed", "rule": "", "detail": "", "tx_hash": None}) == ("Payment did not complete", "")
     assert why({"status": "failed", "tx_hash": "0xabc"}) == ("Paid but not recorded, contact the owner", "")
-    assert why({"status": "approved"}) == ("In progress", "") and why({"status": "pending"}) == ("In progress", "")
+    assert why({"status": "approved"}) == ("In progress", "")
+    assert why({"status": "pending"}) == ("Waiting for your approval", "Nothing has been signed.")
     assert why({"status": "settled", "tx_hash": "0x1"}) == ("", "")
 
 

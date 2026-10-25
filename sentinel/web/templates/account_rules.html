@@ -46,6 +46,19 @@
   </form>
 </section>
 
+<section class="mt-4 {{ card }}" aria-labelledby="autobuy-h">
+  <h2 id="autobuy-h" class="font-semibold">Best value buying</h2>
+  <p class="mt-1 text-sm text-stone-600">When your agent compares prices, Sentinel recommends the best value: the most for the money, not always the cheapest.</p>
+  <p class="mt-3 text-sm">Auto buy is <span class="font-semibold">{{ "on" if auto_buy else "off" }}</span>.
+    {% if auto_buy %}Your agent buys the recommended best value without asking, even when it costs more than the cheapest option. Every other check still runs, and anything pricier that Sentinel did not recommend is still held for you.
+    {% else %}When the best value costs more than the cheapest option, Sentinel holds the payment and asks you on the Tasks page.{% endif %}</p>
+  <form method="post" action="/account/rules/auto-buy" class="mt-4">
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <input type="hidden" name="auto_buy" value="{{ 'off' if auto_buy else 'on' }}">
+    <button type="submit" class="{{ secondary if auto_buy else primary }}">Turn auto buy {{ "off" if auto_buy else "on" }}</button>
+  </form>
+</section>
+
 <section class="mt-4 {{ card }}" aria-labelledby="sellers-h">
   <h2 id="sellers-h" class="font-semibold">Approved sellers</h2>
   <p class="mt-1 text-sm text-stone-600">Your agent can only pay addresses approved here, whatever a web page it read says. Operator rows apply to everyone and you cannot change them.</p>

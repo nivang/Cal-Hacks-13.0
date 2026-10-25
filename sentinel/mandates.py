@@ -8,6 +8,8 @@ can never read or change another's task or held payment. Amounts go in and out a
 from collections.abc import Sequence
 from typing import Any
 
+from psycopg.types.json import Jsonb
+
 from sentinel import guard, intent
 from sentinel.attempts import ATOMIC, LIVE_STATUSES
 from sentinel.db import Connection, usdc
@@ -109,7 +111,57 @@ def session_facts(
         allowance_id=find_allowance(conn, mandate_id, quote),
         purchases=tuple(intent.Purchase(r["url"], int(r["amount"]), r["status"], r["reason"]) for r in history),
         listing=listing_for(conn, mandate_id, quote.url),
+        comparison=comparison_for(conn, mandate_id, quote.url, policy["compare_ttl_s"]),
     )
+
+
+# Price comparisons (compare.py, migration 015)
+
+COMPARISON_LIMIT = 50  # shown on the Tasks page
+
+
+def save_comparison(
+    conn: Connection, mandate_id: int, query: str, calls: int, results: int, offers: list[dict[str, Any]],
+    buyable_keys: Sequence[str], best: tuple[str, str, int] | None, cheapest: tuple[str, str, int] | None,
+    explanation: str,
+) -> int:
+    """Store one comparison: every offer as shown, the keys pay() could buy, the best and cheapest (key, name, cost)."""
+    row = conn.execute(
+        "INSERT INTO price_comparisons (mandate_id, query, calls, results, offers, buyable_keys, best_key, best_name,"
+        " best_cost, cheapest_key, cheapest_name, cheapest_cost, explanation)"
+        " VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING id",
+        (mandate_id, query, calls, results, Jsonb(offers), list(buyable_keys),
+         best[0] if best else None, best[1] if best else None, usdc(best[2]) if best else None,
+         cheapest[0] if cheapest else None, cheapest[1] if cheapest else None,
+         usdc(cheapest[2]) if cheapest else None, explanation),
+    ).fetchone()
+    assert row is not None
+    return int(row["id"])
+
+
+def comparison_for(conn: Connection, mandate_id: int, url: str, ttl_s: int) -> intent.Comparison | None:
+    """The newest comparison under this task, younger than ttl_s, that offered this URL (by intent.url_key)."""
+    row = conn.execute(
+        f"SELECT id, best_key, best_name, cheapest_key, cheapest_name, (cheapest_cost {ATOMIC})::bigint AS cheapest,"
+        " calls, explanation FROM price_comparisons WHERE mandate_id = %s AND %s = ANY(buyable_keys)"
+        " AND created_at > now() - make_interval(secs => %s) ORDER BY id DESC LIMIT 1",
+        (mandate_id, intent.url_key(url), ttl_s),
+    ).fetchone()
+    if row is None:
+        return None
+    return intent.Comparison(row["id"], row["best_key"], row["best_name"], row["cheapest_key"], row["cheapest_name"],
+                             row["cheapest"], int(row["calls"]), row["explanation"])
+
+
+def list_comparisons(conn: Connection, agent_id: int, limit: int = COMPARISON_LIMIT) -> list[dict[str, Any]]:
+    """This agent's newest comparisons, for the Tasks page, with costs in atomic units."""
+    return conn.execute(
+        f"SELECT c.id, c.mandate_id, c.query, c.calls, c.results, c.offers, c.best_name,"
+        f" (c.best_cost {ATOMIC})::bigint AS best_cost, c.cheapest_name, (c.cheapest_cost {ATOMIC})::bigint AS"
+        " cheapest_cost, c.explanation, c.created_at FROM price_comparisons c JOIN mandates m ON m.id = c.mandate_id"
+        " WHERE m.agent_id = %s ORDER BY c.id DESC LIMIT %s",
+        (agent_id, limit),
+    ).fetchall()
 
 
 def remember_listings(conn: Connection, mandate_id: int, listings: Sequence[Any]) -> None:

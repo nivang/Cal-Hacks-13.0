@@ -15,5 +15,8 @@
   "intent_cache_ttl_s": 3600,
   "intent_mandate_ttl_s": 86400,
   "intent_allowance_ttl_s": 86400,
-  "intent_tasks_per_day": 50
+  "intent_tasks_per_day": 50,
+  "compare_quality_margin": 15,
+  "compare_min_fit": 50,
+  "compare_ttl_s": 3600
 }

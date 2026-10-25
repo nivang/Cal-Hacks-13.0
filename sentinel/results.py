@@ -258,3 +258,65 @@ def discovered(query: str, found: discovery.Found) -> DiscoverResult:
     parts.append(LISTINGS_UNTRUSTED)
     return DiscoverResult(status="OK", query=query, listings=found.listings, sources=found.sources,
                           message=" ".join(parts))
+
+
+class OfferView(BaseModel):
+    """One offer in a price comparison, as the agent sees it. Costs are for the whole job (calls or results)."""
+
+    name: str
+    source: str
+    url: str
+    actor: str | None = None  # Apify Actor id, for apify_actor
+    pay_with: Literal["x402", "apify_credit"] | None = None
+    buyable: bool  # pay() can buy it now
+    price_usdc: str | None = None
+    per: Literal["call", "result"] = "call"
+    price_checked: bool = False  # read live from the seller's 402 just now, not from a listing
+    job_cost_usdc: str | None = None
+    quality: int | None = None  # 0 to 100, price aside
+    fit_reason: str | None = None  # the judge's one sentence, for the owner
+    seller_says: str | None = None
+    recommended: bool = False
+    note: str | None = None
+
+
+class ComparisonResult(BaseModel):
+    """What compare_prices returns: the recommendation, what it is compared with, and what to do next."""
+
+    status: Literal["OK", "NONE_FOUND", "FAILED"]
+    message: str
+    comparison_id: int | None = None
+    calls: int = 1
+    results: int = 1
+    best: OfferView | None = None  # the best value overall; may be an Apify Actor pay() cannot buy yet
+    best_buyable: OfferView | None = None  # the best value pay() can buy
+    cheapest_buyable: OfferView | None = None
+    needs_owner: bool = False  # buying best_buyable will be held for the owner (it is the pricier option)
+    offers: list[OfferView] = []
+    sources: dict[str, str] = {}
+
+
+def compared(result: ComparisonResult, explanation: str, auto_buy: bool) -> ComparisonResult:
+    """Fill in the message: what to buy, or why the owner decides, or that nothing fits."""
+    buy, cheap = result.best_buyable, result.cheapest_buyable
+    parts = []
+    if buy is None:
+        parts.append("Nothing Sentinel can buy fits this task well enough at a known price.")
+    else:
+        parts.append(explanation)
+        how = f'pay(task_id, "{buy.url}", reason, found_at="sentinel discovery")'
+        if result.needs_owner and not auto_buy:
+            parts.append(
+                f"It costs more than {cheap.name if cheap else 'the cheapest option'}, so the owner decides: call "
+                f"{how} now and Sentinel holds it for them on their Tasks page. Tell the owner in a sentence why you "
+                "recommend it, and that they can allow it there. If they would rather save, buy the cheapest option.")
+        elif result.needs_owner:
+            parts.append(f"The owner lets you buy the best value without asking: call {how}.")
+        else:
+            parts.append(f"Buy it with {how}.")
+    if result.best is not None and not result.best.buyable:
+        parts.append(
+            f"The best value overall is the Apify Actor {result.best.name} (about ${result.best.job_cost_usdc} for "
+            f"{result.results} results), but Sentinel cannot run Actors yet: tell the owner about it.")
+    parts.append(f"Every check still runs when you pay. {SELLER_TEXT}")
+    return result.model_copy(update={"message": " ".join(parts)})

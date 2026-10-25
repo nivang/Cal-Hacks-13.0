@@ -74,10 +74,11 @@ def block_attempt(conn: Connection, attempt_id: int, rule: str, detail: str) -> 
 
 
 def load_agent(conn: Connection, name: str) -> dict[str, Any]:
-    """Return the agent's name, per payment cap and weekly budget (atomic units) as a dict that builds guard.Agent."""
+    """Return the agent's name, per payment cap and weekly budget (atomic units) and the owner's auto buy switch
+    (auto_buy_best_value, migration 015) as a dict that builds guard.Agent."""
     row = conn.execute(
         f"SELECT name, (per_payment_cap {ATOMIC})::bigint AS per_payment_cap,"
-        f" (weekly_budget {ATOMIC})::bigint AS weekly_budget FROM agents WHERE name = %s",
+        f" (weekly_budget {ATOMIC})::bigint AS weekly_budget, auto_buy_best_value FROM agents WHERE name = %s",
         (name,),
     ).fetchone()
     if row is None:
@@ -158,6 +159,23 @@ def seller_statuses(conn: Connection, agent: str, pay_tos: list[str], network: s
         ([p.lower() for p in pay_tos], network, asset, agent_id(conn, agent)),
     ).fetchall()
     return {r["pay_to"]: "blocked" if r["blocked"] else "approved" for r in rows if r["blocked"] or r["ok"]}
+
+
+def deliveries(conn: Connection, agent: str, keys: list[str]) -> dict[str, tuple[int, int, int]]:
+    """What this agent's own purchases of each product delivered: (settled, settled but empty, failed), keyed by the
+    URL without its query (intent.url_key). Only this agent's rows, so one user never learns what another bought."""
+    rows = conn.execute(
+        "SELECT split_part(split_part(a.url, '#', 1), '?', 1) AS key,"
+        " count(*) FILTER (WHERE a.status = 'settled') AS settled,"
+        " count(*) FILTER (WHERE a.status = 'settled' AND length(btrim(COALESCE(r.body, ''), ' {}[]\"' || chr(10)))"
+        "  = 0) AS empty,"
+        " count(*) FILTER (WHERE a.status = 'failed') AS failed"
+        " FROM payment_attempts a LEFT JOIN attempt_results r ON r.attempt_id = a.id"
+        " WHERE a.agent_id = %s AND a.preview IS NOT TRUE AND split_part(split_part(a.url, '#', 1), '?', 1) = ANY(%s)"
+        " GROUP BY 1",
+        (agent_id(conn, agent), keys),
+    ).fetchall()
+    return {r["key"]: (int(r["settled"]), int(r["empty"]), int(r["failed"])) for r in rows}
 
 
 def week_spend(conn: Connection, aid: int, days: int) -> int:

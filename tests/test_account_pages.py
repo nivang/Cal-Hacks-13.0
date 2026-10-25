@@ -163,11 +163,12 @@ async def test_each_page_renders_with_its_tab_marked_and_the_site_headers(browse
 FORMS = [
     ("/account/rules/limits", {"cap": "1", "budget": "2"}),
     ("/account/rules/sellers", {"name": "NewCo", "pay_to": SELLER, "status": "approved"}),
+    ("/account/rules/auto-buy", {"auto_buy": "on"}),
 ]
 
 
 async def snapshot(conn, user):
-    limits = conn.execute("SELECT per_payment_cap, weekly_budget FROM agents WHERE id = %s",
+    limits = conn.execute("SELECT per_payment_cap, weekly_budget, auto_buy_best_value FROM agents WHERE id = %s",
                           (user["agent_id"],)).fetchone()
     return limits, own_sellers(conn, user)
 
@@ -901,3 +902,61 @@ async def test_browser_yes_is_single_purchase_and_never_changes_seller_list(conn
                         (request_id,)).fetchone()["n"] == 1
     assert own_sellers(conn, user) == []
     assert conn.execute("SELECT count(*) AS n FROM journal_entries").fetchone()["n"] == 0
+
+
+# Best value buying: the auto buy switch and the price comparisons on the Tasks page
+
+
+def auto_buy(conn, user) -> bool:
+    row = conn.execute("SELECT auto_buy_best_value FROM agents WHERE id = %s", (user["agent_id"],)).fetchone()
+    return bool(row["auto_buy_best_value"])
+
+
+@pytest.mark.anyio
+async def test_auto_buy_is_off_until_the_owner_turns_it_on_and_off_again(browser, mailer, conn):
+    client = await signed_in(browser, mailer)
+    user = user_of(conn, client)
+    page = await client.get("/account/rules")
+    assert "Auto buy is <span class=\"font-semibold\">off</span>" in page.text and not auto_buy(conn, user)
+    done = await client.post("/account/rules/auto-buy", data={"csrf": form_value(page.text, "csrf"), "auto_buy": "on"})
+    assert done.status_code == 303 and done.headers["location"] == "/account/rules?done=auto_buy"
+    assert auto_buy(conn, user)
+    page = await client.get(done.headers["location"])
+    assert "Turn auto buy off" in page.text and "The new setting applies" in page.text
+    await client.post("/account/rules/auto-buy", data={"csrf": form_value(page.text, "csrf"), "auto_buy": "off"})
+    assert not auto_buy(conn, user)
+
+
+@pytest.mark.anyio
+async def test_auto_buy_refuses_anything_but_on_or_off_and_only_changes_the_owners_own_agent(browser, mailer, conn):
+    alice = await signed_in(browser, mailer)
+    bob = await signed_in(browser, mailer, "bob@example.com", BOB_IP)
+    response = await alice.post("/account/rules/auto-buy", data={"csrf": await csrf(alice), "auto_buy": "yes"})
+    assert response.status_code == 403 and not auto_buy(conn, user_of(conn, alice))
+    await alice.post("/account/rules/auto-buy", data={"csrf": await csrf(alice), "auto_buy": "on",
+                                                      "agent": user_of(conn, bob)["agent"]})
+    assert auto_buy(conn, user_of(conn, alice)) and not auto_buy(conn, user_of(conn, bob))
+
+
+@pytest.mark.anyio
+async def test_the_tasks_page_shows_each_price_comparison_with_the_pick_and_the_offers(browser, mailer, conn):
+    client = await signed_in(browser, mailer)
+    user = user_of(conn, client)
+    task_id = task_for(conn, user)
+    offers = [
+        {"name": "Hotels Pro", "source": "catalog", "verdict": "OK", "cost": 150_000, "quality": 90,
+         "fit_reason": "Fifty hotels with prices.", "why_not": None, "recommended": True},
+        {"name": "<b>Hotels Cheap</b>", "source": "catalog", "verdict": "BLOCKED", "cost": 20_000, "quality": None,
+         "fit_reason": None, "why_not": "Sentinel would not pay it for this task.", "recommended": False},
+    ]
+    mandates.save_comparison(conn, task_id, "Tokyo hotel prices", 1, 50, offers, ["http://m.test/pro"],
+                             ("http://m.test/pro", "Hotels Pro", 150_000),
+                             ("http://m.test/lite", "Hotels Lite", 50_000),
+                             "Best value: Hotels Pro at $0.15 for this job, scoring 90 of 100.")
+    page = await client.get("/account/tasks")
+    assert "Price comparison: Tokyo hotel prices" in page.text
+    assert "picked Hotels Pro ($0.15) over Hotels Lite ($0.05)" in page.text
+    assert "Fifty hotels with prices." in page.text and "· blocked" in page.text
+    assert "&lt;b&gt;Hotels Cheap&lt;/b&gt;" in page.text and "<b>Hotels Cheap</b>" not in page.text
+    bob = await signed_in(browser, mailer, "bob@example.com", BOB_IP)
+    assert "Tokyo hotel prices" not in (await bob.get("/account/tasks")).text

@@ -92,6 +92,14 @@ def set_agent_limits(conn: Connection, agent: str, per_payment_cap: int, weekly_
         raise LookupError(f"no agent named {agent}")
 
 
+def set_auto_buy(conn: Connection, agent: str, on: bool) -> None:
+    """Turn the agent's auto buy on or off: on, the recommended best value of a price comparison is bought without
+    asking even when it is the pricier option (every other check still runs); off, it is held for the owner."""
+    updated = conn.execute("UPDATE agents SET auto_buy_best_value = %s WHERE name = %s", (on, agent)).rowcount
+    if updated == 0:
+        raise LookupError(f"no agent named {agent}")
+
+
 def list_sellers(conn: Connection) -> list[dict[str, Any]]:
     """Every seller on the operator's list (agent_id null), approved first, then by name."""
     return conn.execute(
