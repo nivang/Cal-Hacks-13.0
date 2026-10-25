@@ -198,17 +198,29 @@ def remember(conn: Connection, mandate_id: int, pay_to: str, url: str, verdict: 
 # Account pages
 
 
+WITH_SPENT = (
+    f"SELECT {COLUMNS}, (COALESCE(s.total, 0) {ATOMIC})::bigint AS spent FROM mandates m"
+    " LEFT JOIN LATERAL (SELECT SUM(amount) AS total FROM payment_attempts p"
+    "  WHERE p.mandate_id = m.id AND p.status = ANY(%s)) s ON true"
+)
+
+
 def list_for_agent(conn: Connection, agent_id: int, limit: int = TASK_LIMIT) -> list[dict[str, Any]]:
     """This agent's newest tasks with what each has spent, the provisional ones first."""
     rows = conn.execute(
-        f"SELECT {COLUMNS}, (COALESCE(s.total, 0) {ATOMIC})::bigint AS spent FROM mandates m"
-        " LEFT JOIN LATERAL (SELECT SUM(amount) AS total FROM payment_attempts p"
-        "  WHERE p.mandate_id = m.id AND p.status = ANY(%s)) s ON true"
-        " WHERE m.agent_id = %s ORDER BY m.id DESC LIMIT %s",
-        (LIVE_STATUSES, agent_id, limit),
+        WITH_SPENT + " WHERE m.agent_id = %s ORDER BY m.id DESC LIMIT %s", (LIVE_STATUSES, agent_id, limit),
     ).fetchall()
     rows.sort(key=lambda r: (r["status"] != intent.PROVISIONAL or r["expired"], -r["id"]))
     return rows
+
+
+def list_by_ids(conn: Connection, agent_id: int, ids: Sequence[int]) -> list[dict[str, Any]]:
+    """These tasks of this agent with what each has spent, in one query (ids of other agents are ignored)."""
+    if not ids:
+        return []
+    return conn.execute(
+        WITH_SPENT + " WHERE m.agent_id = %s AND m.id = ANY(%s)", (LIVE_STATUSES, agent_id, list(ids)),
+    ).fetchall()
 
 
 def confirm(conn: Connection, mandate_id: int, agent_id: int, budget: int, weekly_budget: int) -> None:

@@ -105,6 +105,123 @@ def why(payment: Mapping[str, Any]) -> tuple[str, str]:
     return "", ""
 
 
+# Rules the spending guard (and the seller's payment offer) fire; every other rule that stops a payment is intent's.
+GUARD_RULES = frozenset({
+    "seller", "cap", "budget", "price_jump", "duplicate", "url", "long_window", "lookalike", "payee_changed",
+    "flagged_wallet", "payment_option", "escrow_terms", "quote", "quote_changed",
+})
+APPROVAL_STATUSES = ("pending", "authorized", "denied", "cancelled", "expired")
+TIER_TEXT = {0: "Rules passed", 1: "Classifier: on task", 2: "Judge: on task"}
+
+
+def _step(key: str, label: str, state: str, note: str = "", tx: str | None = None) -> dict[str, Any]:
+    return {"key": key, "label": label, "state": state, "note": note, "tx": tx}
+
+
+def pipeline(payment: Mapping[str, Any]) -> list[dict[str, Any]]:
+    """The Live page's stepper for one attempt: Found, Policy, Task check, (Approval), Payment, Delivery, Result.
+
+    Each step is a dict of key, label, state (ok, stop, wait or idle: passed, stopped here, waiting, not reached),
+    note (plain English) and tx (a transaction hash to link, or None). Steps after the one that stopped are idle.
+    """
+    status = payment.get("status") or ""
+    rule = (payment.get("rule") or "").strip()
+    detail = (payment.get("detail") or "").strip()
+    label = RULE_LABELS.get(rule) or rule.replace("_", " ").capitalize()
+    stopped = status in ("blocked", "denied", "escalated")
+    escrow = payment.get("escrow_state")
+    tier = payment.get("intent_tier")
+    steps = []
+
+    if payment.get("found_while_searching"):
+        steps.append(_step("found", "Found", "ok", "While searching the catalog; never shown to the agent"))
+    else:
+        found = (payment.get("found_at") or "").strip()  # written by the agent, so shown as its claim
+        where = host_path(found) if "://" in found else found
+        steps.append(_step("found", "Found", "ok", f"The agent says it found this via {where}" if where
+                           else "The agent asked to pay"))
+
+    guard_stop = stopped and rule in GUARD_RULES
+    steps.append(_step("guard", "Policy", "stop" if guard_stop else "ok",
+                       f"{label}. {detail}".strip() if guard_stop else "Seller, cap, budget, price and wallet checks"))
+
+    intent_stop = stopped and not guard_stop and rule != "approval"
+    if guard_stop:
+        steps.append(_step("intent", "Task check", "idle"))
+    elif intent_stop:
+        note = f"{label}. {detail}".strip()
+        steps.append(_step("intent", "Task check", "wait" if status == "escalated" else "stop",
+                           f"Held for you: {note}" if status == "escalated" else note))
+    else:
+        note = TIER_TEXT.get(tier, "Passed") if tier is not None else "Passed"
+        if payment.get("intent_reason") and tier:
+            note = f"{note}. {payment['intent_reason']}"
+        steps.append(_step("intent", "Task check", "ok", note))
+
+    if status in APPROVAL_STATUSES or rule == "approval":
+        state, note = {
+            "pending": ("wait", "Waiting for your Yes"), "authorized": ("ok", "You approved it once"),
+            "denied": ("stop", "You said no"), "cancelled": ("stop", "Approval dismissed"),
+            "expired": ("stop", "Approval expired"),
+        }.get(status, ("stop", detail or "Approval unavailable") if stopped else ("ok", "You approved this seller"))
+        steps.append(_step("approval", "Your approval", state, note))
+
+    reached = status in ("approved", "settled", "failed", "escrowed", "voided")
+    if not reached:
+        steps.append(_step("payment", "Payment", "idle"))
+    elif escrow:
+        steps.append(_step("payment", "Payment", "ok", "Locked in escrow, the seller is not paid yet",
+                           payment.get("authorize_tx")))
+    elif status == "approved":
+        steps.append(_step("payment", "Payment", "wait", "Signing and settling"))
+    elif status == "failed":
+        steps.append(_step("payment", "Payment", "stop", "Did not complete", payment.get("tx_hash")))
+    else:
+        steps.append(_step("payment", "Payment", "ok", "Paid directly (no escrow offered)", payment.get("tx_hash")))
+
+    verdict = payment.get("delivery_verdict")
+    _, _, reason = (payment.get("delivery_reason") or "").partition(": ")
+    reason = reason or (payment.get("delivery_reason") or "")
+    if verdict == "pass":
+        steps.append(_step("delivery", "Delivery check", "ok", reason or "The data matches what was bought"))
+    elif verdict == "fail":
+        steps.append(_step("delivery", "Delivery check", "stop", reason or "The data failed the check"))
+    elif verdict == "unsure":
+        steps.append(_step("delivery", "Delivery check", "wait", reason or "Unsure, waiting for you"))
+    elif status == "escrowed":
+        steps.append(_step("delivery", "Delivery check", "wait", "Checking what the seller sent"))
+    else:
+        steps.append(_step("delivery", "Delivery check", "idle"))
+
+    if status == "settled" and escrow == "captured":
+        steps.append(_step("result", "Result", "ok", "Seller paid from escrow", payment.get("capture_tx")))
+    elif status == "settled":
+        steps.append(_step("result", "Result", "stop" if verdict == "fail" else "ok",
+                           "Paid, but the delivery failed" if verdict == "fail" else "Paid", payment.get("tx_hash")))
+    elif status == "voided":
+        steps.append(_step("result", "Result", "stop", "Refunded to you, the seller got nothing",
+                           payment.get("void_tx")))
+    elif status == "escrowed":
+        steps.append(_step("result", "Result", "wait", "Waiting for you on Tasks" if payment.get("escrow_held")
+                           else "Money held until the check passes"))
+    elif status == "escalated":
+        steps.append(_step("result", "Result", "wait", "Held for you, nothing paid"))
+    elif status in ("pending", "authorized"):
+        steps.append(_step("result", "Result", "wait", "Nothing signed yet"))
+    elif status == "approved":
+        steps.append(_step("result", "Result", "wait", "In progress"))
+    elif status == "failed":
+        steps.append(_step("result", "Result", "stop", "Payment did not complete"))
+    else:
+        steps.append(_step("result", "Result", "stop", "Blocked, nothing paid"))
+    return steps
+
+
+def outcome(payment: Mapping[str, Any]) -> str:
+    """A Live card's tone from its last step: ok, stop or wait."""
+    return pipeline(payment)[-1]["state"]
+
+
 def host_path(url: str | None) -> str:
     """A URL as host and path ("data.example/report"), the whole text when it will not parse."""
     try:
@@ -120,7 +237,13 @@ def account_name(name: str | None) -> str:
     return ADDRESS.sub(lambda m: short(m.group(0)), name or "")
 
 
-templates.env.filters.update(usd=usd, short=short, when=when, why=why, host_path=host_path, account_name=account_name)
+def iso(value: datetime | None) -> str:
+    """A timestamp as ISO 8601 UTC, for the Live page's ticking clocks."""
+    return "" if value is None else value.astimezone(timezone.utc).isoformat()
+
+
+templates.env.filters.update(usd=usd, short=short, when=when, why=why, host_path=host_path, account_name=account_name,
+                             pipeline=pipeline, outcome=outcome, iso=iso)
 templates.env.globals.update(tx_url=results.EXPLORER)
 
 

@@ -71,7 +71,7 @@ def get_pool() -> ConnectionPool:
     if _pool is None:
         _pool = ConnectionPool(
             os.environ["DATABASE_URL"],
-            min_size=1,
+            min_size=2,  # keep a warm connection ready: on a slow link a new one costs several round trips
             max_size=10,
             kwargs={"autocommit": True, "row_factory": dict_row, "prepare_threshold": None},
             check=ConnectionPool.check_connection,  # drop connections the server closed while idle

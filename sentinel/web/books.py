@@ -12,6 +12,7 @@ from typing import Any
 
 from sentinel import attempts, guard, mandates, owner
 from sentinel.db import Connection
+from sentinel.link_approvals import WAITING
 from sentinel.payments import NETWORK, USDC_BASE_SEPOLIA
 
 USER = "user"  # sellers.added_by for rows a user listed on their account page
@@ -19,6 +20,7 @@ PAYMENT_LIMIT = 200
 CSV_LIMIT = 20_000  # the most rows the payments CSV holds (built in memory)
 SELLER_LIMIT = 200  # the most personal seller rows one user may keep
 JOURNAL_LIMIT = 100
+LIVE_LIMIT = 30  # attempts on the Live page's feed
 RANK = {"blocked": 0, "approved": 1}  # a lower rank wins; anything else (pending) ranks last
 # The journal entries of one agent: the entries of its settled payments and the reversals of those entries.
 ENTRY_SCOPE = (
@@ -128,16 +130,14 @@ def payments_by_task(conn: Connection, agent_id: int, limit: int = PAYMENT_LIMIT
     """
     rows = list_payments(conn, agent_id, limit)
     tasks = {t["id"]: t for t in mandates.list_for_agent(conn, agent_id, limit)}
+    older = {r["task_id"] for r in rows if r.get("task_id") is not None and r["task_id"] not in tasks}
+    tasks.update((t["id"], t) for t in mandates.list_by_ids(conn, agent_id, sorted(older)))  # one query, not per task
     groups: dict[int | None, dict[str, Any]] = {}
     for row in rows:  # newest first, so groups come out in the order of their newest payment
         task_id = row.get("task_id")
         group = groups.get(task_id)
         if group is None:
             task = tasks.get(task_id) if task_id is not None else None
-            if task_id is not None and task is None:  # an older task than the list reaches
-                task = mandates.get(conn, task_id, agent_id)
-                if task is not None:
-                    task = {**task, "spent": mandates.spend(conn, task_id)}
             state = None
             if task is not None:
                 state = "ended" if task["expired"] and task["status"] != "revoked" else task["status"]
@@ -152,6 +152,78 @@ def payments_by_task(conn: Connection, agent_id: int, limit: int = PAYMENT_LIMIT
     if None in groups:
         ordered.append(groups[None])  # payments outside any task last
     return ordered
+
+
+def fingerprint(conn: Connection, agent_id: int) -> tuple[str, bool]:
+    """A short tag that changes whenever the Live or Payments page would show something new, in one query.
+
+    Covers the newest PAYMENT_LIMIT attempts (status, delivery check, escrow state), the newest tasks (status,
+    budget, expiry) and the seller lists that name the sellers. Also says whether an approval has run out and
+    needs link_approvals.expire first (the tag is read again after that). Polls compare tags and skip the page.
+    """
+    row = conn.execute(
+        "SELECT md5(concat_ws('|',"
+        " (SELECT string_agg(concat_ws(':', a.id, a.status, a.delivery_verdict, a.tx_hash, e.state, e.held),"
+        "  ',' ORDER BY a.id) FROM (SELECT id, status, delivery_verdict, tx_hash FROM payment_attempts"
+        "  WHERE agent_id = %(aid)s ORDER BY id DESC LIMIT %(scan)s) a"
+        "  LEFT JOIN escrow_payments e ON e.attempt_id = a.id),"
+        " (SELECT string_agg(concat_ws(':', m.id, m.status, m.budget, m.expires_at <= now()), ',' ORDER BY m.id)"
+        "  FROM (SELECT id, status, budget, expires_at FROM mandates WHERE agent_id = %(aid)s"
+        "  ORDER BY id DESC LIMIT %(tasks)s) m),"
+        " (SELECT max(added_at) FROM sellers WHERE agent_id IS NULL OR agent_id = %(aid)s)"
+        " )) AS tag,"
+        " EXISTS (SELECT 1 FROM payment_attempts WHERE agent_id = %(aid)s AND status = ANY(%(waiting)s)"
+        "  AND approval_expires_at <= clock_timestamp()) AS expired_approvals",
+        {"aid": agent_id, "scan": PAYMENT_LIMIT, "tasks": mandates.TASK_LIMIT, "waiting": list(WAITING)},
+    ).fetchone()
+    assert row is not None
+    return str(row["tag"]), bool(row["expired_approvals"])
+
+
+def live_view(conn: Connection, agent_id: int, limit: int = LIVE_LIMIT) -> dict[str, Any]:
+    """What the Live page shows: the newest task with its counts, the money held in escrow now, and the feed.
+
+    task is the newest task (mandates.list_for_agent row) or None; counts are that task's real pay calls (requests)
+    by outcome, what was paid (paid_amount, to sellers_paid sellers), plus searched (services turned away while the
+    agent was only searching) and stopped (blocked or refunded amounts, atomic units). escrow lists every authorized
+    escrow, soonest deadline first. feed is the newest attempts from list_attempts, escrow columns included.
+    """
+    feed = owner.list_attempts(conn, limit, agent_id)
+    newest = conn.execute(
+        mandates.WITH_SPENT + " WHERE m.agent_id = %s ORDER BY m.id DESC LIMIT 1", (attempts.LIVE_STATUSES, agent_id),
+    ).fetchone()
+    counts = {"requests": 0, "paid": 0, "paid_amount": 0, "sellers_paid": 0, "blocked": 0, "held": 0, "escrowed": 0,
+              "refunded": 0, "searched": 0, "stopped": 0}
+    if newest is not None:
+        row = conn.execute(
+            "SELECT count(*) FILTER (WHERE preview IS NOT TRUE) AS requests,"
+            " count(*) FILTER (WHERE status = 'settled') AS paid,"
+            f" (COALESCE(SUM(amount) FILTER (WHERE status = 'settled'), 0) {owner.ATOMIC})::bigint AS paid_amount,"
+            " count(DISTINCT lower(pay_to)) FILTER (WHERE status = 'settled') AS sellers_paid,"
+            " count(*) FILTER (WHERE status IN ('blocked', 'denied') AND preview IS NOT TRUE) AS blocked,"
+            " count(*) FILTER (WHERE status IN ('escalated', 'pending', 'authorized')) AS held,"
+            " count(*) FILTER (WHERE status = 'escrowed') AS escrowed,"
+            " count(*) FILTER (WHERE status = 'voided') AS refunded,"
+            " count(*) FILTER (WHERE preview) AS searched,"
+            f" (COALESCE(SUM(amount) FILTER (WHERE status IN ('blocked', 'denied', 'voided') AND preview IS NOT TRUE),"
+            f" 0) {owner.ATOMIC})::bigint AS stopped"
+            " FROM payment_attempts WHERE mandate_id = %s",
+            (newest["id"],),
+        ).fetchone()
+        counts = {k: int(v) for k, v in (row or {}).items()} or counts
+    escrow = conn.execute(
+        f"SELECT a.id, a.url, a.pay_to, (a.amount {owner.ATOMIC})::bigint AS amount, e.capture_deadline, e.held,"
+        " e.verdict, e.created_at FROM escrow_payments e JOIN payment_attempts a ON a.id = e.attempt_id"
+        " WHERE a.agent_id = %s AND e.state = 'authorized' ORDER BY e.capture_deadline LIMIT %s",
+        (agent_id, mandates.HELD_LIMIT),
+    ).fetchall()
+    names = {r["id"]: r["seller"] for r in feed}
+    for e in escrow:
+        e["seller"] = names.get(e["id"])
+    state = None
+    if newest is not None:
+        state = "ended" if newest["expired"] and newest["status"] != "revoked" else newest["status"]
+    return {"task": newest, "task_state": state, "counts": counts, "escrow": escrow, "feed": feed}
 
 
 def recent_payments(conn: Connection, agent_id: int, count: int = 5) -> list[dict[str, Any]]:

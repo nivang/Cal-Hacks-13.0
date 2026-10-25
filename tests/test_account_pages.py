@@ -31,8 +31,8 @@ BOB_IP = "203.0.113.20"
 EVIL = "https://evil.example"
 SELLER = "0x1111111111111111111111111111111111111111"
 OTHER_SELLER = "0x2222222222222222222222222222222222222222"
-PAGES = [("/account", "Overview"), ("/account/payments", "Payments"), ("/account/tasks", "Tasks"),
-         ("/account/rules", "Settings"), ("/account/books", "Books")]
+PAGES = [("/account", "Overview"), ("/account/live", "Live"), ("/account/payments", "Payments"),
+         ("/account/tasks", "Tasks"), ("/account/rules", "Settings"), ("/account/books", "Books")]
 REASON = "Need 2026 email open-rate benchmarks for the Q3 report the owner asked for; DataCo is named in the brief."
 
 
@@ -126,7 +126,7 @@ async def serve(settings, **kw) -> AsyncIterator[Callable[..., httpx.AsyncClient
 @pytest.mark.parametrize("path, next_path", [
     ("/account", "/account"), ("/account/payments", "/account/payments"), ("/account/rules", "/account/rules"),
     ("/account/books", "/account/books"), ("/account/payments.csv", "/account/payments"),
-    ("/account/tasks", "/account/tasks"),
+    ("/account/tasks", "/account/tasks"), ("/account/live", "/account/live"),
 ])
 async def test_without_a_session_every_page_sends_you_to_sign_in_and_back(browser, path, next_path):
     response = await browser().get(path)
@@ -369,6 +369,36 @@ async def test_the_payments_page_lists_statuses_why_and_a_transaction_link(brows
     assert "up to the latest 20,000" in page
     assert 'href="https://sepolia.basescan.org/tx/0xtx' in page
     assert "Download CSV" in page and "/account/payments.csv" in page
+
+
+@pytest.mark.anyio
+async def test_the_live_page_shows_each_payment_step_by_step(browser, mailer, conn, pay_spy):
+    client = await signed_in(browser, mailer)
+    user = user_of(conn, client)
+    task = task_for(conn, user, "Brief me")
+    await pay_spy("http://x/paid", None, agent=user["agent"], reason="a real purchase")
+    attempt(conn, user["agent"], "http://x/scam", "from a page", pay_to=OTHER_SELLER)
+    held_for(conn, user, task)
+    page = (await client.get("/account/live")).text
+    assert f"Task {task}" in page and "Write the Q3 email report." in page
+    for text in ["Every request, as it happens", "Your agent", "pays if safe", "Policy", "Task check",
+                 "a real purchase", "Seller not approved", "Held for you", 'href="https://sepolia.basescan.org/tx/0xtx']:
+        assert text in page, text
+    assert page.count('<li class="lv-card"') == 3
+    assert 'lv-out is-ok' in page and 'lv-out is-stop' in page and 'lv-out is-wait' in page
+
+
+@pytest.mark.anyio
+async def test_the_live_tag_changes_when_a_payment_moves_and_stays_put_otherwise(browser, mailer, conn):
+    client = await signed_in(browser, mailer)
+    user = user_of(conn, client)
+    first, _ = books.fingerprint(conn, user["agent_id"])
+    assert books.fingerprint(conn, user["agent_id"])[0] == first
+    attempt_id = attempt(conn, user["agent"], "http://x/a")
+    second, _ = books.fingerprint(conn, user["agent_id"])
+    assert second != first
+    conn.execute("UPDATE payment_attempts SET status = 'failed' WHERE id = %s", (attempt_id,))
+    assert books.fingerprint(conn, user["agent_id"])[0] != second
 
 
 @pytest.mark.anyio

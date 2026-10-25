@@ -39,7 +39,7 @@
     </thead>
     <tbody class="divide-y divide-stone-100 align-top">
     {% for p in group.rows %}
-      <tr>
+      <tr data-card="{{ p.id }}">
         <td class="whitespace-nowrap px-3 py-2 text-stone-600">{{ p.created_at | when }}</td>
         <td class="px-3 py-2">{{ seller_cell(p) }}
           <details class="max-w-[14rem]"><summary class="cursor-pointer text-stone-600">Purchase details</summary><p class="mt-2 break-words">{{ p.reason or "No reason supplied." }}</p><p class="mt-2 break-all text-xs text-stone-500">{{ p.url }}</p><p class="mt-2">{% if p.tx_hash %}<a href="{{ tx_url }}{{ p.tx_hash }}" rel="noreferrer" class="break-all font-mono text-xs underline" title="{{ p.tx_hash }}">{{ p.tx_hash | short(8, 6) }}</a>{% endif %}</p></details></td>
