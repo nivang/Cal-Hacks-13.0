@@ -7,3 +7,7 @@ __pycache__/
 *.egg-info/
 build/
 dist/
+
+# The storefront build is committed so the demo needs no Node
+test_site/storefront/node_modules/
+!test_site/storefront/dist/
