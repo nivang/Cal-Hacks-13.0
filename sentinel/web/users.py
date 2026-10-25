@@ -274,8 +274,9 @@ def account_view(conn: db.Connection, user_id: str, include_spend: bool = True) 
 def sign_out_everywhere(conn: db.Connection, user_id: str) -> None:
     """End every session and every grant of this user at once, in one transaction.
 
-    Revokes each of the user's grants not revoked yet (all their tokens stop with it) and bumps session_epoch, so
-    every session cookie signed before now is refused. Other users are untouched. LookupError for an unknown user.
+    Revokes each of the user's grants not revoked yet (all their tokens stop with it), unlinks their texting handle
+    (texting.py) and bumps session_epoch, so every session cookie signed before now is refused. Other users are
+    untouched. LookupError for an unknown user.
     """
     uid = _require_id(user_id)
     with db.transaction(conn):
@@ -287,4 +288,5 @@ def sign_out_everywhere(conn: db.Connection, user_id: str) -> None:
         conn.execute(
             "UPDATE oauth_codes SET revoked_at = now() WHERE user_id = %s AND revoked_at IS NULL", (uid,)
         )
+        conn.execute("DELETE FROM phone_links WHERE user_id = %s", (uid,))  # texting the agent stops too
     log.info("signed out everywhere: user %s", uid)

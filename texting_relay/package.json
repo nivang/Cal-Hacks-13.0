@@ -1,0 +1,15 @@
+{
+  "name": "sentinel-texting-relay",
+  "devDependencies": {
+    "@types/bun": "1.3.2",
+    "typescript": "5.9.3"
+  },
+  "private": true,
+  "scripts": {
+    "start": "bun --env-file=../.env relay.ts"
+  },
+  "type": "module",
+  "dependencies": {
+    "spectrum-ts": "12.10.1"
+  }
+}

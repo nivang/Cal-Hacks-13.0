@@ -19,7 +19,8 @@ from urllib.parse import urlsplit
 
 SESSION_PURPOSES = frozenset({"session", "csrf", "pending-request", "consent-binding", "purchase-approval-state"})
 TOKEN_PURPOSES = frozenset(
-    {"magic-link", "auth-code", "access-token", "refresh-token", "refresh-rotation", "client-secret", "ip"}
+    {"magic-link", "auth-code", "access-token", "refresh-token", "refresh-rotation", "client-secret", "ip",
+     "phone-link"}
 )
 LOOPBACK_HOSTS = frozenset({"localhost", "127.0.0.1", "::1", "[::1]"})  # matches mcp's validate_issuer_url
 LINK_LIMIT_FACTOR_VAR = "SENTINEL_LINK_LIMIT_FACTOR"
