@@ -1901,8 +1901,8 @@ async def test_a_real_fastmcp_client_lists_and_calls_the_tools(app, browser, mai
     async with Client(transport) as mcp:
         tools = await mcp.list_tools()
         assert sorted(tool.name for tool in tools) == [
-            "apify_actor", "compare_prices", "discover", "find_services", "pay", "payment_status", "quote",
-            "resume_payment", "start_task",
+            "apify_actor", "apify_run_status", "compare_prices", "discover", "find_services", "pay", "payment_status",
+            "quote", "run_apify_actor", "start_task",
         ]
         task_id = (await mcp.call_tool("start_task", {"task": TASK})).structured_content["task_id"]
         result = await mcp.call_tool("pay", {"task_id": task_id, "url": PAY_URL, "reason": REASON})
@@ -1913,21 +1913,17 @@ async def test_a_real_fastmcp_client_lists_and_calls_the_tools(app, browser, mai
 
 
 @pytest.mark.anyio
-@pytest.mark.parametrize("mode", ["legacy", "auto"])
-@pytest.mark.parametrize("choice,expected", [("No", "DENIED"), ("Yes", "SETTLED")])
-async def test_native_purchase_approval_over_authenticated_http(
-    app, browser, mailer, pay_spy, conn, mode, choice, expected,
+@pytest.mark.parametrize("fresh,expected", [(False, "SETTLED"), (True, "BLOCKED")])
+async def test_an_unknown_seller_is_decided_by_sentinel_over_authenticated_http_without_asking(
+    app, browser, mailer, pay_spy, conn, fake_chain, fresh, expected,
 ):
-    from fastmcp.client.elicitation import ElicitResult
-
     _, tokens = await site_tokens(browser(), mailer)
     pay_spy.pay_to = "0x" + "a" * 40
-    prompts = []
+    if fresh:
+        fake_chain.new.add(pay_spy.pay_to)
 
-    async def answer(message, response_type, params, context):
-        prompts.append(message)
-        assert conn.execute("SELECT count(*) AS n FROM journal_entries").fetchone()["n"] == 0
-        return ElicitResult(action="accept", content={"value": choice})
+    async def answer(*args):
+        pytest.fail("Sentinel never asks the human about a payment")
 
     def factory(**kwargs):
         options = {key: value for key, value in kwargs.items() if value is not None}
@@ -1937,9 +1933,8 @@ async def test_native_purchase_approval_over_authenticated_http(
         f"{TEST_BASE_URL}/mcp", headers={"Authorization": f"Bearer {tokens['access_token']}"},
         httpx_client_factory=factory,
     )
-    async with Client(transport, elicitation_handler=answer, mode=mode) as client:
+    async with Client(transport, elicitation_handler=answer) as client:
         task_id = (await client.call_tool("start_task", {"task": TASK})).structured_content["task_id"]
         result = await client.call_tool("pay", {"task_id": task_id, "url": PAY_URL, "reason": REASON})
         assert result.structured_content["status"] == expected
-    assert len(prompts) == 1
     assert conn.execute("SELECT count(*) AS n FROM journal_entries").fetchone()["n"] == (expected == "SETTLED")

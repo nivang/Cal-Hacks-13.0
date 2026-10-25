@@ -3,9 +3,10 @@
 wallet_profile asks the Blockscout explorer (no key) for an address's activity, when it was first seen, and whether
 the explorer flags it as a scam; if the explorer cannot be reached it falls back to the public RPC node, which can
 only say whether the wallet was ever used. Two callers:
-  - approving a seller (account Rules page): a flagged, unused or brand new wallet needs a second click.
+  - the account Rules page shows each seller's history.
   - every payment (payments.payee_profile, cached for an hour in wallet_profiles): a flagged payee is blocked
-    (guard rule flagged_wallet) and one with no activity at all is held for the owner (intent rule unused_wallet).
+    (guard rule flagged_wallet) and one with no activity at all is blocked unless paid through escrow (intent rule
+    unused_wallet).
 """
 import json
 from dataclasses import asdict, dataclass

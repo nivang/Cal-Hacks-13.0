@@ -2,8 +2,8 @@
 
 guard.py asks fixed questions (approved seller, cap, budget, price, duplicate). This module asks whether a payment
 fits the mandate, the structured form of the owner's task (mandates.py stores it, judge.py writes it from the owner's
-words). It only runs after the guard says ALLOW, and it can only hold or block: the approved seller list stays the
-hard rule. Decisions come in tiers, fast to smart, and the first to decide wins:
+words). It only runs after the guard says ALLOW, and it can only block: Sentinel makes the final call, ALLOW or BLOCK,
+and nothing waits for the owner. Decisions come in tiers, fast to smart, and the first to decide wins:
   tier 0  rules on the mandate and the session, here, pure (about 1 ms):
             1. no_mandate      the task was revoked or has expired -> BLOCK
             seller attacks, checked against what the seller's own text says and what the catalog advertised:
@@ -11,28 +11,24 @@ hard rule. Decisions come in tiers, fast to smart, and the first to decide wins:
             b. unlisted_url    the agent says it found the URL through Sentinel's catalog, but it was never listed for
                                this task (made up, or fed to the agent) -> BLOCK
             c. bait_switch     the paywall asks more than the listing advertised, or pays a different wallet -> BLOCK
-            2. mandate_budget  spend under this task + amount above its budget (the provisional cap until the owner
-                               confirms the task) -> BLOCK
+            2. mandate_budget  spend under this task + amount above its budget -> BLOCK
             3. rate            too many payments under this task in the last minute -> BLOCK
             4. loop            this URL was already bought intent_loop_count times under this task -> BLOCK
-            5. allowance       the owner allowed this exact held payment (Allow once) -> ALLOW
-            5b. unused_wallet  the payee's wallet has no activity at all on Base Sepolia -> ESCALATE
-            5c. bad_deliveries this seller's deliveries failed Sentinel's delivery check bad_delivery_count times in
-                               the budget window (delivery.py; voided escrows and exact payments alike) -> ESCALATE
+            5. unused_wallet   the payee's wallet has no activity at all on Base Sepolia -> BLOCK
             6. split           this seller's spend in the split window + amount above the per payment cap, so one
-                               purchase may be cut into small ones -> ESCALATE
-            7. per_call        amount above intent_per_call_multiple x the task's per call estimate -> ESCALATE
-            8. big_share       one purchase above intent_big_share_percent of the task's budget -> ESCALATE
-            9. drift           most recent decisions under this task needed the judge -> ESCALATE
-            10. listing_changed the paywall describes a different product than the listing did -> ESCALATE
+                               purchase may be cut into small ones -> BLOCK
+            7. per_call        amount above intent_per_call_multiple x the task's per call estimate -> BLOCK
+            8. big_share       one purchase above intent_big_share_percent of the task's budget -> BLOCK
+            9. drift           most recent decisions under this task needed the judge -> BLOCK
+            10. listing_changed the paywall describes a different product than the listing did -> BLOCK
             11. pricier_pick   a price comparison under this task offered this URL and the job costs more than the
-                               cheapest buyable option it found: held, unless it is the recommended best value and
-                               the owner turned on auto buy -> ESCALATE
+                               cheapest buyable option it found: blocked, unless it is the recommended best value and
+                               the owner turned on auto buy -> BLOCK
   tier 1  a fast model check of the seller's description against the mandate (judge.classify), cached per task,
           seller and URL: fits -> ALLOW, off_task -> BLOCK, unsure -> tier 2. A link the agent found on a web page
           that the owner never named cannot be allowed here; it goes to tier 2.
   tier 2  the judge (judge.decide) sees the mandate, the payment, the agent's reason and this task's history, and
-          answers allow, block or escalate.
+          answers allow or block. A model failure blocks: a payment Sentinel cannot check is never made.
 payments.review_intent runs the tiers; everything it needs from the database arrives here as plain dataclasses, so
 the same inputs always give the same decision and test_intent.py is the answer key for tier 0.
 After tier 0, payments.review_intent also runs the optional local injection detector before any Claude cache hit.
@@ -45,9 +41,9 @@ from urllib.parse import urlsplit
 
 from sentinel import guard
 
-ALLOW, BLOCK, ESCALATE = guard.ALLOW, guard.BLOCK, "ESCALATE"
+ALLOW, BLOCK = guard.ALLOW, guard.BLOCK
 FITS, OFF_TASK, UNSURE = "fits", "off_task", "unsure"
-PROVISIONAL, CONFIRMED, REVOKED = "provisional", "confirmed", "revoked"
+REVOKED = "revoked"  # mandates.status; older rows may also say provisional or confirmed
 MAX_SELLER_TEXT = 500  # characters of seller supplied text kept per field
 MAX_HISTORY = 10  # earlier purchases the judge sees
 DISCOVERY = "sentinel discovery"  # the found_at of a URL the agent took from find_services
@@ -72,7 +68,7 @@ class Mandate:
     out_of_scope: tuple[str, ...]
     budget: int
     per_call: int | None  # a typical price per purchase, when the task implies one
-    status: str  # provisional, confirmed or revoked
+    status: str  # revoked, or live (confirmed; provisional on rows from before tasks were live at once)
     expired: bool
 
 
@@ -134,34 +130,25 @@ class Session:
     """Facts about this task so far, gathered by mandates.session_facts. Amounts are atomic units."""
 
     spend: int  # settled plus in flight under this task
-    last_minute: int  # payment attempts under this task in the last minute, any outcome
+    last_minute: int  # payment attempts under this task in the last minute, any outcome but refunded
     url_bought: int  # settled or in flight purchases of this URL under this task
     seller_window_spend: int  # settled plus in flight paid to this seller in the split window, any task
     recent_tiers: tuple[int, ...] = ()  # intent tiers of the latest decisions under this task, newest first
-    allowance_id: int | None = None  # an unused Allow once matching this payment
     purchases: tuple[Purchase, ...] = ()  # newest first
     listing: Listing | None = None  # what the catalog advertised for this URL under this task, if it was listed
     payee_unused: bool = False  # the payee's wallet never sent or received anything (payments.payee_profile)
     comparison: Comparison | None = None  # the latest price comparison under this task that offered this URL
-    seller_bad_deliveries: int = 0  # this agent's payments to this seller whose delivery failed the check, recently
 
 
 @dataclass(frozen=True)
 class Verdict:
-    """The intent decision: ALLOW, BLOCK or ESCALATE, which tier and rule decided, and a plain English reason."""
+    """The intent decision: ALLOW or BLOCK, which tier and rule decided, and a plain English reason."""
 
     decision: str
     tier: int
     rule: str
     detail: str
-    allowance_id: int | None = None
-
-
-def effective_budget(mandate: Mandate, policy: dict[str, int] = guard.POLICY) -> int:
-    """The task's budget, held to the provisional cap until the owner confirms the task."""
-    if mandate.status == CONFIRMED:
-        return mandate.budget
-    return min(mandate.budget, policy["intent_provisional_budget"])
+    ml: guard.MLScore | None = None  # the model score behind this verdict (injection_detector), if any
 
 
 def tier0(
@@ -208,17 +195,11 @@ def tier0(
             f"{payment.quote.pay_to}.",
         )
 
-    budget = effective_budget(mandate, policy)
-    if session.spend + amount > budget:
-        if mandate.status == CONFIRMED:
-            why = f"the task's budget of {guard.usd(budget)}"
-        else:
-            why = (f"the {guard.usd(budget)} a task may spend before the owner confirms it on their Sentinel account "
-                   "page")
+    if session.spend + amount > mandate.budget:
         return Verdict(
             BLOCK, 0, "mandate_budget",
             f"{guard.usd(session.spend)} was already spent on this task, so adding {guard.usd(amount)} would go "
-            f"over {why}.",
+            f"over the task's budget of {guard.usd(mandate.budget)}.",
         )
 
     if session.last_minute >= policy["intent_rate_per_minute"]:
@@ -234,62 +215,52 @@ def tier0(
             "payment_status instead of buying it again.",
         )
 
-    if session.allowance_id is not None:
-        return Verdict(ALLOW, 0, "allowance", "The owner allowed this payment.", session.allowance_id)
-
-    if session.payee_unused:
+    if session.payee_unused and not payment.quote.escrow:  # through escrow a bad delivery is refunded
         return Verdict(
-            ESCALATE, 0, "unused_wallet",
-            f"The seller's wallet {payment.quote.pay_to} has no activity at all on Base Sepolia. A real seller "
-            "usually has a history, so the owner decides.",
-        )
-
-    if session.seller_bad_deliveries >= policy["bad_delivery_count"]:
-        return Verdict(
-            ESCALATE, 0, "bad_deliveries",
-            f"This seller's last {session.seller_bad_deliveries} deliveries failed Sentinel's check (wrong or missing "
-            "data), so the owner decides.",
+            BLOCK, 0, "unused_wallet",
+            f"The seller's wallet {payment.quote.pay_to} has no activity at all on Base Sepolia and it does not "
+            "offer escrow. A real seller usually has a history.",
         )
 
     if session.seller_window_spend + amount > agent.per_payment_cap:
         minutes = policy["intent_split_window_s"] // 60
         return Verdict(
-            ESCALATE, 0, "split",
+            BLOCK, 0, "split",
             f"Paying this seller {guard.usd(amount)} more would make {guard.usd(session.seller_window_spend + amount)}"
             f" in {minutes} minutes, over the {guard.usd(agent.per_payment_cap)} per payment cap. That can be one "
-            "purchase cut into small ones, so the owner decides.",
+            "purchase cut into small ones.",
         )
 
     multiple = policy["intent_per_call_multiple"]
     if mandate.per_call is not None and amount > multiple * mandate.per_call:
         return Verdict(
-            ESCALATE, 0, "per_call",
+            BLOCK, 0, "per_call",
             f"{guard.usd(amount)} is more than {multiple}x the {guard.usd(mandate.per_call)} this task expects per "
-            "purchase, so the owner decides.",
+            "purchase.",
         )
 
     share = policy["intent_big_share_percent"]
-    if amount * 100 > share * mandate.budget:  # the task's real budget, not the cap before it is confirmed
+    if amount * 100 > share * mandate.budget:
         return Verdict(
-            ESCALATE, 0, "big_share",
+            BLOCK, 0, "big_share",
             f"{guard.usd(amount)} is more than {share}% of this task's {guard.usd(mandate.budget)} budget in one "
-            "purchase, so the owner decides.",
+            "purchase.",
         )
 
     window = session.recent_tiers[: policy["intent_drift_window"]]
     judged = sum(1 for tier in window if tier == 2)
     if len(window) >= policy["intent_drift_window"] and judged >= policy["intent_drift_judged"]:
         return Verdict(
-            ESCALATE, 0, "drift",
+            BLOCK, 0, "drift",
             f"{judged} of this task's last {len(window)} purchases were not clearly part of it. The purchases may be "
-            "drifting away from the goal, so the owner decides.",
+            "drifting away from the goal.",
         )
 
     if listing is not None and _differs(listing.description, payment.seller.description):
         return Verdict(
-            ESCALATE, 0, "listing_changed",
+            BLOCK, 0, "listing_changed",
             f"The catalog listed \"{clip(listing.description, 120)}\", but the paywall now sells "
-            f"\"{clip(payment.seller.description, 120)}\". The owner decides.",
+            f"\"{clip(payment.seller.description, 120)}\".",
         )
     return pricier_pick(payment, session, agent)
 
@@ -304,7 +275,7 @@ def url_key(url: str) -> str:
 
 
 def pricier_pick(payment: Payment, session: Session, agent: guard.Agent) -> Verdict | None:
-    """Rule 11: a purchase that costs more than the cheapest buyable option its price comparison found is held.
+    """Rule 11: a purchase that costs more than the cheapest buyable option its price comparison found is blocked.
 
     The recommended best value goes through without asking only when the owner turned on auto buy. The job is priced
     at the comparison's calls, so a purchase is compared like for like with the cheapest option.
@@ -320,16 +291,16 @@ def pricier_pick(payment: Payment, session: Session, agent: guard.Agent) -> Verd
         if agent.auto_buy_best_value:
             return None
         return Verdict(
-            ESCALATE, 0, "pricier_pick",
+            BLOCK, 0, "pricier_pick",
             f"Sentinel's price comparison picked this as the best value, but at {guard.usd(job)} for the job it costs "
             f"more than the cheapest option, {pick.cheapest_name or pick.cheapest_key} at "
-            f"{guard.usd(pick.cheapest_cost)}. {pick.explanation} The owner decides whether it is worth it.",
+            f"{guard.usd(pick.cheapest_cost)}. {pick.explanation} Auto buy is off, so buy the cheapest option.",
         )
     return Verdict(
-        ESCALATE, 0, "pricier_pick",
+        BLOCK, 0, "pricier_pick",
         f"At {guard.usd(job)} for the job this costs more than the cheapest option Sentinel's price comparison found, "
         f"{pick.cheapest_name or pick.cheapest_key} at {guard.usd(pick.cheapest_cost)}, and it is not the one Sentinel "
-        f"recommended ({pick.best_name or pick.best_key}). The owner decides.",
+        f"recommended ({pick.best_name or pick.best_key}).",
     )
 
 
@@ -366,19 +337,17 @@ def from_tier1(verdict: str, reason: str, page: bool) -> Verdict | None:
 
 
 def from_tier2(verdict: str, reason: str) -> Verdict:
-    """Map the judge's answer. Anything but allow or block is held for the owner."""
+    """Map the judge's answer. Only allow pays; anything else blocks."""
     if verdict == "allow":
         return Verdict(ALLOW, 2, "judge", reason)
-    if verdict == "block":
-        return Verdict(BLOCK, 2, "judge", f"This purchase does not serve the task. {reason}".strip())
-    return Verdict(ESCALATE, 2, "judge", f"The owner should decide this one. {reason}".strip())
+    return Verdict(BLOCK, 2, "judge", f"This purchase does not serve the task. {reason}".strip())
 
 
 def unavailable(tier: int) -> Verdict:
-    """The model could not be reached or gave no usable answer: hold the payment, never allow it."""
+    """The model could not be reached or gave no usable answer: block the payment, never allow it."""
     return Verdict(
-        ESCALATE, tier, "judge_unavailable",
-        "Sentinel could not check this payment against the task, so it is held for the owner.",
+        BLOCK, tier, "judge_unavailable",
+        "Sentinel could not check this payment against the task, so it did not pay. Try again in a minute.",
     )
 
 
@@ -405,7 +374,6 @@ def case(mandate: Mandate, payment: Payment, session: Session | None = None) -> 
             "out_of_scope": list(mandate.out_of_scope),
             "budget_usd": guard.usd(mandate.budget),
             "per_call_estimate_usd": guard.usd(mandate.per_call) if mandate.per_call is not None else None,
-            "confirmed_by_owner": mandate.status == CONFIRMED,
         },
         "payment": {
             "url": quote.url,
@@ -422,7 +390,7 @@ def case(mandate: Mandate, payment: Payment, session: Session | None = None) -> 
     if session is not None:
         document["task_so_far"] = {
             "spent_usd": guard.usd(session.spend),
-            "budget_left_usd": guard.usd(max(0, effective_budget(mandate) - session.spend)),
+            "budget_left_usd": guard.usd(max(0, mandate.budget - session.spend)),
             "earlier_purchases": [
                 {"url": p.url, "amount_usd": guard.usd(p.amount), "status": p.status, "reason": clip(p.reason, 200)}
                 for p in session.purchases[:MAX_HISTORY]

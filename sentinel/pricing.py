@@ -19,7 +19,7 @@ from typing import Literal
 
 from sentinel import guard
 
-OK = "OK"  # verdicts from compare.py: OK, BLOCKED, NEEDS_OWNER, FREE, UNREACHABLE (x402) or APIFY, BROWSE
+OK = "OK"  # verdicts from compare.py: OK, BLOCKED, FREE, UNREACHABLE (x402) or APIFY, BROWSE
 APIFY, BROWSE, FREE = "APIFY", "BROWSE", "FREE"
 Unit = Literal["call", "result"]
 
@@ -78,7 +78,7 @@ class Pick:
 
     @property
     def pricier(self) -> bool:
-        """True when the best buyable offer costs more than the cheapest buyable one: the owner decides."""
+        """True when the best buyable offer costs more than the cheapest buyable one: pay blocks it without auto buy."""
         return bool(self.best_buyable and self.cheapest_buyable and self.best_buyable.cost is not None
                     and self.cheapest_buyable.cost is not None
                     and self.best_buyable.cost > self.cheapest_buyable.cost)

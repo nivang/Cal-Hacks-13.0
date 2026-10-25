@@ -1,12 +1,14 @@
 """Answer key for the guard. Each planted case maps to one rule; the rest are edge cases."""
 import pytest
 
-from sentinel.guard import ALLOW, BLOCK, Agent, History, Quote, evaluate, imitates, usd
+from sentinel.guard import ALLOW, BLOCK, Agent, History, MLScore, Quote, evaluate, imitates, usd
 
 USDC = 1_000_000
 DATACO = "0x290E84b17Ce32cF9403f5D0218cB50ccdcc94781"
 SCAMMER = "0xSca000000000000000000000000000000000dead"
 AGENT = Agent("research-agent", per_payment_cap=10 * USDC, weekly_budget=50 * USDC)
+RISKY = MLScore("wallet_risk", 0.83, 0.5)
+SAFE = MLScore("wallet_risk", 0.12, 0.5)
 
 
 def quote(amount: int, pay_to: str = DATACO) -> Quote:
@@ -18,9 +20,9 @@ def history(**overrides) -> History:
     return History(**{**base, **overrides})
 
 
-def test_1_seller_unknown_scammer_blocks():
-    d = evaluate(AGENT, quote(9 * USDC, SCAMMER), history(seller_status=None))
-    assert (d.decision, d.rule) == (BLOCK, "seller")
+def test_1_seller_unknown_scammer_with_a_risky_wallet_blocks():
+    d = evaluate(AGENT, quote(9 * USDC, SCAMMER), history(seller_status=None, wallet_risk=RISKY))
+    assert (d.decision, d.rule, d.ml) == (BLOCK, "wallet_risk", RISKY)
 
 
 def test_2_cap_15_vs_10_blocks():
@@ -61,15 +63,16 @@ def test_blocked_seller_is_blocked():
     assert (d.decision, d.rule) == (BLOCK, "seller") and "blocked list" in d.detail
 
 
-def test_pending_seller_is_not_approved_so_it_blocks():
-    # Older rows may still say pending; only "approved" lets money move.
+def test_pending_seller_is_not_approved_so_the_wallet_model_judges_it():
+    # Older rows may still say pending; only "approved" skips the wallet model.
     d = evaluate(AGENT, quote(500_000), history(seller_status="pending"))
-    assert (d.decision, d.rule) == (BLOCK, "seller")
+    assert (d.decision, d.rule) == (BLOCK, "wallet_unknown")
+    assert evaluate(AGENT, quote(500_000), history(seller_status="pending", wallet_risk=SAFE)).decision == ALLOW
 
 
-def test_seller_rule_runs_before_cap():
-    # A $15 quote from an unknown seller is reported as a seller problem, not a cap problem.
-    assert evaluate(AGENT, quote(15 * USDC, SCAMMER), history(seller_status=None)).rule == "seller"
+def test_spending_rules_run_before_the_wallet_model():
+    # A $15 quote from an unknown seller is reported as a cap problem, whatever its wallet scores.
+    assert evaluate(AGENT, quote(15 * USDC, SCAMMER), history(seller_status=None, wallet_risk=SAFE)).rule == "cap"
 
 
 def test_amount_exactly_at_cap_and_budget_is_allowed():
@@ -100,6 +103,7 @@ def test_cap_budget_and_seller_messages_name_the_numbers():
     assert "$10.00" in evaluate(AGENT, quote(15 * USDC), history()).detail
     assert "$49.80" in evaluate(AGENT, quote(500_000), history(week_spend=49_800_000)).detail
     assert SCAMMER in evaluate(AGENT, quote(USDC, SCAMMER), history(seller_status=None)).detail
+    assert SCAMMER in evaluate(AGENT, quote(USDC, SCAMMER), history(seller_status="blocked")).detail
 
 
 def test_duplicate_message_points_at_the_earlier_request():
@@ -161,16 +165,40 @@ def test_seller_attacks_are_checked_first():
 def test_a_payee_the_explorer_flags_as_a_scam_is_blocked_even_when_approved():
     d = evaluate(AGENT, quote(500_000), history(payee_flagged=True))
     assert (d.decision, d.rule) == (BLOCK, "flagged_wallet") and DATACO in d.detail
-def test_unknown_seller_needs_human_approval_only_after_spending_checks_pass():
-    decision = evaluate(AGENT, quote(500_000), history(seller_status=None), interactive=True)
-    assert decision.decision == "APPROVAL_REQUIRED"
-    assert evaluate(AGENT, quote(15 * USDC), history(seller_status=None), interactive=True).rule == "cap"
-    assert evaluate(AGENT, quote(500_000), history(seller_status=None, week_spend=50 * USDC),
-                    interactive=True).rule == "budget"
-    assert evaluate(AGENT, quote(500_000), history(seller_status="blocked"),
-                    interactive=True, authorized=True).decision == BLOCK
 
 
-def test_one_time_approval_only_bypasses_unknown_seller_rule():
-    assert evaluate(AGENT, quote(500_000), history(seller_status=None), authorized=True).decision == ALLOW
-    assert evaluate(AGENT, quote(15 * USDC), history(seller_status=None), authorized=True).rule == "cap"
+# Unapproved sellers: Sentinel decides from the wallet risk model's score, never by asking anyone.
+
+def test_unapproved_seller_without_a_score_blocks():
+    d = evaluate(AGENT, quote(500_000, SCAMMER), history(seller_status=None))
+    assert (d.decision, d.rule, d.ml) == (BLOCK, "wallet_unknown", None) and SCAMMER in d.detail
+
+
+def test_unapproved_seller_scored_at_or_over_the_threshold_blocks_and_states_the_score():
+    facts = "2 token transfers, first seen 3 hours ago"
+    d = evaluate(AGENT, quote(500_000, SCAMMER), history(seller_status=None, wallet_risk=RISKY, wallet_summary=facts))
+    assert (d.decision, d.rule, d.ml) == (BLOCK, "wallet_risk", RISKY)
+    assert "0.83" in d.detail and "0.50" in d.detail and "first seen 3 hours ago" in d.detail
+    at = MLScore("wallet_risk", 0.5, 0.5)
+    assert evaluate(AGENT, quote(500_000, SCAMMER), history(seller_status=None, wallet_risk=at)).decision == BLOCK
+
+
+def test_unapproved_seller_below_the_threshold_is_paid_and_the_score_is_kept():
+    d = evaluate(AGENT, quote(500_000, SCAMMER), history(seller_status=None, wallet_risk=SAFE))
+    assert (d.decision, d.rule, d.ml) == (ALLOW, "wallet_risk_ok", SAFE) and "0.12" in d.detail
+
+
+def test_every_other_rule_wins_over_a_safe_wallet_score():
+    unknown = {"seller_status": None, "wallet_risk": SAFE}
+    assert evaluate(AGENT, quote(500_000), history(**unknown, week_spend=50 * USDC)).rule == "budget"
+    assert evaluate(AGENT, quote(500_000), history(**unknown, duplicate=True)).rule == "duplicate"
+    assert evaluate(AGENT, quote(2 * USDC), history(**unknown, seller_settled=(500_000,) * 5)).rule == "price_jump"
+    assert evaluate(AGENT, quote(500_000), history(**unknown, url_paid_to=("0xEarlier",))).rule == "payee_changed"
+    assert evaluate(AGENT, quote(500_000), history(**unknown, payee_flagged=True)).rule == "flagged_wallet"
+    assert evaluate(AGENT, quote(500_000, LOOKALIKE), history(**unknown, lookalike_of=DATACO)).rule == "lookalike"
+    assert evaluate(AGENT, quote(500_000), history(seller_status="blocked", wallet_risk=SAFE)).rule == "seller"
+
+
+def test_an_approved_seller_is_never_scored():
+    d = evaluate(AGENT, quote(500_000), history(wallet_risk=RISKY))
+    assert (d.decision, d.rule, d.ml) == (ALLOW, "clean", None)

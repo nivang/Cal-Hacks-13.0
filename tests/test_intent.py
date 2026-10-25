@@ -15,7 +15,7 @@ AGENT = guard.Agent("user-1", per_payment_cap=10_000_000, weekly_budget=50_000_0
 MANDATE = intent.Mandate(
     id=7, task_text="Write the Q3 email report with benchmarks from data.test", goal="Q3 email report",
     expected_types=("email benchmarks",), out_of_scope=("crypto signals",), budget=5_000_000, per_call=None,
-    status=intent.CONFIRMED, expired=False,
+    status="confirmed", expired=False,
 )
 PAYMENT = intent.Payment(QUOTE, "Need open rates for the Q3 report.", "owner", intent.Seller("Email benchmarks"))
 SESSION = intent.Session(spend=0, last_minute=0, url_bought=0, seller_window_spend=0)
@@ -39,24 +39,16 @@ def test_an_expired_task_blocks():
     assert v.decision == intent.BLOCK and v.rule == "no_mandate" and "expired" in v.detail
 
 
-def test_spend_past_a_confirmed_tasks_budget_blocks_and_at_the_budget_passes():
+def test_spend_past_the_tasks_budget_blocks_and_at_the_budget_passes():
     assert run(session=replace(SESSION, spend=4_500_000)) is None  # exactly $5.00 with this payment
     v = run(session=replace(SESSION, spend=4_500_001))
     assert v.decision == intent.BLOCK and v.rule == "mandate_budget" and "$5.00" in v.detail
 
 
-def test_a_provisional_task_spends_at_most_the_provisional_cap():
-    provisional = replace(MANDATE, status=intent.PROVISIONAL)
-    assert intent.effective_budget(provisional) == POLICY["intent_provisional_budget"] == 1_000_000
-    assert run(mandate=provisional, session=replace(SESSION, spend=500_000)) is None
-    v = run(mandate=provisional, session=replace(SESSION, spend=500_001))
-    assert v.rule == "mandate_budget" and "confirms it" in v.detail
-
-
-def test_a_small_task_budget_wins_over_the_provisional_cap():
-    small = replace(MANDATE, status=intent.PROVISIONAL, budget=300_000)
-    assert intent.effective_budget(small) == 300_000
-    assert run(mandate=small).rule == "mandate_budget"
+def test_an_older_provisional_task_spends_its_full_budget_with_no_confirm_step():
+    provisional = replace(MANDATE, status="provisional")
+    assert run(mandate=provisional, session=replace(SESSION, spend=4_500_000)) is None
+    assert run(mandate=provisional, session=replace(SESSION, spend=4_500_001)).rule == "mandate_budget"
 
 
 def test_too_many_requests_in_a_minute_blocks():
@@ -72,36 +64,42 @@ def test_buying_the_same_url_again_and_again_blocks_as_a_loop():
     assert v.decision == intent.BLOCK and v.rule == "loop" and "payment_status" in v.detail
 
 
-def test_an_owner_allowance_lets_a_held_payment_through_but_never_past_a_block():
-    allowed = replace(SESSION, allowance_id=42, seller_window_spend=9_800_000)  # would be split without it
-    v = run(session=allowed)
-    assert (v.decision, v.rule, v.allowance_id) == (intent.ALLOW, "allowance", 42)
-    assert run(mandate=replace(MANDATE, status=intent.REVOKED), session=allowed).decision == intent.BLOCK
-    assert run(session=replace(allowed, spend=4_800_000)).rule == "mandate_budget"
-
-
-def test_small_payments_to_one_seller_that_add_up_past_the_cap_are_held_as_a_split():
+def test_small_payments_to_one_seller_that_add_up_past_the_cap_are_blocked_as_a_split():
     assert run(session=replace(SESSION, seller_window_spend=9_500_000)) is None  # $10.00 exactly
     v = run(session=replace(SESSION, seller_window_spend=9_500_001))
-    assert v.decision == intent.ESCALATE and v.rule == "split" and "$10.00" in v.detail
+    assert v.decision == intent.BLOCK and v.rule == "split" and "$10.00" in v.detail
 
 
-def test_a_price_far_above_the_tasks_per_call_estimate_is_held():
+def test_a_price_far_above_the_tasks_per_call_estimate_is_blocked():
     priced = replace(MANDATE, per_call=100_000)  # $0.10 expected, 3x is $0.30
     assert run(mandate=priced, payment=replace(PAYMENT, quote=replace(QUOTE, amount=300_000))) is None
     v = run(mandate=priced)
-    assert v.decision == intent.ESCALATE and v.rule == "per_call" and "$0.10" in v.detail
+    assert v.decision == intent.BLOCK and v.rule == "per_call" and "$0.10" in v.detail
 
 
-def test_one_purchase_over_half_the_tasks_budget_is_held_but_an_allowance_lets_it_through():
+def test_one_purchase_over_half_the_tasks_budget_is_blocked():
     guide = replace(PAYMENT, quote=replace(QUOTE, amount=2_500_001))  # just over half of $5.00
     v = run(payment=guide)
-    assert v.decision == intent.ESCALATE and v.rule == "big_share" and "$5.00" in v.detail
+    assert v.decision == intent.BLOCK and v.rule == "big_share" and "$5.00" in v.detail
     assert run(payment=replace(PAYMENT, quote=replace(QUOTE, amount=2_500_000))) is None  # exactly half
-    assert run(payment=guide, session=replace(SESSION, allowance_id=9)).rule == "allowance"
 
 
-def test_many_judged_purchases_in_a_row_are_held_as_drift():
+def test_no_rule_says_the_owner_must_decide():
+    cases = [
+        run(session=replace(SESSION, seller_window_spend=99_000_000)),
+        run(mandate=replace(MANDATE, per_call=1)),
+        run(session=replace(SESSION, payee_unused=True)),
+        run(session=replace(SESSION, seller_bad_deliveries=9)),
+        run(session=replace(SESSION, recent_tiers=(2,) * 9)),
+        run(session=replace(SESSION, comparison=PICK)),
+        intent.unavailable(1),
+        intent.from_tier2("escalate", "Unusual."),
+    ]
+    for v in cases:
+        assert v.decision == intent.BLOCK and "owner decides" not in v.detail and "held" not in v.detail
+
+
+def test_many_judged_purchases_in_a_row_are_blocked_as_drift():
     window, judged = POLICY["intent_drift_window"], POLICY["intent_drift_judged"]
     some = (2,) * (judged - 1) + (1,) * (window - judged + 1)
     assert run(session=replace(SESSION, recent_tiers=some)) is None
@@ -110,7 +108,7 @@ def test_many_judged_purchases_in_a_row_are_held_as_drift():
     assert run(session=replace(SESSION, recent_tiers=(2,) * (window - 1))) is None  # not enough history yet
 
 
-def test_rules_fire_in_order_blocks_before_holds():
+def test_rules_fire_in_order():
     everything = replace(SESSION, spend=4_900_000, last_minute=99, url_bought=99, seller_window_spend=99_000_000)
     assert run(session=everything).rule == "mandate_budget"
     assert run(session=replace(everything, spend=0)).rule == "rate"
@@ -143,16 +141,16 @@ def test_tier1_never_allows_a_link_from_a_page_but_still_blocks_one():
     assert intent.from_tier1("off_task", "No.", page=True).decision == intent.BLOCK
 
 
-def test_tier2_maps_allow_block_and_holds_anything_else():
+def test_tier2_maps_allow_and_blocks_anything_else():
     assert intent.from_tier2("allow", "Fine.").decision == intent.ALLOW
     assert intent.from_tier2("block", "No.").decision == intent.BLOCK
     for other in ("escalate", "approve", ""):
-        assert intent.from_tier2(other, "?").decision == intent.ESCALATE
+        assert intent.from_tier2(other, "?").decision == intent.BLOCK
 
 
-def test_an_unreachable_judge_holds_the_payment():
+def test_an_unreachable_judge_blocks_the_payment():
     v = intent.unavailable(2)
-    assert v.decision == intent.ESCALATE and v.rule == "judge_unavailable" and v.tier == 2
+    assert v.decision == intent.BLOCK and v.rule == "judge_unavailable" and v.tier == 2
 
 
 def test_the_judge_sees_quoted_fields_and_history_only_at_tier2():
@@ -222,11 +220,11 @@ def test_asking_more_than_the_listing_or_paying_another_wallet_is_a_bait_and_swi
     assert run(session=replace(SESSION, listing=replace(LISTING, pay_to=DATACO.lower()))) is None
 
 
-def test_a_paywall_selling_something_else_than_its_listing_is_held():
+def test_a_paywall_selling_something_else_than_its_listing_is_blocked():
     sim = replace(LISTING, description="Prepaid SIM card for Japan.")
     v = run(payment=replace(PAYMENT, seller=intent.Seller("Crypto wallet top up voucher.")),
             session=replace(SESSION, listing=sim))
-    assert (v.decision, v.rule) == (intent.ESCALATE, "listing_changed") and "SIM card" in v.detail
+    assert (v.decision, v.rule) == (intent.BLOCK, "listing_changed") and "SIM card" in v.detail
     same = replace(LISTING, description="  email   BENCHMARKS ")
     assert run(payment=replace(PAYMENT, seller=intent.Seller("Email benchmarks")),
                session=replace(SESSION, listing=same)) is None
@@ -238,17 +236,15 @@ def test_seller_attacks_come_before_budget_rules_but_after_a_revoked_task():
     assert run(mandate=replace(MANDATE, status=intent.REVOKED), payment=attack).rule == "no_mandate"
 
 
-def test_a_payee_wallet_with_no_activity_is_held_but_an_allowance_lets_it_through():
+def test_a_payee_wallet_with_no_activity_is_blocked():
     v = run(session=replace(SESSION, payee_unused=True))
-    assert (v.decision, v.rule) == (intent.ESCALATE, "unused_wallet") and DATACO in v.detail
-    assert run(session=replace(SESSION, payee_unused=True, allowance_id=3)).rule == "allowance"
+    assert (v.decision, v.rule) == (intent.BLOCK, "unused_wallet") and DATACO in v.detail
 
 
-def test_a_seller_whose_deliveries_keep_failing_is_held():
+def test_a_seller_whose_deliveries_keep_failing_is_blocked():
     assert run(session=replace(SESSION, seller_bad_deliveries=1)) is None
     v = run(session=replace(SESSION, seller_bad_deliveries=2))
-    assert (v.decision, v.rule) == (intent.ESCALATE, "bad_deliveries") and "2 deliveries" in v.detail
-    assert run(session=replace(SESSION, seller_bad_deliveries=2, allowance_id=3)).rule == "allowance"
+    assert (v.decision, v.rule) == (intent.BLOCK, "bad_deliveries") and "2 deliveries" in v.detail
 
 
 # pricier_pick: a price comparison under this task found something cheaper
@@ -259,9 +255,9 @@ PICK = intent.Comparison(
 )
 
 
-def test_the_recommended_pricier_pick_is_held_for_the_owner_with_the_reason():
+def test_the_recommended_pricier_pick_is_blocked_with_the_reason():
     v = run(session=replace(SESSION, comparison=PICK))
-    assert (v.decision, v.tier, v.rule) == (intent.ESCALATE, 0, "pricier_pick")
+    assert (v.decision, v.tier, v.rule) == (intent.BLOCK, 0, "pricier_pick")
     assert "best value" in v.detail and "CheapCo at $0.10" in v.detail and "scoring 90" in v.detail
 
 
@@ -269,19 +265,19 @@ def test_auto_buy_lets_the_recommended_pricier_pick_through():
     assert run(session=replace(SESSION, comparison=PICK), agent=replace(AGENT, auto_buy_best_value=True)) is None
 
 
-def test_auto_buy_still_holds_a_pricier_offer_sentinel_did_not_recommend():
+def test_auto_buy_still_blocks_a_pricier_offer_sentinel_did_not_recommend():
     other = replace(PICK, best_key="http://other.test/email", best_name="Other")
     v = run(session=replace(SESSION, comparison=other), agent=replace(AGENT, auto_buy_best_value=True))
     assert v.rule == "pricier_pick" and "not the one Sentinel recommended (Other)" in v.detail
 
 
-def test_buying_the_cheapest_option_or_paying_no_more_than_it_is_not_held():
+def test_buying_the_cheapest_option_or_paying_no_more_than_it_is_not_blocked():
     assert run(session=replace(SESSION, comparison=replace(PICK, cheapest_key=QUOTE.url))) is None
     assert run(session=replace(SESSION, comparison=replace(PICK, cheapest_cost=QUOTE.amount))) is None
 
 
 def test_the_job_is_priced_at_the_comparisons_calls():
-    # $0.50 a call x 3 calls = $1.50 against a $1.20 cheapest job: held. Against $1.50: not.
+    # $0.50 a call x 3 calls = $1.50 against a $1.20 cheapest job: blocked. Against $1.50: not.
     assert run(session=replace(SESSION, comparison=replace(PICK, calls=3, cheapest_cost=1_200_000))).rule == \
         "pricier_pick"
     assert run(session=replace(SESSION, comparison=replace(PICK, calls=3, cheapest_cost=1_500_000))) is None
@@ -293,16 +289,11 @@ def test_the_comparison_matches_the_product_whatever_query_the_agent_sets():
     assert intent.url_key("http://a.test/x?q=1#top") == "http://a.test/x"
 
 
-def test_an_allow_once_wins_over_pricier_pick():
-    v = run(session=replace(SESSION, comparison=PICK, allowance_id=12))
-    assert v.decision == intent.ALLOW and v.rule == "allowance"
-
-
-def test_no_comparison_or_one_without_a_cheapest_option_is_not_held():
+def test_no_comparison_or_one_without_a_cheapest_option_is_not_blocked():
     assert run() is None
     assert run(session=replace(SESSION, comparison=replace(PICK, cheapest_key=None, cheapest_cost=None))) is None
 
 
-def test_a_security_hold_still_comes_before_pricier_pick():
+def test_a_security_block_still_comes_before_pricier_pick():
     v = run(session=replace(SESSION, comparison=PICK, payee_unused=True))
     assert v.rule == "unused_wallet"

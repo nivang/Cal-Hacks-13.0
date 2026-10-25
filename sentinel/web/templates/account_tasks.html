@@ -4,16 +4,14 @@
 {% from "account_loading_macros.html" import placeholder %}
 {% block content %}
 <h1 class="text-2xl font-semibold tracking-tight">Tasks</h1>
-<p class="mt-1 text-sm text-stone-600">Review your agent’s tasks and approve anything waiting for you.</p>
+<p class="mt-1 text-sm text-stone-600">What your agent is working on, what each task has spent, and what Sentinel is still checking.</p>
 <div class="mt-6">
 {{ banners(done, done_text, error) }}
 {% if not loading and not agent %}
 {{ no_wallet() }}
 {% else %}
 
-{% if loading %}{{ placeholder("tasks_escrow", "Escrow deliveries") }}{% else %}{% include "account_sections/tasks_escrow.html" %}{% endif %}
-
-{% if loading %}{{ placeholder("tasks_held", "Held for you") }}{% else %}{% include "account_sections/tasks_held.html" %}{% endif %}
+{% if loading %}{{ placeholder("tasks_escrow", "In escrow") }}{% else %}{% include "account_sections/tasks_escrow.html" %}{% endif %}
 
 {% if loading %}{{ placeholder("tasks_list", "Your agent’s tasks") }}{% else %}{% include "account_sections/tasks_list.html" %}{% endif %}
 

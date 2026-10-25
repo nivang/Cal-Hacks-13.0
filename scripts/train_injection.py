@@ -176,7 +176,7 @@ def train(directory: Path, output: Path, max_fpr: float, seed: int) -> dict:
                      f"{m['recall']:.1%} | {m['false_positive_rate']:.1%} |")
     lines += ["", "Both models share TF-IDF features fitted only on training text. Fixed initial model settings; "
               "no hyperparameter search. Regex evaluated on the same full validation texts.", "",
-              "Artifacts remain offline. No Sentinel payment behavior has changed."]
+              "Ship a run by copying its runtime files to sentinel/models/injection/ (docs/injection-data.md)."]
     (output / "report.md").write_text("\n".join(lines) + "\n")
     print("\n".join(lines))
     print(f"\nArtifacts: {output}")

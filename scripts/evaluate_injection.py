@@ -41,7 +41,9 @@ def evaluate(experiment: Path, splits: Path) -> Path:
     matrix = vectorizer.transform([r["text"] for r in rows])
     logistic = joblib.load(experiment / "logistic_regression.joblib")
     thresholds = json.loads((experiment / "thresholds.json").read_text())
-    models = {"xgboost": detector.model, "logistic_regression": logistic}
+    # XGBoost is scored through the runtime's plain Python tree evaluator, exactly as Sentinel scores it.
+    predict = {"xgboost": lambda x: np.array(detector.score_matrix(x)),
+               "logistic_regression": lambda x: logistic.predict_proba(x)[:, 1]}
     predictions = [dict(text=r["text"], label=r["label"], group=r["split_group"]) for r in rows]
     results = {}
     for name in ("xgboost", "logistic_regression", "regex"):
@@ -49,7 +51,7 @@ def evaluate(experiment: Path, splits: Path) -> Path:
             scores = np.array([int(bool(intent.INJECTION.search(r["text"]))) for r in rows])
             threshold = 0.5
         else:
-            scores = models[name].predict_proba(matrix)[:, 1]
+            scores = predict[name](matrix)
             threshold = thresholds[name]
         latency = []
         for row in rows:
@@ -57,7 +59,7 @@ def evaluate(experiment: Path, splits: Path) -> Path:
             if name == "regex":
                 intent.INJECTION.search(row["text"])
             else:
-                models[name].predict_proba(vectorizer.transform([row["text"]]))
+                predict[name](vectorizer.transform([row["text"]]))
             latency.append(1000 * (perf_counter() - started))
         results[name] = dict(metrics=metrics(labels, scores, threshold),
                              latency_ms=dict(median=float(np.median(latency)),

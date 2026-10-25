@@ -1,10 +1,11 @@
 """Tests for the pieces of payments.py that decide and record, with no network."""
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
 import pytest
 from conftest import ASSET, DATACO, NETWORK, SCAMMER
 
-from sentinel import ledger, payments
+from sentinel import chain, ledger, payments
 from sentinel.guard import Quote
 
 
@@ -48,13 +49,42 @@ def test_authorize_blocks_over_cap_and_still_writes_a_row(conn):
     assert "$15.00" in e.value.detail
 
 
-def test_authorize_blocks_an_unlisted_seller_and_signs_nothing(conn):
+def test_authorize_blocks_an_unlisted_seller_whose_wallet_could_not_be_read(conn):
     with pytest.raises(payments.PaymentRejected) as e:
         payments.authorize(conn, "research-agent", None, quote(amount=9_000_000, pay_to=SCAMMER, url="http://x/premium"))
     row = conn.execute("SELECT id, status, decision FROM payment_attempts").fetchone()
     assert (row["status"], row["decision"]) == ("blocked", "BLOCK")
-    assert e.value.attempt_id == row["id"] and e.value.rule == "seller"
-    assert "Only the owner can add sellers" in e.value.detail
+    assert e.value.attempt_id == row["id"] and e.value.rule == "wallet_unknown"
+    assert "approved list" in e.value.detail
+
+
+def profile(**changes) -> chain.WalletProfile:
+    base = {"transactions": 5, "token_transfers": 120, "first_seen": None, "flagged": False, "source": "explorer"}
+    return chain.WalletProfile(**{**base, **changes})
+
+
+def test_authorize_pays_an_unlisted_seller_the_wallet_model_scores_safe_and_records_the_score(conn):
+    attempt_id = payments.authorize(conn, "research-agent", "why", quote(pay_to=SCAMMER), profile=profile())
+    row = conn.execute("SELECT status, rule_fired, ml_model, ml_score, ml_threshold FROM payment_attempts"
+                       " WHERE id = %s", (attempt_id,)).fetchone()
+    assert row["status"] == "approved" and row["rule_fired"].startswith("wallet_risk_ok: ")
+    assert (row["ml_model"], float(row["ml_score"]), float(row["ml_threshold"])) == ("wallet_risk", 0.1, 0.5)
+
+
+def test_authorize_blocks_an_unlisted_seller_the_wallet_model_scores_risky_and_records_the_score(conn):
+    young = profile(token_transfers=2, transactions=0, first_seen=datetime.now(timezone.utc) - timedelta(hours=3))
+    with pytest.raises(payments.PaymentRejected) as e:
+        payments.authorize(conn, "research-agent", "why", quote(pay_to=SCAMMER), profile=young)
+    assert e.value.rule == "wallet_risk" and "0.80" in e.value.detail and "first seen 3 hours ago" in e.value.detail
+    row = conn.execute("SELECT status, ml_model, ml_score FROM payment_attempts WHERE id = %s",
+                       (e.value.attempt_id,)).fetchone()
+    assert (row["status"], row["ml_model"], float(row["ml_score"])) == ("blocked", "wallet_risk", 0.8)
+
+
+def test_an_approved_seller_is_never_scored(conn):
+    attempt_id = payments.authorize(conn, "research-agent", "why", quote(), profile=profile())
+    row = conn.execute("SELECT rule_fired, ml_model FROM payment_attempts WHERE id = %s", (attempt_id,)).fetchone()
+    assert row["rule_fired"].startswith("clean: ") and row["ml_model"] is None
 
 
 def test_authorize_blocks_a_second_identical_payment_in_flight(conn):
@@ -79,4 +109,4 @@ def test_repeating_an_unlisted_seller_logs_each_block_and_takes_no_lock(conn):
             payments.authorize(conn, "research-agent", None, quote(amount=9_000_000, pay_to=SCAMMER, url="http://x/premium"))
         ids.append(e.value.attempt_id)
     assert conn.execute("SELECT COUNT(*) AS n FROM payment_attempts WHERE status = 'blocked'").fetchone()["n"] == 2
-    assert ids[0] != ids[1] and all(e.value.rule == "seller" for _ in ids)
+    assert ids[0] != ids[1] and all(e.value.rule == "wallet_unknown" for _ in ids)

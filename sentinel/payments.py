@@ -1,21 +1,22 @@
 """The x402 payment flow with the guard in the middle. This is the only code that signs.
 
 pay_for() asks the seller for a price, builds a Quote, lets guard.evaluate decide, and only then
-signs with the calling user's wallet and pays. Every outcome is written to the attempt log, and a settled
-payment is posted to the ledger. Payment details (payTo, amount) come from the seller's quote and are
-authorized by the approved seller list, never by text the agent read online. Which wallet signs is
+signs with the calling user's wallet and pays. Sentinel makes the final call on every payment, ALLOW or BLOCK; nothing
+waits for a human. Every outcome is written to the attempt log, and a settled payment is posted to the ledger. Payment
+details (payTo, amount) come from the seller's quote, never from text the agent read online. Which wallet signs is
 decided in wallets.py; this file only sees the x402 signer interface.
 
-A payment made under a task (Task, from the MCP pay tool) is also checked against the owner's intent once the guard
-allows it: review_intent runs intent.py's tiers (rules, then the judge's fast check, then the judge) and may block
-the payment or hold it for the owner (PaymentHeld). Without a task (a direct pay_for call, not the MCP tool) only
-the guard runs.
+Before the guard runs, the payee's Base Sepolia profile is read (chain.cached_profile); a seller not on the approved
+list is paid only through escrow (guard rule seller_escrow). A payment made under a task (Task, from the MCP pay
+tool) is also checked against the owner's intent once the guard allows it: review_intent runs intent.py's tiers
+(rules, the injection screen, then the judge's fast check,
+then the judge) and may block it. Without a task (a direct pay_for call, not the MCP tool) only the guard runs.
 
 When the seller offers x402 auth-capture with Sentinel as operator (escrow.check_terms), the money is held in escrow
 instead of paid outright: _pay_escrow holds it, fetches the data, checks the delivery (delivery.py, then the judge),
-and captures (seller paid), voids (buyer refunded) or leaves it held for the owner. settle_held and sweep finish held
-payments later. Sellers without escrow are paid with exact as before; their deliveries are checked by the rules and
-recorded, but nothing can be given back.
+and captures (seller paid) only when the delivery passes; anything else is voided (buyer refunded). sweep retries
+captures and voids that failed onchain. Sellers without escrow are paid with exact as before; their deliveries are
+checked by the rules and recorded, but nothing can be given back.
 """
 import asyncio
 import logging
@@ -42,7 +43,6 @@ from sentinel import (
     intent,
     judge,
     ledger,
-    link_approvals,
     live,
     mandates,
 )
@@ -59,8 +59,8 @@ class PayResult:
 
     settled is True only when the seller returned the data and the payment was booked. A free resource
     has no quote and no attempt_id, since nothing was paid or recorded. An escrowed payment says what became of the
-    hold (escrow: captured, voided, held for the owner, or processing while Sentinel retries) and the delivery check's
-    verdict; a voided or held one carries no body, since the seller is not paid for it.
+    hold (escrow: captured, voided, or processing while Sentinel retries) and the delivery check's verdict; a voided
+    one carries no body, since the seller is not paid for it.
     """
 
     status: int
@@ -75,7 +75,7 @@ class PayResult:
 
 
 class PaymentRejected(Exception):
-    """The guard blocked the payment, or the seller offered nothing we can pay. Nothing was signed.
+    """The guard or intent review blocked the payment, or the seller offered nothing we can pay. Nothing was signed.
 
     rule is the guard rule that fired, detail is the plain English reason, attempt_id is the blocked row in
     the log, and related_id is the earlier attempt a duplicate block refers to. str() is "rule: detail".
@@ -85,10 +85,6 @@ class PaymentRejected(Exception):
         super().__init__(f"{rule}: {detail}")
         self.rule, self.detail = rule, detail
         self.attempt_id, self.related_id = attempt_id, related_id
-
-
-class PaymentHeld(PaymentRejected):
-    """Intent binding held the payment for the owner (ESCALATE). Nothing was signed; the owner may Allow once."""
 
 
 @dataclass(frozen=True)
@@ -114,7 +110,7 @@ class Review:
         return {
             "mandate_id": self.mandate_id, "found_at": self.found_at, "seller_description": self.seller_description,
             "intent_tier": self.verdict.tier, "intent_verdict": self.verdict.decision,
-            "intent_reason": self.verdict.detail,
+            "intent_reason": self.verdict.detail, **(self.verdict.ml.columns() if self.verdict.ml else {}),
         }
 
 
@@ -128,14 +124,6 @@ class PaymentFailed(Exception):
     def __init__(self, message: str, attempt_id: int, tx_hash: str | None = None):
         super().__init__(message)
         self.attempt_id, self.tx_hash = attempt_id, tx_hash
-
-
-class ApprovalRequired(Exception):
-    """A quote passed spending checks, but needs a human decision before signing."""
-
-    def __init__(self, attempt_id: int):
-        self.attempt_id = attempt_id
-        super().__init__("This purchase needs the user's approval.")
 
 
 def select_requirement(payment_required: Any, operator: str | None = None, now: int | None = None) -> Any:
@@ -172,6 +160,7 @@ def build_quote(url: str, requirement: Any) -> guard.Quote:
         asset=requirement.asset,
         network=requirement.network,
         timeout_s=requirement.max_timeout_seconds,
+        escrow=getattr(requirement, "scheme", "exact") == escrow.SCHEME,
     )
     if quote.amount <= 0 or quote.timeout_s <= 0:
         raise PaymentRejected("quote", "The seller returned an invalid amount or expiry.")
@@ -182,9 +171,17 @@ def decide(
     conn: db.Connection, agent: str, quote: guard.Quote, profile: chain.WalletProfile | None = None,
 ) -> guard.Decision:
     """Run the guard on this quote with the ledger facts it needs (and the payee's wallet profile, when known)."""
-    history = guard.History(**attempts.load_history(conn, agent, asdict(quote), guard.POLICY),
-                            payee_flagged=bool(profile and profile.flagged))
-    return guard.evaluate(guard.Agent(**attempts.load_agent(conn, agent)), quote, history)
+    return guard.evaluate(guard.Agent(**attempts.load_agent(conn, agent)), quote,
+                          guard_history(conn, agent, quote, profile))
+
+
+def guard_history(conn: db.Connection, agent: str, quote: guard.Quote,
+                  profile: chain.WalletProfile | None) -> guard.History:
+    """The ledger facts for this quote, plus the payee's scam flag and, for a seller not on the approved list, its
+    wallet history in a few words for the guard's reason."""
+    facts = attempts.load_history(conn, agent, asdict(quote), guard.POLICY)
+    summary = profile.summary() if profile is not None and facts["seller_status"] != "approved" else None
+    return guard.History(**facts, payee_flagged=bool(profile and profile.flagged), wallet_summary=summary)
 
 
 async def payee_profile(conn: db.Connection, quote: guard.Quote) -> chain.WalletProfile | None:
@@ -198,12 +195,11 @@ def record(
 ) -> int:
     """Record the attempt for this decision (and intent review). Returns the approved attempt id, or raises.
 
-    A guard block or an intent block leaves a blocked row and raises PaymentRejected; an intent hold leaves an
-    escalated row and raises PaymentHeld. Either way the ledger shows what did not happen, and the exception carries
-    the row's id. An approval that used the owner's Allow once spends it.
+    A guard block or an intent block leaves a blocked row and raises PaymentRejected, so the ledger shows what did not
+    happen, and the exception carries the row's id.
     """
     quote_dict = asdict(quote)
-    facts = review.columns() if review else None
+    facts = with_score(review.columns() if review else None, decision, review)
     rule = f"{decision.rule}: {decision.detail}"
 
     if decision.decision == guard.BLOCK:
@@ -213,21 +209,16 @@ def record(
         raise PaymentRejected(decision.rule, decision.detail, blocked_id, decision.related_id)
     if review is not None and review.verdict.decision != intent.ALLOW:
         verdict = review.verdict
-        held = verdict.decision == intent.ESCALATE
         attempt_id = attempts.record_attempt(
-            conn, agent, quote.url, reason, quote_dict, "escalated" if held else "blocked", verdict.decision,
-            f"{verdict.rule}: {verdict.detail}", facts,
+            conn, agent, quote.url, reason, quote_dict, "blocked", guard.BLOCK, f"{verdict.rule}: {verdict.detail}",
+            facts,
         )
-        raise (PaymentHeld if held else PaymentRejected)(verdict.rule, verdict.detail, attempt_id)
+        raise PaymentRejected(verdict.rule, verdict.detail, attempt_id)
     try:
         with db.transaction(conn):  # own savepoint, so a lock clash does not poison an outer transaction
-            approved = attempts.record_attempt(
+            return attempts.record_attempt(
                 conn, agent, quote.url, reason, quote_dict, "approved", decision.decision, rule, facts
             )
-            allowance = review.verdict.allowance_id if review else None
-            if allowance is not None and not mandates.use_allowance(conn, allowance, approved):
-                raise db.UniqueViolation  # another call used this Allow once first
-            return approved
     except db.UniqueViolation:
         # Another call already holds the in flight lock for this exact payment.
         live_id = attempts.find_live_id(conn, agent, quote_dict)
@@ -240,85 +231,49 @@ def record(
 
 def authorize(
     conn: db.Connection, agent: str, reason: str | None, quote: guard.Quote,
-    *, interactive: bool = False, approval_id: int | None = None,
-    review: Review | None = None, profile: chain.WalletProfile | None = None, task: Task | None = None,
+    *, review: Review | None = None, profile: chain.WalletProfile | None = None, task: Task | None = None,
     seller: intent.Seller | None = None,
 ) -> int:
-    """Admit one payment under the agent lock, or record a block / pending approval before raising.
+    """Admit one payment under the agent lock, or record a block before raising PaymentRejected.
 
     A block leaves a row in the log so the ledger shows what did not happen, and the exception carries its id.
+    profile is the payee's wallet profile, read before the lock (a network call), for the flag and history checks.
     """
     quote_dict = asdict(quote)
     with db.transaction(conn):
-        # Serializes budget checks and one-time consumption across processes, including different URLs.
+        # Serializes budget checks across processes, including different URLs.
         conn.execute("SELECT id FROM agents WHERE name = %s FOR UPDATE", (agent,)).fetchone()
-        link_approvals.expire(conn, agent)
-        original = link_approvals.get(conn, agent, approval_id) if approval_id else None
-        if approval_id and (original is None or original["status"] != "authorized"):
-            attempt_id = approval_id
-            decision = guard.Decision(guard.BLOCK, "approval", "That approval is unavailable, expired or already used.")
-        else:
-            history = guard.History(**attempts.load_history(conn, agent, quote_dict, guard.POLICY, approval_id),
-                                    payee_flagged=bool(profile and profile.flagged))
-            decision = guard.evaluate(
-                guard.Agent(**attempts.load_agent(conn, agent)), quote, history,
-                interactive=interactive, authorized=original is not None,
-            )
-            if original and (original["quote_json"] != quote_dict or original["reason"] != reason):
-                decision = guard.Decision(
-                    guard.BLOCK, "quote_changed", "The quote changed. A new approval is required.",
-                )
-            if original and task and (original.get("mandate_id") != task.mandate_id
-                                      or original.get("found_at") != task.found_at):
-                decision = guard.Decision(guard.BLOCK, "approval", "The approval belongs to another task.")
-            if decision.decision != guard.BLOCK and task is not None:
-                review = _recheck_task(conn, agent, quote, reason or "", task, review, profile, seller)
-            if quote.amount <= 0 or quote.timeout_s <= 0:
-                decision = guard.Decision(guard.BLOCK, "quote", "The seller returned an invalid amount or expiry.")
-            rule = f"{decision.rule}: {decision.detail}"
-            statuses = {guard.BLOCK: "blocked", guard.APPROVAL_REQUIRED: "pending", guard.ALLOW: "approved"}
-            status = statuses[decision.decision]
-            facts = review.columns() if review else ({"mandate_id": task.mandate_id, "found_at": task.found_at}
-                                                     if task else {})
-            if review and decision.decision != guard.BLOCK and review.verdict.decision != intent.ALLOW:
-                verdict = review.verdict
-                status = "escalated" if verdict.decision == intent.ESCALATE else "blocked"
-                decision = guard.Decision(guard.BLOCK, verdict.rule, verdict.detail)
-                rule = f"{verdict.rule}: {verdict.detail}"
-
-            if original:
-                attempt_id = int(original["id"])
-                conn.execute(
-                    "UPDATE payment_attempts SET status = %s, decision = %s, rule_fired = %s WHERE id = %s",
-                    (status, decision.decision, rule, attempt_id),
-                )
-                for column, value in facts.items():
-                    # Names come only from Review.columns / fixed task facts.
-                    if column not in attempts.INTENT_COLUMNS:
-                        raise ValueError("Unknown intent column")
-                    conn.execute(f"UPDATE payment_attempts SET {column} = %s WHERE id = %s", (value, attempt_id))
-            else:
-                attempt_id = attempts.record_attempt(conn, agent, quote.url, reason, quote_dict,
-                                                     status, decision.decision, rule, facts)
-            if status == "approved" and review and review.verdict.allowance_id is not None:
-                if not mandates.use_allowance(conn, review.verdict.allowance_id, attempt_id):
-                    decision = guard.Decision(guard.BLOCK, "allowance", "That Allow once was already used.")
-                    attempts.set_attempt_status(conn, attempt_id, "blocked")
-            if status == "pending":
-                conn.execute(
-                    "UPDATE payment_attempts SET approval_expires_at = clock_timestamp() + make_interval(secs => %s)"
-                    " WHERE id = %s",
-                    (min(quote.timeout_s, link_approvals.MAX_WAIT_S), attempt_id),
-                )
-    # Raise only after the transaction commits, so denials and pending requests stay in the audit log.
-    assert attempt_id is not None
-    if decision.decision == guard.APPROVAL_REQUIRED:
-        raise ApprovalRequired(attempt_id)
+        decision = guard.evaluate(guard.Agent(**attempts.load_agent(conn, agent)), quote,
+                                  guard_history(conn, agent, quote, profile))
+        if decision.decision != guard.BLOCK and task is not None:
+            review = _recheck_task(conn, agent, quote, reason or "", task, review, profile, seller)
+        if quote.amount <= 0 or quote.timeout_s <= 0:
+            decision = guard.Decision(guard.BLOCK, "quote", "The seller returned an invalid amount or expiry.")
+        rule = f"{decision.rule}: {decision.detail}"
+        status = "blocked" if decision.decision == guard.BLOCK else "approved"
+        facts = with_score(review.columns() if review else ({"mandate_id": task.mandate_id, "found_at": task.found_at}
+                                                            if task else {}), decision, review)
+        if review and decision.decision != guard.BLOCK and review.verdict.decision != intent.ALLOW:
+            verdict = review.verdict
+            status = "blocked"
+            decision = guard.Decision(guard.BLOCK, verdict.rule, verdict.detail)
+            rule = f"{verdict.rule}: {verdict.detail}"
+        attempt_id = attempts.record_attempt(conn, agent, quote.url, reason, quote_dict,
+                                             status, decision.decision, rule, facts)
+    # Raise only after the transaction commits, so blocks stay in the audit log.
     if decision.decision == guard.BLOCK:
-        held = review and review.verdict.decision == intent.ESCALATE and decision.rule == review.verdict.rule
-        error = PaymentHeld if held else PaymentRejected
-        raise error(decision.rule, decision.detail, attempt_id, decision.related_id)
+        raise PaymentRejected(decision.rule, decision.detail, attempt_id, decision.related_id)
     return attempt_id
+
+
+def with_score(facts: dict[str, Any] | None, decision: guard.Decision, review: Review | None) -> dict[str, Any] | None:
+    """The attempt's facts with the model score behind the outcome: a guard model's score, unless the intent review
+    blocked on a model score of its own (the injection screen), which then wins."""
+    if review is not None and review.verdict.ml is not None and review.verdict.decision != intent.ALLOW:
+        return facts
+    if decision.ml is None:
+        return facts
+    return {**(facts or {}), **decision.ml.columns()}
 
 
 def _recheck_task(
@@ -339,31 +294,27 @@ def _recheck_task(
     verdict = intent.tier0(mandates.to_mandate(row), payment, session,
                            guard.Agent(**attempts.load_agent(conn, agent)), guard.POLICY)
     if verdict is None:
-        # A tier 0 Allow once cannot outlive its allowance between review and admission.
-        verdict = (review.verdict if review and (review.verdict.tier > 0 or review.verdict.decision != intent.ALLOW)
-                   else intent.unavailable(1))
+        # Tier 0 never allows, so the earlier review (the injection screen and the model tiers) stands.
+        verdict = review.verdict if review is not None else intent.unavailable(1)
     return Review(verdict, task.mandate_id, task.found_at, description)
 
 
 async def authorize_task(
     conn: db.Connection, agent: str, reason: str | None, quote: guard.Quote, task: Task | None,
-    seller: intent.Seller | None = None, *, interactive: bool = False, approval_id: int | None = None,
+    seller: intent.Seller | None = None,
 ) -> int:
-    """Recheck both guard and intent, then admit under the same lock as approval consumption."""
-    profile = await payee_profile(conn, quote) if task is not None else None
-    original = link_approvals.get(conn, agent, approval_id) if approval_id else None
-    history = guard.History(**attempts.load_history(conn, agent, asdict(quote), guard.POLICY, approval_id),
-                            payee_flagged=bool(profile and profile.flagged))
-    decision = guard.evaluate(guard.Agent(**attempts.load_agent(conn, agent)), quote, history,
-                              interactive=interactive,
-                              authorized=bool(original and original["status"] == "authorized"))
+    """Read the payee's wallet profile, run the guard and (under a task) the intent review, then admit under the lock.
+
+    The guard runs again inside authorize; the network and model calls happen here, before the lock is taken.
+    """
+    profile = await payee_profile(conn, quote)
+    decision = decide(conn, agent, quote, profile)
     review = None
     if decision.decision != guard.BLOCK and task is not None:
         review = await review_intent(conn, agent, quote, reason or "", task, seller or intent.Seller(), profile)
     # Never await a model or network while holding a row lock: another synchronous DB call
     # on this event loop could otherwise prevent the lock holder from resuming.
-    return authorize(conn, agent, reason, quote, interactive=interactive, approval_id=approval_id,
-                     review=review, profile=profile, task=task, seller=seller)
+    return authorize(conn, agent, reason, quote, review=review, profile=profile, task=task, seller=seller)
 
 
 async def review_intent(
@@ -372,8 +323,7 @@ async def review_intent(
 ) -> Review:
     """Run deterministic rules, the optional local injection screen, then Claude (including its cache).
 
-    A configured detector failure or judge failure holds the payment, never pays. Owner Allow once is a
-    deterministic verdict and keeps its existing purchase scoped override behavior.
+    A configured detector failure or judge failure blocks the payment, never pays.
     """
     policy = guard.POLICY
     agent_row = attempts.load_agent(conn, agent)
@@ -391,10 +341,19 @@ async def review_intent(
 
     live.step("Task rules")
     verdict = intent.tier0(mandate, payment, session, guard.Agent(**agent_row), policy)
+    # The injection model scores every seller it sees, so its score shows on the payment whatever decided it.
+    try:
+        score = await asyncio.to_thread(injection_detector.assess, seller, session.listing)
+    except Exception as error:
+        log.warning("injection screen unavailable (%s)", type(error).__name__)
+        score = None
+        verdict = verdict or injection_detector.UNAVAILABLE
     if verdict is None:
-        verdict = await asyncio.to_thread(injection_detector.review, seller, session.listing)
+        verdict = injection_detector.verdict(score)
     if verdict is None:
         verdict = await _model_tiers(conn, task.judge, mandate, payment, session, policy)
+    if score is not None and verdict.ml is None:
+        verdict = replace(verdict, ml=score)
     log.info("intent: agent %s task %s tier %s %s (%s)", agent, mandate.id, verdict.tier, verdict.decision,
              verdict.rule)
     return Review(verdict, mandate.id, task.found_at, description)
@@ -440,7 +399,7 @@ def seller_from(payment_required: Any) -> intent.Seller:
     )
 
 
-OK, HELD_FOR_OWNER, FREE = "OK", "NEEDS_OWNER", "FREE"
+OK, FREE = "OK", "FREE"
 PREVIEW_TIMEOUT_S = 10.0
 
 
@@ -448,7 +407,7 @@ PREVIEW_TIMEOUT_S = 10.0
 class Preview:
     """What pay would decide for one URL right now, found without paying or recording anything.
 
-    verdict is OK (pay would go ahead), BLOCKED, NEEDS_OWNER (pay would hold it for the owner) or FREE (no paywall).
+    verdict is OK (pay would go ahead), BLOCK (pay would refuse it) or FREE (no paywall).
     rule and detail say why; amount and pay_to come from the seller's 402. Advice only: pay checks everything again.
     """
 
@@ -464,8 +423,8 @@ class Preview:
 async def preview(conn: db.Connection, agent: str, url: str, reason: str, task: Task) -> Preview:
     """Ask the seller for its price, then run the guard and the intent review exactly as pay would, without paying.
 
-    Nothing is paid and nothing reaches the journal. A service Sentinel stops (BLOCKED or NEEDS_OWNER) is logged as a
-    preview attempt (blocked or escalated, preview true), once per task, URL and status, so the owner's payment log
+    Nothing is paid and nothing reaches the journal. A service Sentinel stops is logged as a blocked preview attempt
+    (preview true), once per task and URL, so the owner's payment log
     shows everything that was turned away while the agent only ever sees what it may buy. The tier 1 verdict is
     cached, so a pay that follows is quick. Network problems raise httpx errors for the caller to report.
     """
@@ -485,19 +444,22 @@ async def preview(conn: db.Connection, agent: str, url: str, reason: str, task: 
                      {"mandate_id": task.mandate_id, "found_at": task.found_at, "seller_description": description})
         return Preview(url, guard.BLOCK, e.rule, e.detail, seller=seller)
     quote = build_quote(url, requirement)
+    if any(getattr(r, "scheme", "exact") == escrow.SCHEME for r in payment_required.accepts):
+        quote = replace(quote, escrow=True)  # pay would hold it in escrow (its terms are checked when paying)
     live.step("Policy guard", pay_to=quote.pay_to, amount=quote.amount)
     profile = await payee_profile(conn, quote)
     decision = decide(conn, agent, quote, profile)
     if decision.decision == guard.BLOCK:
-        _log_preview(conn, agent, url, reason, quote, guard.BLOCK, f"{decision.rule}: {decision.detail}",
-                     {"mandate_id": task.mandate_id, "found_at": task.found_at, "seller_description": description})
+        facts = {"mandate_id": task.mandate_id, "found_at": task.found_at, "seller_description": description,
+                 **(decision.ml.columns() if decision.ml else {})}
+        _log_preview(conn, agent, url, reason, quote, guard.BLOCK, f"{decision.rule}: {decision.detail}", facts)
         return Preview(url, guard.BLOCK, decision.rule, decision.detail, quote.amount, quote.pay_to, seller)
     review = await review_intent(conn, agent, quote, reason, task, seller, profile)
     verdict = review.verdict
-    outcome = {intent.ALLOW: OK, intent.BLOCK: guard.BLOCK}.get(verdict.decision, HELD_FOR_OWNER)
+    outcome = OK if verdict.decision == intent.ALLOW else guard.BLOCK
     if outcome != OK:
-        _log_preview(conn, agent, url, reason, quote, verdict.decision, f"{verdict.rule}: {verdict.detail}",
-                     review.columns())
+        _log_preview(conn, agent, url, reason, quote, guard.BLOCK, f"{verdict.rule}: {verdict.detail}",
+                     with_score(review.columns(), decision, review) or {})
     return Preview(url, outcome, verdict.rule, verdict.detail, quote.amount, quote.pay_to, seller)
 
 
@@ -505,9 +467,8 @@ def _log_preview(
     conn: db.Connection, agent: str, url: str, reason: str, quote: guard.Quote | None, decision: str, rule: str,
     facts: dict[str, Any],
 ) -> None:
-    """Write a service a search turned away to the payment log: escalated for a hold, else blocked. Once per task,
-    URL and status. A held one can be allowed once from the Tasks page."""
-    status = "escalated" if decision == intent.ESCALATE else "blocked"
+    """Write a service a search turned away to the payment log as a blocked preview. Once per task and URL."""
+    status = "blocked"
     if attempts.preview_logged(conn, facts["mandate_id"], url, status):
         return
     attempts.record_attempt(
@@ -517,8 +478,7 @@ def _log_preview(
 
 async def pay_for(
     url: str, signer: ClientEvmSigner, *, agent: str, reason: str | None = None, task: Task | None = None,
-    operator: escrow.EscrowOperator | None = None, interactive: bool = False, approval_id: int | None = None,
-    connect: Any = db.connection,
+    operator: escrow.EscrowOperator | None = None, connect: Any = db.connection,
 ) -> PayResult:
     """Fetch url, paying the seller if it returns 402 and the guard (and, under a task, intent binding) allows it.
 
@@ -526,18 +486,16 @@ async def pay_for(
     user's agent, whose limits and history the guard applies; there is no default, so every caller names one.
     operator is Sentinel's escrow operator (escrow.open_operator); without one, escrow offers are ignored.
     Returns the response and, if paid, the tx hash. Raises PaymentRejected when the guard or intent binding stops
-    the payment, PaymentHeld when it is held for the owner, and PaymentFailed when an approved payment does not
-    complete.
+    the payment, and PaymentFailed when an approved payment does not complete.
     """
     with connect() as conn, live.watching(conn, agent, task.mandate_id if task else None, url,
                                           "Asking the seller for its price"):
-        return await _pay_with(conn, url, signer, agent, reason, task, operator, interactive=interactive,
-                               approval_id=approval_id)
+        return await _pay_with(conn, url, signer, agent, reason, task, operator)
 
 
 async def _pay_with(
     conn: db.Connection, url: str, signer: ClientEvmSigner, agent: str, reason: str | None, task: Task | None = None,
-    operator: escrow.EscrowOperator | None = None, *, interactive: bool = False, approval_id: int | None = None,
+    operator: escrow.EscrowOperator | None = None,
 ) -> PayResult:
     """The payment flow itself, on a borrowed connection. Split out so pay_for can manage the pool."""
     client = x402Client()
@@ -547,8 +505,6 @@ async def _pay_with(
     async with httpx.AsyncClient() as session:
         first = await session.get(url)
         if first.status_code != 402:
-            if approval_id:
-                link_approvals.invalidate(conn, agent, approval_id, "The quoted resource is no longer paywalled.")
             return PayResult(first.status_code, first.text)  # free resource
 
         payment_required = http.get_payment_required_response(
@@ -558,17 +514,12 @@ async def _pay_with(
             requirement = select_requirement(payment_required, operator.address if operator else None)
             quote = build_quote(url, requirement)
         except PaymentRejected as e:
-            if approval_id:
-                link_approvals.invalidate(conn, agent, approval_id, "The seller no longer offers the approved payment.")
-                e.attempt_id = approval_id
-                raise
             e.attempt_id = attempts.record_attempt(
                 conn, agent, url, reason, status="blocked", decision=guard.BLOCK, rule_fired=str(e)
             )
             raise
         live.step("Policy guard", pay_to=quote.pay_to, amount=quote.amount)
-        attempt_id = await authorize_task(conn, agent, reason, quote, task, seller_from(payment_required),
-                                          interactive=interactive, approval_id=approval_id)
+        attempt_id = await authorize_task(conn, agent, reason, quote, task, seller_from(payment_required))
         in_escrow = operator is not None and getattr(requirement, "scheme", "exact") == escrow.SCHEME
         live.step("Locking the money in escrow" if in_escrow else "Paying the seller", attempt_id=attempt_id)
         if in_escrow:
@@ -616,7 +567,7 @@ async def _pay_with(
             # Money moved but the books did not take it. Leave the attempt approved so it stands out.
             raise PaymentFailed("payment went through but could not be recorded", attempt_id, tx_hash) from e
         verdict = delivery.check(paid.status_code, content_type, paid.content, delivery.promise_from(payment_required))
-        if verdict is not None:  # paid already, so only recorded: it counts against the seller (intent bad_deliveries)
+        if verdict is not None:  # paid already, so only recorded
             attempts.note_delivery(conn, attempt_id, verdict.outcome, f"{verdict.rule}: {verdict.detail}")
         return PayResult(paid.status_code, paid.text, tx_hash, quote, attempt_id, True, content_type)
     attempts.set_attempt_status(conn, attempt_id, "failed")
@@ -628,7 +579,7 @@ async def _pay_escrow(
     signer: ClientEvmSigner, agent: str, payment_required: Any, requirement: Any, quote: guard.Quote,
     attempt_id: int, task: Task | None,
 ) -> PayResult:
-    """Hold the money in escrow, fetch what was paid for, check it, then capture, void or hold for the owner.
+    """Hold the money in escrow, fetch what was paid for, check it, then capture (it passed) or void (anything else).
 
     If the call is cancelled while the hold is being sent, the money may sit in escrow with no record here; the buyer
     can then reclaim it onchain after the capture deadline (at most escrow_max_hold_s).
@@ -675,10 +626,7 @@ async def _pay_escrow(
     verdict = await check_delivery(conn, agent, task, quote.url, delivery.promise_from(payment_required), status,
                                    content_type, body)
     log.info("escrow: request %s delivery %s (%s)", attempt_id, verdict.outcome, verdict.rule)
-    held = verdict.outcome == delivery.UNSURE
-    ledger.record_delivery(conn, attempt_id, body, content_type, verdict.outcome, verdict.rule, verdict.detail, held)
-    if held:
-        return PayResult(status, "", None, quote, attempt_id, False, content_type, "held", verdict)
+    ledger.record_delivery(conn, attempt_id, body, content_type, verdict.outcome, verdict.rule, verdict.detail, False)
     live.step("Releasing the money to the seller" if verdict.outcome == delivery.PASS else "Refunding you")
     outcome, tx = await _finish(conn, operator, attempt_id, info, verdict.outcome == delivery.PASS, "sentinel")
     if outcome == "captured":
@@ -691,7 +639,7 @@ async def check_delivery(
     conn: db.Connection, agent: str, task: Task | None, url: str, promise: delivery.Promise, status: int,
     content_type: str | None, body: bytes,
 ) -> delivery.Verdict:
-    """The delivery rules, then (under a task) the judge. Any judge failure holds the payment for the owner."""
+    """The delivery rules, then (under a task) the judge. Anything but a pass (a judge failure too) is refunded."""
     verdict = delivery.check(status, content_type, body, promise)
     if verdict is not None:
         return verdict
@@ -726,31 +674,15 @@ async def _finish(
     return ("captured" if capture else "voided"), tx
 
 
-async def settle_held(
-    conn: db.Connection, operator: escrow.EscrowOperator, attempt_id: int, agent_id: int, capture: bool,
-    decided_by: str = "owner",
-) -> str:
-    """The owner's Capture or Void on a payment held in escrow (Tasks page). Returns captured, voided or processing.
-
-    Raises LookupError when this agent has no such payment still in escrow.
-    """
-    row = conn.execute(
-        "SELECT e.payment_info FROM escrow_payments e JOIN payment_attempts a ON a.id = e.attempt_id"
-        " WHERE e.attempt_id = %s AND a.agent_id = %s AND a.status = 'escrowed' AND e.state = 'authorized'",
-        (attempt_id, agent_id),
-    ).fetchone()
-    if row is None:
-        raise LookupError("That payment is not held in escrow.")
-    info = escrow.PaymentInfo.from_json(row["payment_info"])
-    return (await _finish(conn, operator, attempt_id, info, capture, decided_by))[0]
 
 
 async def sweep(conn: db.Connection, operator: escrow.EscrowOperator, policy: dict[str, int] = guard.POLICY) -> int:
     """Finish what is still in escrow. Returns how many holds it settled.
 
-    A passed delivery whose capture failed is captured again and a failed one voided again. A held one (or one whose
-    delivery was never checked, after a crash) is voided once its capture deadline is escrow_deadline_margin_s away,
-    so the buyer never waits for the reclaim window.
+    A passed delivery whose capture failed is captured again, and any other checked one voided again. One whose
+    delivery was never checked (after a crash), or one held for the owner before Sentinel decided everything itself,
+    is voided once its capture deadline is escrow_deadline_margin_s away, so the buyer never waits for the reclaim
+    window.
     """
     margin = policy["escrow_deadline_margin_s"]
     rows = conn.execute(
@@ -764,7 +696,7 @@ async def sweep(conn: db.Connection, operator: escrow.EscrowOperator, policy: di
     settled = 0
     for row in rows:
         info = escrow.PaymentInfo.from_json(row["payment_info"])
-        if row["verdict"] in (delivery.PASS, delivery.FAIL) and not row["held"]:
+        if row["verdict"] is not None and not row["held"]:
             outcome, _ = await _finish(conn, operator, row["attempt_id"], info, row["verdict"] == delivery.PASS,
                                        "sentinel")
         elif row["due"] or (row["verdict"] is None and row["stale"]):

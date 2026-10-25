@@ -28,7 +28,7 @@
     <button class="{{ primary if not code else secondary }}">{{ "Get a new code" if code else "Get a code" }}</button>
   </form>
   {% endif %}
-  <p class="mt-5 text-sm text-stone-600">Approvals still happen here: when the agent needs you to approve a new seller or allow a held payment, it texts you a link to this site.</p>
+  <p class="mt-5 text-sm text-stone-600">Sentinel decides every payment itself, so your agent never texts you to approve one. You can see each decision on the Live and Payments pages.</p>
   {% endif %}
 </section>
 {% endblock %}

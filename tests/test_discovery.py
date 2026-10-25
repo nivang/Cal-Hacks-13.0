@@ -320,7 +320,7 @@ def test_the_summary_says_what_can_be_bought_now_and_what_needs_the_owner():
     r = results.discovered("weather", search(Directory(), seller_status=statuses))
     assert r.status == "OK"
     assert "1 are from sellers the owner approved" in r.message
-    assert "1 are payable but the seller is not approved yet" in r.message and "Rules page" in r.message
+    assert "1 are payable from sellers the owner has not approved" in r.message and "wallet" in r.message
     assert results.LISTINGS_UNTRUSTED in r.message
 
 

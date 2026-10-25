@@ -712,8 +712,7 @@ async def test_users_do_not_share_a_budget_over_http(conn, browser, mailer, fake
 @pytest.mark.anyio
 async def test_users_cannot_move_each_others_price_baseline_over_http(browser, mailer, fake_wallets, pay_spy,
                                                                       monkeypatch):
-    # Each pay starts its own task; let a new task spend $2.00 before confirmation, so only the guard decides here.
-    monkeypatch.setitem(guard.POLICY, "intent_provisional_budget", 5_000_000)
+    # Each pay starts its own task, live at once with the full weekly budget, so only the guard decides here.
     ann_client, ann = await connected(browser, mailer, "ann@example.com", ANN_IP)
     bo_client, bo = await connected(browser, mailer, "bo@example.com", BO_IP)
     # Ann's baseline for this product: $0.50

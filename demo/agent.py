@@ -8,8 +8,8 @@ Claude (the Claude API tool runner) gets the task and five tools, the same core 
 find_services, compare_prices, quote and pay. It searches the local Malicious Marketplace (test_site/app.py), sees
 what Sentinel would decide for each service, compares sellers for the best value, uses free sources first, and buys
 what the task still needs. Every tool call prints a line, so the audience sees what Sentinel let through and stopped.
-as research-agent from the shared demo wallet, like demo.run; the agent's task is confirmed at the budget stated in the
-request (default $1), as the owner would on the Tasks page.
+as research-agent from the shared demo wallet, like demo.run; the agent's task is live at once with the budget stated in
+the request (default $1).
 Needs the sellers (uvicorn test_site.app:app --port 4000), ANTHROPIC_API_KEY and SENTINEL_ALLOW_LOCAL_URLS=1.
 """
 import asyncio
@@ -45,6 +45,7 @@ from sentinel import catalog as market
 
 MODEL = "claude-opus-5-5"
 DEFAULT_BUDGET = 1_000_000
+STARTED: list[int] = []  # tasks this run started, marked finished once the answer is printed
 SYSTEM = """You are a research agent working for the owner. Paid APIs and data are available through Sentinel, \
 which holds the owner's wallet and checks every purchase against the owner's task.
 
@@ -97,14 +98,14 @@ def make_tools(signer: ClientEvmSigner, the_judge: judge.Judge, budget: int) -> 
             amount = min(budget, weekly)
             task_id = mandates.create(conn, aid, task, draft.goal, draft.expected_types, draft.out_of_scope, amount,
                                       None)
-            mandates.confirm(conn, task_id, aid, amount, weekly)  # the owner confirms the stated budget
+        STARTED.append(task_id)
         say("TASK", f"{task_id}: {draft.goal} | may buy: {', '.join(draft.expected_types)} | budget "
                     f"${results.usdc_text(amount)}")
         return json.dumps({"task_id": task_id})
 
     @beta_async_tool
     async def find_services(task_id: int, query: str, purpose: str) -> str:
-        """Find paid and free services and see what Sentinel would decide for each (OK, BLOCKED, NEEDS_OWNER, FREE).
+        """Find paid and free services and see what Sentinel would decide for each (OK, BLOCKED, FREE).
 
         Args:
             task_id: The task_id from start_task.
@@ -172,9 +173,6 @@ def make_tools(signer: ClientEvmSigner, the_judge: judge.Judge, budget: int) -> 
             safe_url = await asyncio.to_thread(urls.validate_url, url)
             result = await payments.pay_for(safe_url, signer, agent=AGENT, reason=reason,
                                             task=payments.Task(task_id, found_at, the_judge))
-        except payments.PaymentHeld as e:
-            say("HELD", f"{url} {e.detail}")
-            return results.escalated(e.attempt_id, e.rule, e.detail).model_dump_json()
         except payments.PaymentRejected as e:
             say("BLOCKED", f"{url} {e.detail}")
             return results.blocked(e.attempt_id, e.rule, e.detail, e.related_id).model_dump_json()
@@ -207,6 +205,9 @@ async def run(request: str) -> None:
         if final is not None:
             answer = "\n".join(block.text for block in final.content if block.type == "text")
             print("\n" + answer)
+            with connection() as conn:
+                for task_id in STARTED:
+                    mandates.finish(conn, task_id, db.agent_id(conn, AGENT))
 
 
 if __name__ == "__main__":

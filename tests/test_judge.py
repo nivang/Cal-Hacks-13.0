@@ -62,9 +62,9 @@ async def test_classify_sends_the_case_as_data_to_haiku_at_low_effort(claude, fa
 
 
 async def test_decide_runs_at_medium_effort_and_clips_the_reason(claude, fake):
-    fake.answer = judge.JudgeOpinion(verdict="escalate", reason="x" * 1000)
+    fake.answer = judge.JudgeOpinion(verdict="block", reason="x" * 1000)
     opinion = await claude.decide({"payment": {}})
-    assert opinion.verdict == "escalate" and len(opinion.reason) == judge.MAX_REASON
+    assert opinion.verdict == "block" and len(opinion.reason) == judge.MAX_REASON
     assert fake.requests[0]["output_config"] == {"effort": "medium"}
     assert "red flag" in fake.requests[0]["system"][0]["text"]
 

@@ -1,12 +1,4 @@
-{% if waiting and (waiting.tasks or waiting.held or waiting.escrow) %}
-<p class="mt-4 rounded-md border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900" role="status">
-  {% if waiting.held %}{{ waiting.held }} payment{{ "s" if waiting.held != 1 }} held for you.{% endif %}
-  {% if waiting.escrow %}{{ waiting.escrow }} escrow deliver{{ "ies" if waiting.escrow != 1 else "y" }} waiting for your review.{% endif %}
-  {% if waiting.tasks %}{{ waiting.tasks }} task{{ "s" if waiting.tasks != 1 }} waiting for you to confirm.{% endif %}
-  <a href="/account/tasks" class="font-medium underline">Open Tasks</a>
-</p>
-{% endif %}
-{% from "account_macros.html" import primary, secondary, danger, input, card, status_badge, seller_cell, seller_badge, source_badge, banners, no_wallet %}
+{% from "account_macros.html" import primary, secondary, danger, input, card, status_badge, seller_cell, seller_badge, source_badge, banners, no_wallet, ml_badge %}
 <section class="mt-6 border-b border-stone-200 pb-6" aria-labelledby="recent-h">
   <div class="flex items-center justify-between gap-3">
     <h2 id="recent-h" class="font-semibold">Recent payments</h2>
@@ -18,7 +10,7 @@
       <thead class="text-xs uppercase tracking-wide text-stone-500"><tr><th class="py-2 pr-3 font-medium">When</th><th class="py-2 pr-3 font-medium">Seller</th><th class="py-2 pr-3 text-right font-medium">Amount</th><th class="py-2 font-medium">Status</th></tr></thead>
       <tbody class="divide-y divide-stone-100">
       {% for p in recent %}
-        <tr><td class="whitespace-nowrap py-2 pr-3 text-stone-600">{{ p.created_at | when }}</td><td class="py-2 pr-3">{{ seller_cell(p) }}</td><td class="py-2 pr-3 text-right tabular-nums">{{ p.amount | usd }}</td><td class="py-2">{{ status_badge(p.status) }}</td></tr>
+        <tr><td class="whitespace-nowrap py-2 pr-3 text-stone-600">{{ p.created_at | when }}</td><td class="py-2 pr-3">{{ seller_cell(p) }}</td><td class="py-2 pr-3 text-right tabular-nums">{{ p.amount | usd }}</td><td class="py-2">{{ status_badge(p.status) }}{% if p.ml_model %} <span class="mt-1 block">{{ ml_badge(p) }}</span>{% endif %}</td></tr>
       {% endfor %}
       </tbody>
     </table>

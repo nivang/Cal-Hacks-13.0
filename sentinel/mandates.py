@@ -1,9 +1,10 @@
-"""Tasks (mandates), the tier 1 cache and the owner's Allow once, in the database. Pure functions on a connection.
+"""Tasks (mandates) and the tier 1 cache, in the database. Pure functions on a connection.
 
-mcp_server.py creates a mandate when the agent calls start_task; payments.review_intent reads it and the session facts
-intent.tier0 needs; the account pages (web/app.py) list, confirm and revoke tasks and allow held payments. Every
+mcp_server.py creates a mandate when the agent calls start_task; it is live at once with its full budget (nobody
+confirms it). payments.review_intent reads it and the session facts intent.tier0 needs; the account pages (web/app.py)
+list tasks and let the owner revoke one (a kill switch for the whole task, not a decision on any one payment). Every
 lookup that takes an id from outside also takes the agent id read from the caller's identity or session, so one user
-can never read or change another's task or held payment. Amounts go in and out as integer atomic units.
+can never read or change another's task. Amounts go in and out as integer atomic units.
 """
 from collections.abc import Sequence
 from typing import Any
@@ -16,8 +17,6 @@ from sentinel.attempts import ATOMIC, LIVE_STATUSES
 from sentinel.db import Connection, usdc
 
 TASK_LIMIT = 50  # tasks shown on the account page
-PREVIEW_CHARS = 600  # how much of a held delivery the Tasks page shows
-HELD_LIMIT = 50
 
 
 class TooManyTasks(Exception):
@@ -28,7 +27,7 @@ def create(
     conn: Connection, agent_id: int, task_text: str, goal: str, expected_types: Sequence[str],
     out_of_scope: Sequence[str], budget: int, per_call: int | None, policy: dict[str, int] = guard.POLICY,
 ) -> int:
-    """Store a provisional mandate for this agent and return its id. Raises TooManyTasks past the daily limit."""
+    """Store a live mandate for this agent and return its id. Raises TooManyTasks past the daily limit."""
     started = conn.execute(
         "SELECT count(*) AS n FROM mandates WHERE agent_id = %s AND created_at >= now() - interval '1 day'",
         (agent_id,),
@@ -36,8 +35,9 @@ def create(
     if started is not None and started["n"] >= policy["intent_tasks_per_day"]:
         raise TooManyTasks
     row = conn.execute(
-        "INSERT INTO mandates (agent_id, task_text, goal, expected_types, out_of_scope, budget, per_call, expires_at)"
-        " VALUES (%s, %s, %s, %s, %s, %s, %s, now() + make_interval(secs => %s)) RETURNING id",
+        "INSERT INTO mandates (agent_id, task_text, goal, expected_types, out_of_scope, budget, per_call, expires_at,"
+        " status, confirmed_at)"
+        " VALUES (%s, %s, %s, %s, %s, %s, %s, now() + make_interval(secs => %s), 'confirmed', now()) RETURNING id",
         (agent_id, task_text, goal, list(expected_types), list(out_of_scope), usdc(budget),
          usdc(per_call) if per_call is not None else None, policy["intent_mandate_ttl_s"]),
     ).fetchone()
@@ -48,7 +48,7 @@ def create(
 COLUMNS = (
     f"m.id, m.agent_id, m.task_text, m.goal, m.expected_types, m.out_of_scope, (m.budget {ATOMIC})::bigint AS budget,"
     f" (m.per_call {ATOMIC})::bigint AS per_call, m.status, m.created_at, m.confirmed_at, m.expires_at,"
-    " m.expires_at <= now() AS expired"
+    " m.expires_at <= now() AS expired, m.finished_at"
 )
 
 
@@ -85,7 +85,9 @@ def session_facts(
 ) -> intent.Session:
     """Read what intent.tier0 and the judge need about this task and this payment. Time windows use the DB clock."""
     counts = conn.execute(
-        "SELECT count(*) FILTER (WHERE created_at >= now() - interval '1 minute') AS last_minute,"
+        # A refunded (voided) escrow is not counted: a retry after a bad delivery is not the agent racing.
+        "SELECT count(*) FILTER (WHERE created_at >= now() - interval '1 minute' AND status <> 'voided')"
+        " AS last_minute,"
         " count(*) FILTER (WHERE url = %s AND status = ANY(%s)) AS url_bought"
         " FROM payment_attempts WHERE mandate_id = %s AND preview IS NOT TRUE",  # searches are not pay calls
         (quote.url, LIVE_STATUSES, mandate_id),
@@ -101,11 +103,6 @@ def session_facts(
         " AND preview IS NOT TRUE ORDER BY id DESC LIMIT %s",
         (mandate_id, policy["intent_drift_window"]),
     ).fetchall()
-    bad = conn.execute(
-        "SELECT count(*) AS n FROM payment_attempts WHERE agent_id = %s AND lower(pay_to) = lower(%s)"
-        " AND delivery_verdict = 'fail' AND created_at >= now() - make_interval(days => %s)",
-        (agent_id, quote.pay_to, policy["budget_window_days"]),
-    ).fetchone()
     history = conn.execute(
         f"SELECT url, (amount {ATOMIC})::bigint AS amount, status, reason FROM payment_attempts"
         " WHERE mandate_id = %s AND amount IS NOT NULL AND preview IS NOT TRUE ORDER BY id DESC LIMIT %s",
@@ -117,11 +114,9 @@ def session_facts(
         url_bought=int(counts["url_bought"]) if counts else 0,
         seller_window_spend=int(seller["total"]) if seller else 0,
         recent_tiers=tuple(int(r["intent_tier"]) for r in tiers),
-        allowance_id=find_allowance(conn, mandate_id, quote),
         purchases=tuple(intent.Purchase(r["url"], int(r["amount"]), r["status"], r["reason"]) for r in history),
         listing=listing_for(conn, mandate_id, quote.url),
         comparison=comparison_for(conn, mandate_id, quote.url, policy["compare_ttl_s"]),
-        seller_bad_deliveries=int(bad["n"]) if bad else 0,
     )
 
 
@@ -209,26 +204,6 @@ def listing_for(conn: Connection, mandate_id: int, url: str) -> intent.Listing |
     return intent.Listing(row["amount"], row["listed_pay_to"], row["name"], row["description"])
 
 
-def find_allowance(conn: Connection, mandate_id: int, quote: guard.Quote) -> int | None:
-    """An unused, unexpired Allow once on a held payment under this task with the same seller, URL and amount."""
-    row = conn.execute(
-        "SELECT al.id FROM allowances al JOIN payment_attempts a ON a.id = al.attempt_id"
-        " WHERE a.mandate_id = %s AND lower(a.pay_to) = lower(%s) AND a.url = %s AND a.amount = %s"
-        " AND al.used_at IS NULL AND al.expires_at > now() ORDER BY al.id LIMIT 1",
-        (mandate_id, quote.pay_to, quote.url, usdc(quote.amount)),
-    ).fetchone()
-    return int(row["id"]) if row else None
-
-
-def use_allowance(conn: Connection, allowance_id: int, attempt_id: int) -> bool:
-    """Spend an Allow once on the payment it let through. False if it was already used (two retries at once)."""
-    row = conn.execute(
-        "UPDATE allowances SET used_at = now(), used_by_attempt_id = %s WHERE id = %s AND used_at IS NULL RETURNING id",
-        (attempt_id, allowance_id),
-    ).fetchone()
-    return row is not None
-
-
 def cached(conn: Connection, mandate_id: int, pay_to: str, url: str, ttl_s: int) -> tuple[str, str] | None:
     """The tier 1 (verdict, reason) for this task, seller and URL, if one is younger than ttl_s."""
     row = conn.execute(
@@ -262,7 +237,7 @@ WITH_SPENT = (  # spent counts live payments plus Apify runs (atomic units, the 
 
 
 def list_for_agent(conn: Connection, agent_id: int, limit: int = TASK_LIMIT) -> list[dict[str, Any]]:
-    """This agent's newest tasks with what each has spent, the provisional ones first."""
+    """This agent's newest tasks with what each has spent, newest first."""
     rows = conn.execute(
         WITH_SPENT + " WHERE m.agent_id = %s ORDER BY m.id DESC LIMIT %s", (LIVE_STATUSES, agent_id, limit),
     ).fetchall()
@@ -273,7 +248,6 @@ def list_for_agent(conn: Connection, agent_id: int, limit: int = TASK_LIMIT) -> 
         purchase["charge_usd"] = format(usdc(charge), ".6f") if charge is not None else None
     for row in rows:
         row["apify_purchases"] = [p for p in purchases if p["mandate_id"] == row["id"]]
-    rows.sort(key=lambda r: (r["status"] != intent.PROVISIONAL or r["expired"], -r["id"]))
     return rows
 
 
@@ -286,22 +260,12 @@ def list_by_ids(conn: Connection, agent_id: int, ids: Sequence[int]) -> list[dic
     ).fetchall()
 
 
-def confirm(conn: Connection, mandate_id: int, agent_id: int, budget: int, weekly_budget: int) -> None:
-    """The owner confirms one of their provisional tasks, with a budget of at most their weekly budget.
-
-    Raises ValueError with a message the page can show.
-    """
-    if budget <= 0:
-        raise ValueError("The budget must be more than $0.00.")
-    if budget > weekly_budget:
-        raise ValueError(f"A task's budget can be at most your weekly budget, {guard.usd(weekly_budget)}.")
-    row = conn.execute(
-        "UPDATE mandates SET status = 'confirmed', budget = %s, confirmed_at = now()"
-        " WHERE id = %s AND agent_id = %s AND status = 'provisional' AND expires_at > now() RETURNING id",
-        (usdc(budget), mandate_id, agent_id),
-    ).fetchone()
-    if row is None:
-        raise ValueError("That task cannot be confirmed: it was revoked, has expired or is already confirmed.")
+def finish(conn: Connection, mandate_id: int, agent_id: int) -> None:
+    """The agent sent its final answer for this task: the Live page shows it as done. Display only; once."""
+    conn.execute(
+        "UPDATE mandates SET finished_at = now() WHERE id = %s AND agent_id = %s AND finished_at IS NULL",
+        (mandate_id, agent_id),
+    )
 
 
 def revoke(conn: Connection, mandate_id: int, agent_id: int) -> None:
@@ -312,68 +276,3 @@ def revoke(conn: Connection, mandate_id: int, agent_id: int) -> None:
     ).fetchone()
     if row is None:
         raise ValueError("That task is already revoked.")
-
-
-def count_pending(conn: Connection, agent_id: int) -> dict[str, int]:
-    """For the overview banner: provisional live tasks and held payments still waiting for the owner."""
-    tasks = conn.execute(
-        "SELECT count(*) AS n FROM mandates WHERE agent_id = %s AND status = 'provisional' AND expires_at > now()",
-        (agent_id,),
-    ).fetchone()
-    return {"tasks": int(tasks["n"]) if tasks else 0, "held": len(list_held(conn, agent_id)),
-            "escrow": len(list_escrow_held(conn, agent_id))}
-
-
-def list_held(conn: Connection, agent_id: int, limit: int = HELD_LIMIT) -> list[dict[str, Any]]:
-    """Held payments of this agent that the owner has not allowed yet, under tasks that are still live, newest first.
-
-    A held payment drops off once allowed, or once the same payment was later paid or blocked anyway.
-    """
-    rows = conn.execute(
-        f"SELECT a.id, a.created_at, a.url, a.pay_to, (a.amount {ATOMIC})::bigint AS amount, a.reason,"
-        " a.rule_fired, a.intent_tier, a.mandate_id, m.goal FROM payment_attempts a"
-        " JOIN mandates m ON m.id = a.mandate_id"
-        " WHERE a.agent_id = %s AND a.status = 'escalated' AND m.status <> 'revoked' AND m.expires_at > now()"
-        " AND NOT EXISTS (SELECT 1 FROM allowances al WHERE al.attempt_id = a.id)"
-        " AND NOT EXISTS (SELECT 1 FROM payment_attempts b WHERE b.mandate_id = a.mandate_id AND b.id > a.id"
-        "  AND lower(b.pay_to) = lower(a.pay_to) AND b.url = a.url AND b.status IN ('settled', 'approved', 'escrowed'))"
-        " ORDER BY a.id DESC LIMIT %s",
-        (agent_id, limit),
-    ).fetchall()
-    for r in rows:
-        r["rule"], _, r["detail"] = (r.pop("rule_fired") or "").partition(": ")
-    return rows
-
-
-def list_escrow_held(conn: Connection, agent_id: int, limit: int = HELD_LIMIT) -> list[dict[str, Any]]:
-    """Payments of this agent held in escrow for the owner, soonest deadline first, each with the start of what the
-    seller delivered (preview) so the owner can judge it."""
-    return conn.execute(
-        f"SELECT a.id, a.created_at, a.url, a.pay_to, (a.amount {ATOMIC})::bigint AS amount, a.reason,"
-        " e.verdict_reason AS detail, e.capture_deadline, m.goal, left(r.body, %s) AS preview"
-        " FROM escrow_payments e JOIN payment_attempts a ON a.id = e.attempt_id"
-        " LEFT JOIN mandates m ON m.id = a.mandate_id LEFT JOIN attempt_results r ON r.attempt_id = a.id"
-        " WHERE a.agent_id = %s AND a.status = 'escrowed' AND e.state = 'authorized' AND e.held"
-        " ORDER BY e.capture_deadline LIMIT %s",
-        (PREVIEW_CHARS, agent_id, limit),
-    ).fetchall()
-
-
-def allow_once(conn: Connection, attempt_id: int, agent_id: int, user_id: str, policy: dict[str, int] = guard.POLICY,
-               ) -> None:
-    """The owner allows one held payment of their own agent. ValueError if it is not a payment they can allow."""
-    held = conn.execute(
-        "SELECT a.id FROM payment_attempts a JOIN mandates m ON m.id = a.mandate_id"
-        " WHERE a.id = %s AND a.agent_id = %s AND a.status = 'escalated' AND m.status <> 'revoked'"
-        " AND m.expires_at > now()",
-        (attempt_id, agent_id),
-    ).fetchone()
-    if held is None:
-        raise ValueError("That payment cannot be allowed: it is not held, or its task was revoked or has expired.")
-    row = conn.execute(
-        "INSERT INTO allowances (attempt_id, granted_by, expires_at)"
-        " VALUES (%s, %s, now() + make_interval(secs => %s)) ON CONFLICT (attempt_id) DO NOTHING RETURNING id",
-        (attempt_id, user_id, policy["intent_allowance_ttl_s"]),
-    ).fetchone()
-    if row is None:
-        raise ValueError("You already allowed that payment.")

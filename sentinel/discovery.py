@@ -9,8 +9,9 @@ search() asks every source at once and returns one ranked list of Listings. Sour
             mainnet, not per call, so browse only.
 A listing is payable only when it offers Base Sepolia USDC, the one option payments.py signs. Everything else is
 returned as browse only so the agent can tell the owner what exists. Nothing here authorizes a payment: pay() still
-fetches a fresh quote from the seller and the guard still blocks any seller the owner has not approved. Listings are
-third party advertising text, so descriptions are cut short and stripped of markup before the agent sees them.
+fetches a fresh quote from the seller, and the guard pays a seller the owner has not approved only through
+escrow. Listings are third party advertising text, so descriptions are cut short and stripped of markup
+before the agent sees them.
 
 Pure normalizers (one per source) turn a JSON response into Listings and are tested on recorded responses; fetch()
 does the network part and never raises for one source failing, it reports it in sources instead.

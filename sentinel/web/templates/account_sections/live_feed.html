@@ -7,8 +7,8 @@
 <section class="lv-task" aria-label="Current task">
   <div class="min-w-0">
     <p class="lv-kicker">Task {{ task.id }}
-      <span class="lv-pill is-{{ 'wait' if task_state == 'provisional' else 'ok' if task_state == 'confirmed' else 'idle' }}">
-        {% if task_state == "provisional" %}Needs your confirmation{% elif task_state == "confirmed" %}Confirmed{% elif task_state == "revoked" %}Revoked{% else %}Ended{% endif %}</span></p>
+      <span class="lv-pill is-{{ 'ok' if task_state in ('provisional', 'confirmed', 'done') else 'idle' }}">
+        {% if task_state == "done" %}Done{% elif task_state in ("provisional", "confirmed") %}Active{% elif task_state == "revoked" %}Revoked{% else %}Ended{% endif %}</span></p>
     <h2 class="lv-goal">{{ task.goal }}</h2>
   </div>
   {% set pct = (task.spent * 100 // task.budget) if task.budget else 0 %}
@@ -18,18 +18,17 @@
   </div>
 </section>
 
-{% set stopped_n = counts.blocked + counts.refunded %}
 <section class="lv-flow" aria-label="Sentinel sits between your agent and every seller">
   <div class="lv-node">
     <p class="lv-node-name">Your agent</p>
     <p class="lv-node-big tabular-nums">{{ counts.requests }}</p>
-    <p class="lv-node-sub">{{ "request" if counts.requests == 1 else "requests" }} to pay</p>
+    <p class="lv-node-sub">{{ "request" if counts.requests == 1 else "requests" }} processed</p>
   </div>
   <div class="lv-arrow" aria-hidden="true"><span>asks</span></div>
   <div class="lv-node lv-node-main">
     <p class="lv-node-name"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m12 3 8 3v6c0 5-8 9-8 9s-8-4-8-9V6l8-3Z"/></svg> Sentinel</p>
-    <p class="lv-node-big tabular-nums">{{ stopped_n }} <span>stopped</span></p>
-    <p class="lv-node-sub">{{ counts.stopped | usd }} kept back{% if counts.held %} · <span class="is-wait">{{ counts.held }} waiting for you</span>{% endif %}{% if counts.escrowed %} · <span class="is-escrow">{{ counts.escrowed }} in escrow</span>{% endif %}</p>
+    <p class="lv-node-big tabular-nums">{{ counts.stopped }} <span>stopped</span></p>
+    <p class="lv-node-sub">{{ counts.kept_back | usd }} kept back{% if counts.escrowed %} · <span class="is-escrow">{{ counts.escrowed }} in escrow</span>{% endif %}</p>
   </div>
   <div class="lv-arrow" aria-hidden="true"><span>pays if safe</span></div>
   <div class="lv-node">
@@ -38,6 +37,10 @@
     <p class="lv-node-sub">paid to {{ counts.sellers_paid }} {{ "seller" if counts.sellers_paid == 1 else "sellers" }}</p>
   </div>
 </section>
+{% if task_state == "done" %}
+<p class="mt-4 rounded-lg border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm text-emerald-800" role="status">
+  <strong>Done.</strong> Your agent sent its final answer at {{ task.finished_at | when }}: {{ counts.paid_amount | usd }} paid, {{ counts.stopped }} stopped by Sentinel.</p>
+{% endif %}
 {% else %}
 <div class="{{ card }} text-center">
   <h2 class="font-semibold">No task yet</h2>
@@ -48,13 +51,13 @@
 {% if escrow %}
 <section class="mt-8" aria-labelledby="lv-escrow-h">
   <h2 id="lv-escrow-h" class="lv-heading">Locked in escrow</h2>
-  <p class="lv-heading-sub">The seller is paid only if what they send passes the check. Otherwise the money comes back.</p>
+  <p class="lv-heading-sub">The seller is paid only if what they send passes Sentinel's check. Otherwise the money comes back.</p>
   <ul class="mt-3 grid gap-3 sm:grid-cols-2">
     {% for e in escrow %}
     <li class="lv-escrow">
       <div class="min-w-0">
         <p class="truncate font-medium">{{ e.seller or (e.pay_to | short) }} <span class="tabular-nums text-stone-500">{{ e.amount | usd }}</span></p>
-        <p class="mt-0.5 text-sm text-stone-600">{% if e.held %}Waiting for you · <a class="underline" href="/account/tasks#escrow-h">Pay or refund</a>{% else %}Checking the delivery…{% endif %}</p>
+        <p class="mt-0.5 text-sm text-stone-600">Sentinel is checking the delivery…</p>
       </div>
       <p class="lv-countdown"><span class="tabular-nums" data-deadline="{{ e.capture_deadline | iso }}">{{ e.capture_deadline | when }}</span><span>until auto refund</span></p>
     </li>
@@ -103,7 +106,7 @@
     <li class="lv-card" data-card="{{ p.id }}">
       <div class="lv-lane">
         <p class="lv-lane-label">Agent asked</p>
-        <p class="lv-seller">{{ p.seller or (p.pay_to | short) or "Unknown seller" }}{% if not p.seller %} <span class="lv-pill is-wait">Not on your list</span>{% endif %}</p>
+        <p class="lv-seller">{{ p.seller or (p.pay_to | short) or "Unknown seller" }}{% if not p.seller %} <span class="lv-pill">Not on your list</span>{% endif %}</p>
         <p class="lv-url">{{ p.url | host_path }}</p>
         {% if p.reason %}<p class="lv-quote" title="{{ p.reason }}">“{{ p.reason }}”</p>{% endif %}
         <p class="lv-meta"><time datetime="{{ p.created_at | iso }}" data-ago>{{ p.created_at | when }}</time>{% if p.found_while_searching %} · while searching{% endif %}</p>
@@ -114,22 +117,20 @@
           {% for s in steps[1:-1] if s.state != "idle" %}
           <li class="is-{{ s.state }}">
             <span class="lv-dot" aria-hidden="true"></span>
-            <span><span class="lv-check-label">{{ s.label }}</span><span class="sr-only"> ({{ {"ok": "passed", "stop": "stopped here", "wait": "waiting"}[s.state] }})</span>
+            <span><span class="lv-check-label">{{ s.label }}</span><span class="sr-only"> ({{ {"ok": "passed", "stop": "stopped here", "wait": "in progress"}[s.state] }})</span>
+            {% if s.ml %}<span class="lv-ml{{ ' is-hit' if s.ml.hit }}">{{ s.ml.text }}</span>{% endif %}
             {% if s.note and s.state != "ok" %}<span class="lv-check-note">{{ s.note }}</span>{% endif %}
             {% if s.tx %}<a class="lv-tx" href="{{ tx_url }}{{ s.tx }}" rel="noreferrer" title="{{ s.tx }}">{{ s.tx | short(6, 4) }}</a>{% endif %}</span>
           </li>
           {% endfor %}
         </ul>
       </div>
-      {% set kind = "blocked" if p.status == "settled" and p.delivery_verdict == "fail" else {"settled": "paid", "escrowed": "escrow", "voided": "refunded", "escalated": "held", "pending": "held", "authorized": "held", "approved": "progress"}.get(p.status, "blocked") %}
+      {% set kind = "blocked" if p.status == "settled" and p.delivery_verdict == "fail" else {"settled": "paid", "escrowed": "escrow", "voided": "refunded", "approved": "progress"}.get(p.status, "blocked") %}
       <div class="lv-lane lv-out is-{{ result.state }} k-{{ kind }}">
         <p class="lv-lane-label">Seller got</p>
         <p class="lv-money tabular-nums">{% if p.status in ("settled", "escrowed") %}{{ p.amount | usd }}{% else %}$0.00{% endif %}<span>of {{ p.amount | usd }}</span></p>
         <p class="lv-verdict">{{ result.note }}</p>
         {% if result.tx %}<a class="lv-tx" href="{{ tx_url }}{{ result.tx }}" rel="noreferrer" title="{{ result.tx }}">{{ result.tx | short(6, 4) }}</a>{% endif %}
-        {% if p.status == "escrowed" and p.escrow_held %}<a class="lv-action" href="/account/tasks#escrow-h">Review delivery</a>
-        {% elif p.status == "escalated" %}<a class="lv-action" href="/account/tasks">Decide</a>
-        {% elif p.status in ("pending", "authorized") %}<a class="lv-action" href="/account/approvals/{{ p.id }}">Review approval</a>{% endif %}
       </div>
     </li>
     {% endfor %}

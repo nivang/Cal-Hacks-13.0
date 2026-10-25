@@ -1,12 +1,12 @@
 {% from "account_macros.html" import primary, secondary, danger, input, card, status_badge, seller_cell, seller_badge, source_badge, banners, no_wallet %}
 <section class="mt-6 border-b border-stone-200 pb-6" aria-labelledby="tasks-h">
   <h2 id="tasks-h" class="font-semibold">Your agent's tasks</h2>
-  <details class="mt-2 text-sm text-stone-600"><summary class="cursor-pointer">How task budgets work</summary><p class="mt-2">A new task can spend up to {{ provisional_cap }} until you confirm it. Check that Sentinel read it the way you meant, then confirm it with the budget you want, up to your weekly budget of {{ budget }}.</p></details>
+  <details class="mt-2 text-sm text-stone-600"><summary class="cursor-pointer">How task budgets work</summary><p class="mt-2">Sentinel reads each request you give your agent into a task with its own budget, inside your weekly budget of {{ budget }}. Every payment is checked against the task, and Sentinel stops anything that does not fit. Revoke a task to stop all of its spending.</p></details>
   {% if tasks %}
   <ul class="mt-4 space-y-4">
     {% for t in tasks %}
     <li class="border-b border-stone-200 pb-4">
-    <details{% if t.status == "provisional" and not t.expired %} open{% endif %}>
+    <details>
       <summary class="cursor-pointer">
       <div class="flex flex-wrap items-start justify-between gap-2">
         <div class="min-w-0">
@@ -15,8 +15,7 @@
         </div>
         {% if t.status == "revoked" %}<span class="rounded-full bg-stone-100 px-2 py-0.5 text-xs font-semibold text-stone-700">Revoked</span>
         {% elif t.expired %}<span class="rounded-full bg-stone-100 px-2 py-0.5 text-xs font-semibold text-stone-700">Ended</span>
-        {% elif t.status == "confirmed" %}<span class="rounded-full bg-emerald-100 px-2 py-0.5 text-xs font-semibold text-emerald-800">Confirmed</span>
-        {% else %}<span class="rounded-full bg-amber-100 px-2 py-0.5 text-xs font-semibold text-amber-900">Needs your confirmation</span>{% endif %}
+        {% else %}<span class="rounded-full bg-emerald-100 px-2 py-0.5 text-xs font-semibold text-emerald-800">Active</span>{% endif %}
       </div>
       <p class="mt-2 text-sm text-stone-600">Spent {{ t.spent | usd }} of {{ t.budget | usd }}</p>
       </summary>
@@ -46,7 +45,7 @@
             <tbody class="divide-y divide-stone-200 align-top">
             {% for o in c.offers %}
               <tr>
-                <td class="max-w-[12rem] break-words py-1 pr-3 {% if o.recommended %}font-semibold{% endif %}">{{ o.name }}<span class="block text-stone-500">{{ o.source }}{% if o.verdict == "BLOCKED" %} · blocked{% elif o.verdict == "NEEDS_OWNER" %} · held{% elif o.verdict == "APIFY" %} · Apify credits{% elif o.verdict == "BROWSE" %} · browse only{% endif %}</span></td>
+                <td class="max-w-[12rem] break-words py-1 pr-3 {% if o.recommended %}font-semibold{% endif %}">{{ o.name }}<span class="block text-stone-500">{{ o.source }}{% if o.verdict == "BLOCKED" %} · blocked{% elif o.verdict == "NEEDS_OWNER" %} · stopped{% elif o.verdict == "APIFY" %} · Apify credits{% elif o.verdict == "BROWSE" %} · browse only{% endif %}</span></td>
                 <td class="py-1 pr-3 tabular-nums">{% if o.cost is not none %}{{ o.cost | usd }}{% else %}unknown{% endif %}</td>
                 <td class="py-1 pr-3 tabular-nums">{% if o.quality is not none %}{{ o.quality }}{% else %}not rated{% endif %}</td>
                 <td class="max-w-[20rem] py-1 text-stone-600">{{ o.why_not or o.fit_reason or "" }}</td>
@@ -59,17 +58,6 @@
       {% endfor %}
       {% if t.status != "revoked" and not t.expired %}
       <div class="mt-4 flex flex-wrap items-end gap-3 border-t border-stone-100 pt-4">
-        {% if t.status == "provisional" %}
-        <form method="post" action="/account/tasks/confirm" class="flex flex-wrap items-end gap-3">
-          <input type="hidden" name="csrf" value="{{ csrf }}">
-          <input type="hidden" name="task_id" value="{{ t.id }}">
-          <div>
-            <label for="budget-{{ t.id }}" class="text-sm font-medium">Budget (USD)</label>
-            <input id="budget-{{ t.id }}" name="budget" type="text" inputmode="decimal" autocomplete="off" required value="{{ (t.budget | usd)[1:] }}" class="{{ input }} w-32">
-          </div>
-          <button type="submit" class="{{ primary }}">Confirm</button>
-        </form>
-        {% endif %}
         <form method="post" action="/account/tasks/revoke">
           <input type="hidden" name="csrf" value="{{ csrf }}">
           <input type="hidden" name="task_id" value="{{ t.id }}">

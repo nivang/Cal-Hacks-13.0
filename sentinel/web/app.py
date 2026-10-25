@@ -36,10 +36,8 @@ from x402.mechanisms.evm import ClientEvmSigner
 from sentinel import (
     chain,
     db,
-    guard,
     injection_detector,
     judge,
-    link_approvals,
     mandates,
     mcp_server,
     owner,
@@ -72,8 +70,8 @@ SITE_CSP = CSP_BEFORE_FORM + "form-action 'self'" + CSP_AFTER_FORM
 SITE_PATHS = frozenset({
     "/", "/signin", "/auth/verify", "/account", "/account/wallet", "/account/signout-everywhere", "/signout",
     "/account/live", "/account/payments", "/account/payments.csv", "/account/rules", "/account/rules/limits",
-    "/account/rules/sellers", "/account/rules/auto-buy", "/account/books", "/account/tasks", "/account/tasks/confirm",
-    "/account/tasks/revoke", "/account/tasks/allow", "/account/tasks/capture", "/account/tasks/void",
+    "/account/rules/sellers", "/account/rules/auto-buy", "/account/books", "/account/tasks",
+    "/account/tasks/revoke",
     "/account/texting", "/account/texting/code", "/account/texting/unlink",
     "/oauth/consent", "/healthz", "/favicon.ico", "/authorize",
 })
@@ -83,13 +81,9 @@ DONE_TEXT = {  # the ?done= values the Rules page shows a banner for; anything e
     "auto_buy": "Saved. The new setting applies to the next payment.",
 }
 TASK_DONE_TEXT = {  # the ?done= values the Tasks page shows a banner for
-    "confirm": "Confirmed. Your agent can now spend this task's full budget.",
     "revoke": "Revoked. Nothing more can be bought for that task.",
-    "allow": "Allowed once. Tell your agent to try that payment again.",
-    "capture": "Paid. The seller has the money and your agent can collect the data.",
-    "void": "Refunded. The money is back in your wallet and the seller was not paid.",
 }
-SWEEP_EVERY_S = 60  # how often the server finishes what is still held in escrow
+SWEEP_EVERY_S = 60  # how often the server retries escrow captures and voids that failed
 WARN_PERCENT = 80  # the weekly budget bar turns amber from here
 MCP_PATHS = frozenset({"/mcp", "/mcp/"})
 MCP_ALLOW_HEADERS = "authorization, content-type, mcp-protocol-version, mcp-session-id, last-event-id"
@@ -109,7 +103,7 @@ def csp(form_action: str = "'self'") -> str:
 
 def is_site_path(path: str) -> bool:
     """True for the paths that get the site's security headers: site pages, /static and /authorize."""
-    return path in SITE_PATHS or path.startswith(("/static/", "/account/approvals/"))
+    return path in SITE_PATHS or path.startswith("/static/")
 
 
 class SecurityHeaders:
@@ -302,17 +296,15 @@ def create_app(
     connect: how requests borrow a database connection. mailer: where sign in links go (make_mailer(settings) when
     None). pay_fn, open_signer and judge_ go to mcp_server.create_server (tests replace them). open_operator opens
     Sentinel's escrow operator (escrow.open_operator, which main passes); with it, payments use escrow when a seller
-    offers it, the owner can pay or refund a held payment, and a background sweep finishes holds every SWEEP_EVERY_S.
+    offers it, and a background sweep retries escrow captures and voids every SWEEP_EVERY_S.
     texts: the texting desk (texting.from_env, which main passes); None turns /texting/* off.
     The pool is not touched here; mcp_server.main() closes it when uvicorn stops.
     """
     mail = mailer if mailer is not None else make_mailer(settings)
     provider = oauth.SentinelOAuthProvider(settings, connect)
     server = mcp_server.create_server(auth=provider, pay_fn=pay_fn, open_signer=open_signer, connect=connect,
-                                      judge_=judge_, approval_base_url=settings.base_url,
-                                      approval_state_key=settings.key("purchase-approval-state"),
-                                      open_operator=open_operator)
-    # Native legacy forms need stateful sessions and SSE to return the human's answer.
+                                      judge_=judge_, open_operator=open_operator)
+    # Stateful sessions with SSE responses, the transport connected clients already use.
     mcp_app = server.http_app(path=oauth.MCP_PATH, json_response=False, stateless_http=False)
 
     async def sweep_forever() -> None:
@@ -558,7 +550,7 @@ def create_app(
         "/account/live": {"live_feed"},
         "/account/payments": {"payments_list"},
         "/account/rules": {"rules_limits", "rules_auto_buy", "rules_sellers", "seller_wallet"},
-        "/account/tasks": {"tasks_escrow", "tasks_held", "tasks_list"},
+        "/account/tasks": {"tasks_escrow", "tasks_list"},
         "/account/books": {"books_summary", "books_journal", "books_totals"},
     }
 
@@ -591,10 +583,7 @@ def create_app(
             view = users.account_view(conn, user["id"], False)
             if view["agent_id"] is None:
                 return view, None, {}
-            tag, expired = books.fingerprint(conn, view["agent_id"])
-            if expired:  # an approval ran out: mark it, then read the tag again
-                link_approvals.expire(conn, view["agent"])
-                tag, _ = books.fingerprint(conn, view["agent_id"])
+            tag = books.fingerprint(conn, view["agent_id"])
             etag = f'W/"{section}-{tag}"'
             if sent == etag:
                 return view, etag, None
@@ -641,7 +630,6 @@ def create_app(
                 context.update(steps=steps, all_set=all(done for done, _, _ in steps))
             elif section == "overview_recent":
                 context["recent"] = await run_db(books.recent_payments, aid)
-                context["waiting"] = await run_db(mandates.count_pending, aid)
             elif section == "rules_sellers":
                 sellers = await run_db(books.list_sellers, aid)
                 context["lazy_wallets"] = True
@@ -656,16 +644,13 @@ def create_app(
                 context.update(wallet_label=profile.summary() if profile else "could not check",
                                wallet_warn=bool(profile and (profile.flagged or profile.unused or profile.is_new())))
             elif section == "tasks_escrow":
-                context["escrow_held"] = await run_db(mandates.list_escrow_held, aid)
-            elif section == "tasks_held":
-                context["held"] = await run_db(mandates.list_held, aid)
+                context["escrow_held"] = await run_db(books.escrow_now, aid)
             elif section == "tasks_list":
                 context["tasks"] = await run_db(mandates.list_for_agent, aid)
                 comparisons: dict[int, list[dict[str, Any]]] = {}
                 for c in await run_db(mandates.list_comparisons, aid):
                     comparisons.setdefault(c["mandate_id"], []).append(c)
                 context["comparisons"] = comparisons
-                context["provisional_cap"] = usdc(guard.POLICY["intent_provisional_budget"])
             elif section == "books_summary":
                 context["summary"] = await run_db(books.summary, aid)
                 context["totals"] = await run_db(books.totals, aid)
@@ -735,13 +720,11 @@ def create_app(
 
         def data(conn: db.Connection) -> dict[str, Any]:
             if aid is None:
-                return {"recent": [], "has_seller": False, "connected": books.has_live_grant(conn, user_id),
-                        "waiting": {"tasks": 0, "held": 0}}
+                return {"recent": [], "has_seller": False, "connected": books.has_live_grant(conn, user_id)}
             return {
                 "recent": books.recent_payments(conn, aid),
                 "has_seller": any(sl["status"] == "approved" for sl in books.list_sellers(conn, aid)),
                 "connected": books.has_live_grant(conn, user_id),
-                "waiting": mandates.count_pending(conn, aid),
             }
 
         found = await run_db(data)
@@ -775,8 +758,6 @@ def create_app(
         if refusal is not None or session is None:
             return refusal or forbidden(request)
         aid = view["agent_id"]
-        if view["agent"]:
-            await run_db(link_approvals.expire, view["agent"])
         groups = await run_db(books.payments_by_task, aid) if aid is not None else []
         context = {**account_context(session, view, "payments"), "groups": groups,
                    "payments": [row for group in groups for row in group["rows"]]}
@@ -799,7 +780,7 @@ def create_app(
 
     async def rules_page(
         request: Request, session: auth.Session, view: Mapping[str, Any], *, status: int = 200,
-        error: str | None = None, typed: Mapping[str, str] | None = None, confirm: Mapping[str, Any] | None = None,
+        error: str | None = None, typed: Mapping[str, str] | None = None,
     ) -> Response:
         """Render Rules: limits and the sellers that apply to this agent."""
         aid = view["agent_id"]
@@ -827,7 +808,6 @@ def create_app(
             "typed_budget": typed.get("budget", results.usdc_text(view["weekly_budget"]) if aid is not None else ""),
             "typed_name": typed.get("name", ""),
             "typed_pay_to": typed.get("pay_to", ""),
-            "confirm": confirm,
         }
         return page(request, "account_rules.html", context, status)
 
@@ -843,31 +823,29 @@ def create_app(
         request: Request, session: auth.Session, view: Mapping[str, Any], *, status: int = 200,
         error: str | None = None,
     ) -> Response:
-        """Render Tasks: what the agent is working on (provisional first), the payments held for the owner, and each
-        task's price comparisons."""
+        """Render Tasks: what the agent is working on, money in escrow now, and each task's price comparisons."""
         aid = view["agent_id"]
 
         def data(conn: db.Connection) -> dict[str, Any]:
             comparisons: dict[int, list[dict[str, Any]]] = {}
             for c in mandates.list_comparisons(conn, aid):
                 comparisons.setdefault(c["mandate_id"], []).append(c)
-            return {"tasks": mandates.list_for_agent(conn, aid), "held": mandates.list_held(conn, aid),
-                    "escrow_held": mandates.list_escrow_held(conn, aid), "comparisons": comparisons}
+            return {"tasks": mandates.list_for_agent(conn, aid),
+                    "escrow_held": books.escrow_now(conn, aid), "comparisons": comparisons}
 
-        empty: dict[str, Any] = {"tasks": [], "held": [], "escrow_held": [], "comparisons": {}}
+        empty: dict[str, Any] = {"tasks": [], "escrow_held": [], "comparisons": {}}
         found = await run_db(data) if aid is not None else empty
         done = request.query_params.get("done")
         context = {
             **account_context(session, view, "tasks"), **found, "error": error,
             "done": done if done in TASK_DONE_TEXT and error is None else None,
             "done_text": TASK_DONE_TEXT.get(done or "", ""),
-            "provisional_cap": usdc(guard.POLICY["intent_provisional_budget"]),
         }
         return page(request, "account_tasks.html", context, status)
 
     @app.get("/account/tasks")
     async def account_tasks(request: Request) -> Response:
-        """Tasks: confirm or revoke what the agent is working on, and allow held payments once."""
+        """Tasks: what the agent is working on; the owner can revoke a task (stop all its spending)."""
         refusal, session, view = await account_get(request, "/account/tasks")
         if refusal is not None or session is None:
             return refusal or forbidden(request)
@@ -907,35 +885,6 @@ def create_app(
         if not auth.check_csrf(settings, session.value, "account", _first(form, "csrf")):
             return forbidden(request), None, form
         return None, user, form
-
-    @app.get("/account/approvals/{request_id}")
-    async def purchase_approval(request: Request, request_id: int) -> Response:
-        """Authenticated human fallback for clients without native MCP forms."""
-        refusal, session, view = await account_get(request, "/account/payments")
-        if refusal is not None or session is None:
-            return refusal or forbidden(request)
-        row = await run_db(link_approvals.get, view["agent"], request_id) if view["agent"] else None
-        if row is None:
-            return page(request, "error.html", {"title": "Not found", "message": "No such purchase for you."}, 404)
-        return page(request, "purchase_approval.html", {
-            **account_context(session, view, "payments"), "purchase": row,
-        })
-
-    @app.post("/account/approvals/{request_id}")
-    async def decide_purchase(request: Request, request_id: int) -> Response:
-        refusal, user, form = await account_post(request, "/account/payments")
-        if refusal is not None or user is None:
-            return refusal or forbidden(request)
-        choice = _first(form, "choice")
-        if choice not in ("yes", "no"):
-            return forbidden(request)
-        identity = await run_db(users.identity_for, user["id"])
-        if identity is None:
-            return forbidden(request)
-        row = await run_db(link_approvals.decide, identity.agent, request_id, str(user["id"]), choice)
-        if row is None:
-            return forbidden(request)
-        return _redirect(f"/account/approvals/{request_id}")
 
     @app.post("/account/rules/limits")
     async def save_limits(request: Request) -> Response:
@@ -1003,13 +952,6 @@ def create_app(
         if view["agent_id"] is None:
             return await rules_page(request, session, view, status=400,
                                     error="Create your wallet first, on the Overview page.", typed=typed)
-        status = _first(form, "status") or ""
-        address = typed["pay_to"].strip()
-        if status == "approved" and _first(form, "confirm") != "1" and owner.ADDRESS.fullmatch(address):
-            warnings = await seller_warnings(view["agent_id"], address)
-            if warnings:
-                return await rules_page(request, session, view, typed=typed,
-                                        confirm={"name": typed["name"], "pay_to": address, "warnings": warnings})
 
         def save(conn: db.Connection) -> None:
             with db.transaction(conn):
@@ -1024,47 +966,12 @@ def create_app(
         log.info("user %s changed their seller list", user["id"])
         return _redirect("/account/rules?done=seller")
 
-    async def seller_warnings(agent_id: int, address: str) -> list[str]:
-        """Reasons to look twice before approving this address: it imitates a known one, or has never been used.
-
-        Nothing when the agent already approved it. A failed chain lookup is itself a warning.
-        """
-        def known(conn: db.Connection) -> tuple[list[str], bool]:
-            listed = books.list_sellers(conn, agent_id)
-            mine = conn.execute("SELECT wallet_address FROM users WHERE agent_id = %s", (agent_id,)).fetchone()
-            addresses = [s["pay_to"] for s in listed if s["status"] == "approved"]
-            if mine is not None and mine["wallet_address"]:
-                addresses.append(mine["wallet_address"])
-            return addresses, any(a.lower() == address.lower() for a in addresses)
-
-        addresses, already = await run_db(known)
-        if already:
-            return []
-        warnings = []
-        imitated = guard.imitates(address, addresses)
-        if imitated:
-            warnings.append(f"It looks like {imitated} (same start and end, different middle). Scammers make "
-                            "lookalike addresses so a payment goes to the wrong wallet.")
-        try:
-            profile = await chain.wallet_profile(address)
-        except chain.ChainError:
-            warnings.append("Sentinel could not check this wallet's history on Base Sepolia right now.")
-            return warnings
-        if profile.flagged:
-            warnings.append("The Base Sepolia explorer flags this wallet as a scam.")
-        elif profile.unused:
-            warnings.append("It has no activity at all on Base Sepolia, so it may have just been created. Real "
-                            "sellers usually have a history.")
-        elif profile.is_new():
-            warnings.append(f"It is new: {profile.summary()}. Scam sellers often use fresh wallets.")
-        return warnings
-
     async def task_action(request: Request, action: Callable[[db.Connection, Mapping[str, Any], Mapping[str, Any],
                                                               str], None], done: str) -> Response:
         """The checks every Tasks form shares, then action(conn, view, form, user id) in one transaction.
 
         A ValueError from the action is shown on the Tasks page; success goes back to it with a banner. The agent is
-        always the session user's own, never a form field, so nobody can confirm or allow anything for another user.
+        always the session user's own, never a form field, so nobody can revoke another user's task.
         """
         refusal, user, form = await account_post(request, "/account/tasks")
         if refusal is not None or user is None:
@@ -1095,16 +1002,6 @@ def create_app(
             raise ValueError("That request was not understood. Reload the page and try again.")
         return int(raw)
 
-    @app.post("/account/tasks/confirm")
-    async def confirm_task(request: Request) -> Response:
-        """Confirm one of the user's provisional tasks with a budget up to their weekly budget."""
-
-        def confirm(conn: db.Connection, view: Mapping[str, Any], form: Mapping[str, Any], _user: str) -> None:
-            budget = owner.parse_usd(_first(form, "budget") or "")
-            mandates.confirm(conn, form_id(form, "task_id"), view["agent_id"], budget, view["weekly_budget"])
-
-        return await task_action(request, confirm, "confirm")
-
     @app.post("/account/tasks/revoke")
     async def revoke_task(request: Request) -> Response:
         """Revoke one of the user's tasks: nothing more can be bought for it."""
@@ -1113,53 +1010,6 @@ def create_app(
             mandates.revoke(conn, form_id(form, "task_id"), view["agent_id"])
 
         return await task_action(request, revoke, "revoke")
-
-    @app.post("/account/tasks/allow")
-    async def allow_held(request: Request) -> Response:
-        """Allow one held payment of the user's own agent once; the agent's next identical pay goes through."""
-
-        def allow(conn: db.Connection, view: Mapping[str, Any], form: Mapping[str, Any], user_id: str) -> None:
-            mandates.allow_once(conn, form_id(form, "request_id"), view["agent_id"], user_id)
-
-        return await task_action(request, allow, "allow")
-
-    async def escrow_action(request: Request, capture: bool) -> Response:
-        """Pay the seller (capture) or refund (void) one payment of the user's own agent held in escrow."""
-        refusal, user, form = await account_post(request, "/account/tasks")
-        if refusal is not None or user is None:
-            return refusal or forbidden(request)
-        view = await run_db(users.account_view, user["id"])
-        session, _, _ = await current(request)
-        if session is None:
-            return forbidden(request)
-        if view["agent_id"] is None or open_operator is None:
-            return await tasks_page(request, session, view, status=400,
-                                    error="Escrow is not set up on this server, so nothing can be paid or refunded.")
-        try:
-            attempt_id = form_id(form, "request_id")
-            async with open_operator() as operator:
-                with connect() as conn:
-                    outcome = await payments.settle_held(conn, operator, attempt_id, view["agent_id"], capture)
-        except (ValueError, LookupError) as exc:
-            return await tasks_page(request, session, view, status=400, error=str(exc))
-        except Exception:
-            log.warning("escrow %s failed for user %s", "capture" if capture else "void", user["id"], exc_info=True)
-            outcome = "processing"
-        if outcome == "processing":
-            return await tasks_page(request, session, view, status=502,
-                                    error="Coinbase did not confirm that in time. Try again in a minute.")
-        log.info("user %s: escrow %s request %s", user["id"], outcome, attempt_id)
-        return _redirect(f"/account/tasks?done={'capture' if capture else 'void'}")
-
-    @app.post("/account/tasks/capture")
-    async def capture_held(request: Request) -> Response:
-        """The owner pays the seller for a delivery Sentinel held in escrow."""
-        return await escrow_action(request, True)
-
-    @app.post("/account/tasks/void")
-    async def void_held(request: Request) -> Response:
-        """The owner refunds a payment Sentinel held in escrow; the seller is not paid."""
-        return await escrow_action(request, False)
 
     @app.post("/account/wallet")
     async def retry_wallet(request: Request) -> Response:

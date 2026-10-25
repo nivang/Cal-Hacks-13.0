@@ -1,4 +1,4 @@
-{% from "account_macros.html" import primary, secondary, danger, input, card, status_badge, seller_cell, seller_badge, source_badge, banners, no_wallet %}
+{% from "account_macros.html" import primary, secondary, danger, input, card, status_badge, seller_cell, seller_badge, source_badge, banners, no_wallet, ml_badge %}
 <div class="mt-6">
 {% if not agent %}
 {{ no_wallet() }}
@@ -16,7 +16,7 @@
       {% if group.task %}
       <h2 id="task-{{ loop.index }}-h" class="font-semibold">Task {{ group.task_id }}: {{ group.task.goal }}</h2>
       <p class="mt-0.5 text-xs text-stone-500">
-        {% if group.state == "provisional" %}Needs your confirmation{% elif group.state == "confirmed" %}Confirmed{% elif group.state == "revoked" %}Revoked{% else %}Ended{% endif %}
+        {% if group.state in ("provisional", "confirmed") %}Active{% elif group.state == "revoked" %}Revoked{% else %}Ended{% endif %}
         · spent {{ group.task.spent | usd }} of {{ group.task.budget | usd }} · started {{ group.task.created_at | when }}
       </p>
       {% else %}
@@ -24,7 +24,7 @@
       <p class="mt-0.5 text-xs text-stone-500">Payments made outside an agent task.</p>
       {% endif %}
     </div>
-    <p class="text-xs text-stone-600">{{ group.paid }} paid · {{ group.blocked }} blocked · {{ group.held }} held{% if group.searched %} · {{ group.searched }} found while searching{% endif %}</p>
+    <p class="text-xs text-stone-600">{{ group.paid }} paid · {{ group.stopped }} stopped{% if group.escrowed %} · {{ group.escrowed }} in escrow{% endif %}{% if group.searched %} · {{ group.searched }} found while searching{% endif %}</p>
   </div>
 <div class="overflow-x-auto rounded-lg border border-stone-200 bg-white">
   <table class="w-full min-w-[40rem] text-left text-sm">
@@ -46,8 +46,7 @@
 
         <td class="whitespace-nowrap px-3 py-2 text-right tabular-nums">{{ p.amount | usd }}</td>
         <td class="px-3 py-2">{{ status_badge(p.status) }}
-          {% if p.status == "escrowed" %}<a class="mt-1 block underline" href="/account/tasks#escrow-h">Review delivery</a>{% endif %}
-          {% if p.status in ("pending", "authorized") %}<a class="mt-1 block underline" href="/account/approvals/{{ p.id }}">Review approval</a>{% endif %}
+          {% if p.ml_model %}<span class="mt-1 block">{{ ml_badge(p) }}</span>{% endif %}
         </td>
         <td class="px-3 py-2">
           {% set w = p | why %}

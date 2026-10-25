@@ -2,7 +2,7 @@
 {% if section == "identity" %}
 <span title="{{ email }}">{{ email }}</span>
 {% elif not agent and not section.startswith("overview_") %}
-{% if section in ("live_feed", "payments_list", "rules_limits", "tasks_held", "books_summary") %}
+{% if section in ("live_feed", "payments_list", "rules_limits", "books_summary") %}
 {% from "account_macros.html" import no_wallet %}
 {{ no_wallet() }}
 {% endif %}

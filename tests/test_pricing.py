@@ -106,8 +106,8 @@ def test_the_pick_climbs_step_by_step_and_each_step_must_clear_the_margin():
     assert result.best_buyable is not None and result.best_buyable.offer.key == b.key
 
 
-def test_blocked_held_and_unreachable_offers_are_never_recommended():
-    for verdict in ("BLOCKED", "NEEDS_OWNER", "UNREACHABLE"):
+def test_blocked_and_unreachable_offers_are_never_recommended():
+    for verdict in ("BLOCKED", "UNREACHABLE"):
         great = offer("http://x.test/a", 10_000, fit=10, coverage=10, verdict=verdict)
         result = pick(great)
         assert result.best is None and result.best_buyable is None

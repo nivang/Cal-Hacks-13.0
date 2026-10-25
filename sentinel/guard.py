@@ -1,4 +1,4 @@
-"""Deterministic payment policy: ALLOW, BLOCK, or a human approval requirement.
+"""Deterministic payment policy: ALLOW or BLOCK. Sentinel decides; nobody is asked per payment.
 
 evaluate() is pure, so the same inputs always give the same decision. payments.py calls it before
 anything is signed, and test_guard.py is its answer key. Rules run in order and the first to fire wins:
@@ -7,22 +7,24 @@ anything is signed, and test_guard.py is its answer key. Rules run in order and 
   2. lookalike      the payee is not approved but imitates an approved seller's (or the owner's own) address: same
                     first 6 and last 4 hex characters, the address poisoning trick -> BLOCK
   3. flagged_wallet the Base Sepolia explorer flags the payee as a scam (chain.wallet_profile) -> BLOCK
-  3b. seller        explicitly blocked or noninteractive unknown -> BLOCK
-  4. payee_changed  this agent already paid this exact URL to a different address: the payee was swapped -> BLOCK
-  5. cap            amount above the agent's per payment cap -> BLOCK
-  6. budget         rolling spend + amount above the weekly budget -> BLOCK
-  7. price_jump     amount above 2x the median of the last 5 settled prices of this product (seller and URL) -> BLOCK
+  4. seller         on the owner's blocked list -> BLOCK
+  5. payee_changed  this agent already paid this exact URL to a different address: the payee was swapped -> BLOCK
+  6. cap            amount above the agent's per payment cap -> BLOCK
+  7. budget         rolling spend + amount above the weekly budget -> BLOCK
+  8. price_jump     amount above 2x the median of the last 5 settled prices of this product (seller and URL) -> BLOCK
                     (no history means the first price is trusted and becomes the baseline)
-  8. duplicate      same agent, payTo, url and amount inside the duplicate window -> BLOCK
-  9. seller         interactive unknown without one purchase authorization -> APPROVAL_REQUIRED
- 10. clean          everything passed -> ALLOW
+  9. duplicate      same agent, payTo, url and amount inside the duplicate window -> BLOCK
+ 10. seller_escrow  a seller not on the approved list is paid only through escrow -> ALLOW
+     seller         not on the approved list and no escrow offer -> BLOCK
+ 11. clean          an approved seller and everything passed -> ALLOW
 """
 import json
 from dataclasses import dataclass
 from decimal import Decimal
 from pathlib import Path
+from typing import Any
 
-ALLOW, BLOCK, APPROVAL_REQUIRED = "ALLOW", "BLOCK", "APPROVAL_REQUIRED"
+ALLOW, BLOCK = "ALLOW", "BLOCK"
 
 POLICY: dict[str, int] = json.loads((Path(__file__).parent / "policy.json").read_text())
 
@@ -37,6 +39,7 @@ class Quote:
     asset: str
     network: str
     timeout_s: int
+    escrow: bool = False  # paid through escrow: refunded automatically when the delivery check fails
 
 
 @dataclass(frozen=True)
@@ -62,6 +65,7 @@ class History:
     lookalike_of: str | None = None  # the approved (or own) address an unapproved payee imitates, if any
     url_paid_to: tuple[str, ...] = ()  # addresses this agent already paid for this exact URL
     payee_flagged: bool = False  # the explorer flags the payee as a scam (payments.payee_profile)
+    wallet_summary: str | None = None  # the payee's history in a few words (chain.WalletProfile.summary)
 
 
 @dataclass(frozen=True)
@@ -75,6 +79,20 @@ class Decision:
     rule: str
     detail: str
     related_id: int | None = None
+    ml: "MLScore | None" = None  # the model score behind this decision, if a model decided it
+
+
+@dataclass(frozen=True)
+class MLScore:
+    """One model's score for a payment: model is 'injection', score and threshold are 0 to 1."""
+
+    model: str
+    score: float
+    threshold: float
+
+    def columns(self) -> dict[str, Any]:
+        """The attempts.ML_COLUMNS values."""
+        return {"ml_model": self.model, "ml_score": self.score, "ml_threshold": self.threshold}
 
 
 def imitates(address: str, known: list[str]) -> str | None:
@@ -99,11 +117,8 @@ def usd(atomic: int) -> str:
     return f"${whole}.{frac.ljust(2, '0')}"
 
 
-def evaluate(
-    agent: Agent, quote: Quote, history: History, policy: dict[str, int] = POLICY,
-    *, interactive: bool = False, authorized: bool = False,
-) -> Decision:
-    """Return policy for this quote. authorized is set only after consuming a server-side human approval.
+def evaluate(agent: Agent, quote: Quote, history: History, policy: dict[str, int] = POLICY) -> Decision:
+    """Sentinel's policy decision for this quote: ALLOW or BLOCK, never a question for a human.
 
     detail is written for the owner and for the agent that asked, so it avoids jargon and rule names.
     """
@@ -130,12 +145,6 @@ def evaluate(
 
     if history.seller_status == "blocked":
         return Decision(BLOCK, "seller", f"The seller {quote.pay_to} is on the owner's blocked list.")
-    # Noninteractive callers still require permanent seller approval.
-    if history.seller_status != "approved" and not (interactive or authorized):
-        return Decision(
-            BLOCK, "seller",
-            f"The seller {quote.pay_to} is not on the owner's approved list. Only the owner can add sellers.",
-        )
 
     paid_before = {address.lower() for address in history.url_paid_to}
     if paid_before and quote.pay_to.lower() not in paid_before:
@@ -181,6 +190,22 @@ def evaluate(
             related_id=history.duplicate_of,
         )
 
-    if history.seller_status != "approved" and not authorized:
-        return Decision(APPROVAL_REQUIRED, "seller", "This seller is not approved. Ask the user before signing.")
+    if history.seller_status != "approved":
+        return judge_seller(quote, history)
     return Decision(ALLOW, "clean", "All checks passed.")
+
+
+def judge_seller(quote: Quote, history: History) -> Decision:
+    """Rule 10: a seller not on the approved list is paid only through escrow, so a bad delivery is refunded."""
+    facts = f" ({history.wallet_summary})" if history.wallet_summary else ""
+    if quote.escrow:
+        return Decision(
+            ALLOW, "seller_escrow",
+            f"This seller is not on your approved list{facts}. Paying through escrow, so the money comes back if the "
+            "delivery fails the check.",
+        )
+    return Decision(
+        BLOCK, "seller",
+        f"The seller {quote.pay_to} is not on your approved list{facts} and does not offer escrow, so Sentinel will "
+        "not pay it directly.",
+    )

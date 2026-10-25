@@ -32,11 +32,12 @@ def quote(pay_to=NEW_SELLER, url="http://x/a", amount=500_000):
 
 
 def blocked_by_seller(conn, agent, pay_to=NEW_SELLER):
-    """True when the guard blocks this agent's payment on the seller rule."""
+    """True when the guard blocks this agent's payment for its seller: on the blocked list, or not approved (with no
+    wallet profile here, the wallet risk model has nothing to score)."""
     try:
         payments.authorize(conn, agent, "why", quote(pay_to=pay_to, url=f"http://x/{agent[-4:]}"))
     except payments.PaymentRejected as e:
-        return e.rule == "seller"
+        return e.rule in ("seller", "wallet_unknown")
     return False
 
 
@@ -259,7 +260,7 @@ def test_every_why_label():
     assert why({"status": "failed", "rule": "", "detail": "", "tx_hash": None}) == ("Payment did not complete", "")
     assert why({"status": "failed", "tx_hash": "0xabc"}) == ("Paid but not recorded, contact the owner", "")
     assert why({"status": "approved"}) == ("In progress", "")
-    assert why({"status": "pending"}) == ("Waiting for your approval", "Nothing has been signed.")
+    assert why({"status": "pending"}) == ("Not paid", "Nothing was signed.")
     assert why({"status": "settled", "tx_hash": "0x1"}) == ("", "")
 
 

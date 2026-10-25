@@ -244,6 +244,8 @@
 .lv-check-label { color: var(--lv-ink-2); }
 .lv-checks .is-stop .lv-check-label, .lv-checks .is-wait .lv-check-label { font-weight: 600; color: var(--lv-ink); }
 .lv-check-note { display: block; margin-top: 1px; color: var(--lv-ink-2); overflow-wrap: break-word; }
+.lv-ml { display: block; width: fit-content; margin-top: 3px; border-radius: 999px; padding: 1px 8px; font-size: 11px; font-weight: 600; font-variant-numeric: tabular-nums; background: var(--lv-track); color: var(--lv-ink-2); }
+.lv-ml.is-hit { background: rgb(220 38 38 / 14%); color: var(--lv-stop); }
 .lv-out { border-left: 1px solid var(--lv-line); padding-left: 20px; }
 .lv-money { font-size: 22px; font-weight: 650; letter-spacing: -0.4px; color: var(--lv-ink); }
 .lv-money span { margin-left: 6px; font-size: 12px; font-weight: 400; letter-spacing: 0; color: var(--lv-faint); }

@@ -1,7 +1,7 @@
 {% from "account_macros.html" import primary, secondary, danger, input, card, status_badge, seller_cell, seller_badge, source_badge, banners, no_wallet %}
 <section class="mt-6 border-b border-stone-200 pb-6" aria-labelledby="sellers-h">
   <h2 id="sellers-h" class="font-semibold">Approved sellers</h2>
-  <details class="mt-2 text-sm text-stone-600"><summary class="cursor-pointer">How seller approvals work</summary><p class="mt-2">Your agent can only pay addresses approved here, whatever a web page it read says. Operator rows apply to everyone and you cannot change them.</p></details>
+  <details class="mt-2 text-sm text-stone-600"><summary class="cursor-pointer">How seller approvals work</summary><p class="mt-2">Sentinel decides every payment itself. Sellers you approve here pass the seller check and sellers you block are never paid, whatever a web page your agent read says. Any other seller is paid only through escrow, so a delivery that fails the check is refunded. Operator rows apply to everyone and you cannot change them.</p></details>
   {% if sellers %}
   <div class="mt-4 overflow-x-auto">
     <table class="w-full min-w-[40rem] text-left text-sm">
@@ -38,7 +38,7 @@
     </table>
   </div>
   {% else %}
-  <p class="mt-4 rounded-md bg-stone-50 p-3 text-sm text-stone-700">No sellers yet, so every payment is blocked until you approve one. Add the address of a vendor below.</p>
+  <p class="mt-4 rounded-md bg-stone-50 p-3 text-sm text-stone-700">No sellers yet. Until you approve one, Sentinel judges every seller by its wallet's history. Add the address of a vendor you trust below.</p>
   {% endif %}
 
   <details class="mt-6 border-t border-stone-200 pt-5"{% if not sellers or typed_name or typed_pay_to %} open{% endif %}>

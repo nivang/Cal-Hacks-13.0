@@ -85,7 +85,7 @@ def test_attempts_list_names_the_seller_and_splits_the_rule(conn):
     blocked, allowed = owner.list_attempts(conn)
     assert (allowed["seller"], allowed["agent"], allowed["amount"], allowed["rule"]) == (
         "DataCo", "research-agent", 500_000, "clean")
-    assert blocked["seller"] is None and blocked["rule"] == "seller" and NEW_SELLER in blocked["detail"]
+    assert blocked["seller"] is None and blocked["rule"] == "wallet_unknown" and NEW_SELLER in blocked["detail"]
 
 
 def test_journal_list_has_balanced_lines_per_entry(conn):

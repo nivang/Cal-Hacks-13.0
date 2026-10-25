@@ -1,4 +1,5 @@
-"""Texting the agent (texting.py): linking a handle, the agent's tools and turns, approvals by link, the relay routes.
+"""Texting the agent (texting.py): linking a handle, the agent's tools and turns, Sentinel's own decisions, the relay
+routes.
 
 The agent's model is a scripted fake (FakeClient); payments go through the pay spy, so the real guard, intent review
 and ledger run on the test connection.
@@ -15,7 +16,7 @@ import pytest
 from conftest import TEST_BASE_URL, form_value, provision_user, sign_in
 from fastmcp.utilities.asgi_transport import run_asgi_lifespan
 
-from sentinel import link_approvals, texting
+from sentinel import texting
 from sentinel.web import users
 
 PHONE = "+15551234567"
@@ -183,8 +184,7 @@ async def test_the_agent_has_only_sentinel_tools_and_no_web_access(make_desk, co
     await linked_user(connect, desk)
     await desk.handle(PHONE, "hi there")
     request = desk.client.requests[0]
-    assert {tool["name"] for tool in request["tools"]} == {"start_task", "find_services", "quote", "pay",
-                                                           "resume_payment"}
+    assert {tool["name"] for tool in request["tools"]} == {"start_task", "find_services", "quote", "pay"}
     assert all("type" not in tool or tool["type"] == "custom" for tool in request["tools"])  # no server web tools
     assert "no web search" in request["system"] and "Cite the source URL" in request["system"]
     assert sent(desk) == ["Hello."]
@@ -211,61 +211,36 @@ async def test_a_text_becomes_a_task_in_the_owners_words_and_a_paid_answer(make_
     assert texts[-1].startswith("Acme raised a Series B.")
 
 
-@pytest.mark.anyio
-async def test_a_new_seller_texts_an_approval_link_and_resume_pays_only_after_yes(make_desk, connect, pay_spy):
-    def pay_step(messages):
-        task_id = last_result(messages)["task_id"]
-        return use("pay", {"task_id": task_id, "url": "http://new.test/funding",
-                           "reason": "The briefing needs Acme's funding rounds; this seller lists them.",
-                           "found_at": "owner"}, "c2")
+def new_seller_step(messages):
+    task_id = last_result(messages)["task_id"]
+    return use("pay", {"task_id": task_id, "url": "http://new.test/funding",
+                       "reason": "The briefing needs Acme's funding rounds; this seller lists them.",
+                       "found_at": "owner"}, "c2")
 
-    desk = make_desk(use("start_task", {}, "c1"), pay_step, say("Waiting for your approval."))
-    identity = await linked_user(connect, desk)
+
+@pytest.mark.anyio
+async def test_a_new_seller_with_a_safe_wallet_is_paid_without_any_approval_text(make_desk, connect, pay_spy):
+    desk = make_desk(use("start_task", {}, "c1"), new_seller_step, say("Acme raised a Series B."))
+    await linked_user(connect, desk)
     pay_spy.pay_to = UNKNOWN
     await desk.handle(PHONE, REQUEST)
-    for task in list(desk.background):  # the approval watcher; the test answers for it below
-        task.cancel()
+    assert last_result(desk.conversations[PHONE].messages[:-1])["status"] == "SETTLED"
     texts = sent(desk)
-    approval = next(t for t in texts if "/account/approvals/" in t)
-    request_id = int(approval.rsplit("/", 1)[1])
-    assert approval.startswith("Approve $0.50 to new.test?")
-    assert last_result(desk.conversations[PHONE].messages[:-1])["status"] == "APPROVAL_REQUIRED"
-
-    pending = await desk.resume(identity, PHONE, request_id)
-    assert pending.status == "APPROVAL_REQUIRED" and len(pay_spy.calls) == 1  # not authorized, nothing paid
-    with connect() as conn:
-        link_approvals.decide(conn, identity.agent, request_id, identity.user_id, "yes")
-    paid = await desk.resume(identity, PHONE, request_id)
-    assert paid.status == "SETTLED" and len(pay_spy.calls) == 2
+    assert not any("/account/approvals/" in t or "Approve" in t for t in texts)
+    assert any(t.startswith("\u2705 Bought from new.test for $0.50") for t in texts)
+    assert len(pay_spy.calls) == 1
 
 
 @pytest.mark.anyio
-async def test_the_watcher_tells_the_agent_once_the_owner_answers(make_desk, connect, pay_spy, monkeypatch):
-    monkeypatch.setattr(texting, "APPROVAL_POLL_S", 0.01)
-
-    def pay_step(messages):
-        task_id = last_result(messages)["task_id"]
-        return use("pay", {"task_id": task_id, "url": "http://new.test/funding",
-                           "reason": "The briefing needs Acme's funding rounds; this seller lists them.",
-                           "found_at": "owner"}, "c2")
-
-    def resume_step(messages):
-        note = messages[-1]["content"]
-        assert note.startswith("Sentinel: the owner approved request")
-        return use("resume_payment", {"request_id": int(note.split("request ")[1].split(" ")[0])}, "c3")
-
-    desk = make_desk(use("start_task", {}, "c1"), pay_step, say("Waiting for your approval."), resume_step,
-                     say("Got it: Acme raised a Series B."))
-    identity = await linked_user(connect, desk)
+async def test_a_new_seller_with_a_risky_wallet_is_blocked_quietly(make_desk, connect, pay_spy, fake_chain):
+    desk = make_desk(use("start_task", {}, "c1"), new_seller_step, say("No paid source could be used."))
+    await linked_user(connect, desk)
     pay_spy.pay_to = UNKNOWN
+    fake_chain.new.add(UNKNOWN.lower())
     await desk.handle(PHONE, REQUEST)
-    request_id = int(next(t for t in sent(desk) if "/account/approvals/" in t).rsplit("/", 1)[1])
-    with connect() as conn:
-        link_approvals.decide(conn, identity.agent, request_id, identity.user_id, "yes")
-    # Resuming runs the real payment checks against the remote test database.
-    await asyncio.wait_for(asyncio.gather(*desk.background), 30)
-    assert sent(desk)[-1] == "Got it: Acme raised a Series B."
-    assert len(pay_spy.calls) == 2
+    result = last_result(desk.conversations[PHONE].messages[:-1])
+    assert (result["status"], result["rule"]) == ("BLOCKED", "wallet_risk")
+    assert not any("/account/approvals/" in t or "Approve" in t or "new.test" in t for t in sent(desk))
 
 
 @pytest.mark.anyio

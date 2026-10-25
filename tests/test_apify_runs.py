@@ -127,8 +127,6 @@ async def test_credit_checks_refuse_before_spending(make_server, alice, conn, cr
         monkeypatch.delenv('APIFY_TOKEN')
     elif constraint == 'cap':
         monkeypatch.setenv('APIFY_MAX_RUN_USD', '0.01')
-    elif constraint == 'task_budget':
-        monkeypatch.setitem(guard.POLICY, 'intent_provisional_budget', 10_000)
     elif constraint == 'weekly':
         conn.execute("UPDATE agents SET weekly_budget = 0.01 WHERE name = %s", (alice.agent,))
     elif constraint == 'daily':
@@ -142,10 +140,12 @@ async def test_credit_checks_refuse_before_spending(make_server, alice, conn, cr
     elif constraint == 'minimum':
         credit_api.minimum = 0.5
     changes: dict[str, Any] = {}
-    if constraint == 'revoked':
+    if constraint in ('revoked', 'task_budget'):
         server = make_server(apify_client_factory=credit_api.client)
-        task = await call(server, 'start_task', task='Test Apify credit purchases of example website text.')
-        mandates.revoke(conn, task['task_id'], db.agent_id(conn, alice.agent))
+        task = await call(server, 'start_task', task='Test Apify credit purchases of example website text.',
+                          **({'budget_usd': '0.01'} if constraint == 'task_budget' else {}))
+        if constraint == 'revoked':
+            mandates.revoke(conn, task['task_id'], db.agent_id(conn, alice.agent))
         changes['task_id'] = task['task_id']
     _, _, response = await purchase(make_server, credit_api, **changes)
     assert response['status'] == 'BLOCKED' and not credit_api.starts

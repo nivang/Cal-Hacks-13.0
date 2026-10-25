@@ -13,9 +13,9 @@ compare() runs the MCP tool compare_prices. It never pays:
                text reaches the model only as quoted JSON fields; a judge failure leaves every fit unknown, and an
                offer with an unknown fit is never recommended
   5. pick      pricing.pick: the best value, the best buyable and the cheapest buyable, stored per task
-               (mandates.save_comparison) so the pricier_pick rule can hold a purchase that costs more than the
+               (mandates.save_comparison) so the pricier_pick rule can block a purchase that costs more than the
                cheapest buyable one, unless the owner turned on auto buy and it is the recommended best value
-Offers Sentinel stops (blocked, held, unreachable) are kept in the stored comparison and the owner's payment log,
+Offers Sentinel stops (blocked, unreachable) are kept in the stored comparison and the owner's payment log,
 not shown to the agent, as with find_services.
 """
 import asyncio
@@ -231,7 +231,7 @@ async def compare(
         if row is None:
             return results.ComparisonResult(status="FAILED", message="There is no such task for you.")
         mandate = mandates.to_mandate(row)
-        budget_left = max(0, intent.effective_budget(mandate) - mandates.spend(conn, mandate.id))
+        budget_left = max(0, mandate.budget - mandates.spend(conn, mandate.id))
         auto_buy = bool(attempts.load_agent(conn, agent)["auto_buy_best_value"])
 
     async def read_catalog() -> list[catalog.Listing] | None:

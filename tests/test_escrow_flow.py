@@ -1,4 +1,4 @@
-"""Tests for the escrow path of payments._pay_with, settle_held and sweep: a fake seller, signer and operator.
+"""Tests for the escrow path of payments._pay_with and sweep: a fake seller, signer and operator.
 
 Only the flow and what it records are real. The seller offers auth-capture with the fake operator plus exact, so
 these also cover choosing between them.
@@ -159,27 +159,25 @@ async def test_a_seller_that_never_answers_is_voided(conn, seller, operator):
     assert (result.escrow, result.verdict.rule) == ("voided", "http_error")
 
 
-async def test_a_doubtful_delivery_waits_for_the_owner_who_captures_it(conn, seller, operator):
+async def test_a_doubtful_delivery_is_refunded_without_asking_anyone(conn, seller, operator):
     judge = FakeJudge()
     judge.delivered = "not_delivered"
     result = await pay(conn, operator, a_task(conn, judge))
-    assert operator.calls == ["authorize"] and len(judge.deliveries) == 1
-    assert (result.escrow, result.settled, result.body, result.verdict.rule) == ("held", False, "", "not_delivered")
-    row = conn.execute("SELECT held, verdict FROM escrow_payments WHERE attempt_id = %s",
+    assert operator.calls == ["authorize", "void"] and len(judge.deliveries) == 1
+    assert (result.escrow, result.settled, result.body, result.verdict.rule) == ("voided", False, "", "not_delivered")
+    row = conn.execute("SELECT held, verdict, state, decided_by FROM escrow_payments WHERE attempt_id = %s",
                        (result.attempt_id,)).fetchone()
-    assert (row["held"], row["verdict"]) == (True, "unsure")
-    outcome = await payments.settle_held(conn, operator, result.attempt_id, db.agent_id(conn, "research-agent"), True)
-    assert outcome == "captured" and operator.calls == ["authorize", "capture"]
-    assert attempts.load_result(conn, result.attempt_id) == GOOD.decode()
-    with pytest.raises(LookupError):
-        await payments.settle_held(conn, operator, result.attempt_id, db.agent_id(conn, "research-agent"), False)
+    assert (row["held"], row["verdict"], row["state"], row["decided_by"]) == (False, "unsure", "voided", "sentinel")
+    assert attempts.get_attempt(conn, result.attempt_id, "research-agent")["status"] == "voided"
+    assert balances(conn)["1010"] == 0
 
 
-async def test_a_judge_failure_holds_never_pays(conn, seller, operator):
+async def test_a_judge_failure_refunds_never_pays(conn, seller, operator):
     judge = FakeJudge()
     judge.fail_delivery = True
     result = await pay(conn, operator, a_task(conn, judge))
-    assert (result.escrow, result.verdict.rule) == ("held", "judge_unavailable")
+    assert (result.escrow, result.verdict.rule) == ("voided", "judge_unavailable")
+    assert operator.calls == ["authorize", "void"]
 
 
 async def test_a_failed_hold_fails_the_attempt_and_releases_the_lock(conn, seller, operator):
@@ -201,10 +199,24 @@ async def test_a_failed_capture_is_retried_by_the_sweeper(conn, seller, operator
     assert attempts.get_attempt(conn, result.attempt_id, "research-agent")["status"] == "settled"
 
 
-async def test_the_sweeper_voids_a_held_payment_near_its_deadline(conn, seller, operator):
+async def test_a_failed_refund_is_retried_by_the_sweeper(conn, seller, operator):
     judge = FakeJudge()
     judge.delivered = "unsure"
+    operator.fail = {"void"}
     result = await pay(conn, operator, a_task(conn, judge))
+    assert (result.escrow, result.settled) == ("processing", False)
+    operator.fail = set()
+    assert await payments.sweep(conn, operator) == 1
+    assert attempts.get_attempt(conn, result.attempt_id, "research-agent")["status"] == "voided"
+
+
+async def test_the_sweeper_voids_a_payment_held_before_sentinel_decided_alone_near_its_deadline(conn, seller,
+                                                                                                 operator):
+    operator.fail = {"capture"}
+    result = await pay(conn, operator)
+    operator.fail = set()
+    conn.execute("UPDATE escrow_payments SET held = true, verdict = 'unsure' WHERE attempt_id = %s",
+                 (result.attempt_id,))  # a row held for the owner by an older Sentinel
     assert await payments.sweep(conn, operator) == 0  # not due yet
     conn.execute("UPDATE escrow_payments SET capture_deadline = now() + interval '1 minute' WHERE attempt_id = %s",
                  (result.attempt_id,))

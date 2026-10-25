@@ -198,26 +198,24 @@ async def test_invalid_section_is_rejected(section_client):
     ("/account/payments", "payments_list", "No payments yet"),
     ("/account/live", "live_feed", "No task yet"),
     ("/account/rules", "rules_auto_buy", "Turn auto buy on"),
-    ("/account/tasks", "tasks_held", "Nothing is waiting for you"),
+    ("/account/tasks", "tasks_escrow", 'data-account-fragment="tasks_escrow"'),
     ("/account/tasks", "tasks_list", "No tasks yet"),
     ("/account/books", "books_summary", "Books balance"),
     ("/account/books", "books_journal", "No entries yet"),
     ("/account/books", "books_totals", "Nothing booked yet"),
 ])
 async def test_each_data_section_renders_independently(section_client, monkeypatch, path, section, text):
-    from sentinel import link_approvals, mandates
+    from sentinel import mandates
     from sentinel.web import books
 
     for module, name in [(books, "recent_payments"), (books, "list_sellers"), (books, "payments_by_task"),
-                         (books, "journal"), (mandates, "list_held"), (mandates, "list_for_agent"),
+                         (books, "journal"), (books, "escrow_now"), (mandates, "list_for_agent"),
                          (mandates, "list_comparisons")]:
         monkeypatch.setattr(module, name, lambda *_: [])
     monkeypatch.setattr(books, "has_live_grant", lambda *_: False)
     monkeypatch.setattr(books, "summary", lambda *_: {"spent": 0, "settled": 0})
     monkeypatch.setattr(books, "totals", lambda *_: {"balanced": True, "rows": []})
-    monkeypatch.setattr(mandates, "count_pending", lambda *_: {"tasks": 0, "held": 0})
-    monkeypatch.setattr(link_approvals, "expire", lambda *_: None)
-    monkeypatch.setattr(books, "fingerprint", lambda *_: ("tag", False))
+    monkeypatch.setattr(books, "fingerprint", lambda *_: "tag")
     monkeypatch.setattr(books, "live_view", lambda *_: {"task": None, "counts": {}, "escrow": [], "feed": []})
     async with section_client as client:
         response = await client.get(path, headers={"x-sentinel-section": section})
@@ -231,7 +229,6 @@ async def test_slow_history_does_not_hold_up_wallet(section_client, monkeypatch)
     import asyncio
     import threading
 
-    from sentinel import mandates
     from sentinel.web import books
 
     started, release = threading.Event(), threading.Event()
@@ -242,7 +239,6 @@ async def test_slow_history_does_not_hold_up_wallet(section_client, monkeypatch)
         return []
 
     monkeypatch.setattr(books, "recent_payments", slow_history)
-    monkeypatch.setattr(mandates, "count_pending", lambda *_: {"tasks": 0, "held": 0})
     async with section_client as client:
         history = asyncio.create_task(client.get("/account", headers={"x-sentinel-section": "overview_recent"}))
         try:
@@ -260,12 +256,10 @@ async def test_slow_history_does_not_hold_up_wallet(section_client, monkeypatch)
 
 @pytest.mark.parametrize(("path", "section"), [("/account/live", "live_feed"), ("/account/payments", "payments_list")])
 async def test_polling_sections_answer_304_until_something_changes(section_client, monkeypatch, path, section):
-    from sentinel import link_approvals
     from sentinel.web import books
 
-    tag, loads, expired = ["one"], [], []
-    monkeypatch.setattr(books, "fingerprint", lambda *_: (tag[0], False))
-    monkeypatch.setattr(link_approvals, "expire", lambda *_: expired.append(1))
+    tag, loads = ["one"], []
+    monkeypatch.setattr(books, "fingerprint", lambda *_: tag[0])
     monkeypatch.setattr(books, "live_view", lambda *_: loads.append(1) or {"task": None, "counts": {}, "escrow": [],
                                                                          "feed": []})
     monkeypatch.setattr(books, "payments_by_task", lambda *_: loads.append(1) or [])
@@ -279,21 +273,6 @@ async def test_polling_sections_answer_304_until_something_changes(section_clien
         changed = await client.get(path, headers={"x-sentinel-section": section, "if-none-match": etag})
         assert changed.status_code == 200 and changed.headers["etag"] != etag
     assert loads == [1, 1]  # the 304 read no payment data
-    assert expired == []  # nothing to expire, so no write
-
-
-async def test_an_expired_approval_is_marked_before_the_tag_is_read_again(section_client, monkeypatch):
-    from sentinel import link_approvals
-    from sentinel.web import books
-
-    calls = []
-    monkeypatch.setattr(books, "fingerprint", lambda *_: calls.append("tag") or ("t", len(calls) == 1))
-    monkeypatch.setattr(link_approvals, "expire", lambda *_: calls.append("expire"))
-    monkeypatch.setattr(books, "payments_by_task", lambda *_: [])
-    async with section_client as client:
-        response = await client.get("/account/payments", headers={"x-sentinel-section": "payments_list"})
-    assert response.status_code == 200
-    assert calls == ["tag", "expire", "tag"]
 
 
 async def test_polling_sections_recheck_revoked_sessions(section_client, monkeypatch):

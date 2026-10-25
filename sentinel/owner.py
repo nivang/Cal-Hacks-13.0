@@ -94,7 +94,7 @@ def set_agent_limits(conn: Connection, agent: str, per_payment_cap: int, weekly_
 
 def set_auto_buy(conn: Connection, agent: str, on: bool) -> None:
     """Turn the agent's auto buy on or off: on, the recommended best value of a price comparison is bought without
-    asking even when it is the pricier option (every other check still runs); off, it is held for the owner."""
+    asking even when it is the pricier option (every other check still runs); off, it is blocked."""
     updated = conn.execute("UPDATE agents SET auto_buy_best_value = %s WHERE name = %s", (on, agent)).rowcount
     if updated == 0:
         raise LookupError(f"no agent named {agent}")
@@ -135,7 +135,8 @@ def list_attempts(
         " a.url, s.added_by AS seller_listed_by, s.added_at AS seller_listed_at, a.mandate_id AS task_id, a.found_at,"
         " a.intent_tier, a.intent_verdict, a.intent_reason, COALESCE(a.preview, false) AS found_while_searching,"
         " a.delivery_verdict, a.delivery_reason, e.state AS escrow_state, e.held AS escrow_held,"
-        " e.authorize_tx, e.capture_tx, e.void_tx, e.capture_deadline, e.decided_by"
+        " e.authorize_tx, e.capture_tx, e.void_tx, e.capture_deadline, e.decided_by,"
+        " a.ml_model, a.ml_score, a.ml_threshold"
         " FROM payment_attempts a JOIN agents ag ON ag.id = a.agent_id"
         " LEFT JOIN escrow_payments e ON e.attempt_id = a.id"
         " LEFT JOIN LATERAL (SELECT x.name, x.added_by, x.added_at FROM sellers x"

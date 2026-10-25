@@ -8,23 +8,20 @@ Who a text acts for comes only from phone_links (migration 016), never from anyt
 is linked by texting the one time code the account page shows (issue_code, link); "Sign out everywhere" and the
 Unlink button remove it. Texts from a handle that is not linked get the instructions to link it and nothing else.
 
-The agent is Claude over the Messages API with exactly Sentinel's tools: start_task, find_services, quote, pay and
-resume_payment. It has no web search or fetch tool, so the only facts it can report came back from Sentinel sources
+The agent is Claude over the Messages API with exactly Sentinel's tools: start_task, find_services, quote and pay.
+It has no web search or fetch tool, so the only facts it can report came back from Sentinel sources
 in this conversation; the system prompt makes it cite them and say what the sources did not cover. start_task takes
 no text from the model: the task is the owner's own texts since the last task, so the mandate is always their words.
 
-Human decisions never go through the model. When pay needs the owner (an unknown seller, a payment held by intent
-review or by escrow), the tool itself texts the owner a link to the authenticated page that decides it
-(/account/approvals/<id> or /account/tasks). For an approval link, a watcher polls the request; once the owner
-answers on the page, it tells the agent, which continues with resume_payment. resume_payment only carries out a
-purchase already authorized there, and payments.pay_for checks the quote and every rule again.
+Sentinel decides every payment itself (payments.pay_for): it is paid or blocked, and nothing waits for the owner, so
+there are no approval links to text.
 
 Conversations live in memory, per handle, for CONVERSATION_TTL_S; a restart starts them fresh (the tasks, payments
 and books are in the database as usual). One turn runs per handle at a time.
 
 Texting is a chat, so the agent keeps the owner posted and keeps it short: a cheerful line when it starts researching
 and when Sentinel checks sellers (once each per request, TextDesk.note), one line per purchase that was bought
-or refunded (blocked and held ones stay quiet; a new seller's approval link is still texted), and answers of at
+or refunded (blocked ones stay quiet), and answers of at
 most MAX_REPLY characters; the rest waits for the owner to text MORE.
 """
 import asyncio
@@ -52,7 +49,6 @@ from sentinel import (
     escrow,
     guard,
     judge,
-    link_approvals,
     mandates,
     mcp_server,
     owner,
@@ -87,7 +83,6 @@ CODE_RE = re.compile(rf"\b([{CODE_ALPHABET}]{{4}})-?([{CODE_ALPHABET}]{{4}})\b")
 EXACT_CODE_RE = re.compile(rf"([{CODE_ALPHABET}]{{4}})-([{CODE_ALPHABET}]{{4}})")  # a linked user relinking
 LINK_TRIES = 5  # wrong codes one unlinked handle may send per LINK_WINDOW_S
 LINK_WINDOW_S = 600
-APPROVAL_POLL_S = 3.0
 OUTBOX_LIMIT = 200  # texts waiting for the relay; older ones are dropped first
 EMAIL_HANDLE = re.compile(r"[^@\s]{1,64}@[^@\s]{1,190}\.[a-z]{2,}")
 
@@ -106,10 +101,9 @@ nothing, OK ones cost money. Services take query parameters (the description say
 ?company=<name>): call the listed URL with them set.
 3. Fetch FREE ones first with pay (nothing is charged). Buy a paid one only when the free results do not cover what \
 the owner asked for, with a specific reason and found_at="sentinel discovery".
-4. If pay says the owner must approve a new seller, Sentinel has already texted them the link. Say in one line \
-that you are waiting for their approval and stop. Anything held for the owner waits on their Tasks page. When a \
-message from Sentinel says the owner approved request N, call \
-resume_payment(N). Never claim the owner approved anything yourself.
+4. Sentinel decides every purchase on its own: SETTLED is paid, BLOCKED is refused (do not retry it; find another \
+source or say what is missing), REFUNDED means the data failed Sentinel's check and the money came back. Never claim \
+the owner approved anything.
 
 Writing for a phone: this is a text message, so keep it short and friendly. The whole answer stays under 600 \
 characters: the answer itself in 2 to 4 short lines, then at most 3 source URLs, each on its own line, then one line \
@@ -269,6 +263,7 @@ class Conversation:
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     more: list[str] = field(default_factory=list)  # the rest of the last answer, sent when the owner texts MORE
     noted: set[str] = field(default_factory=set)  # progress lines already sent this turn
+    task_id: int | None = None  # the task this turn started, marked finished once its answer is texted
     last_used: float = field(default_factory=time.monotonic)
 
 
@@ -500,6 +495,7 @@ class TextDesk:
                     answer = "\n".join(block.text for block in reply.content if block.type == "text").strip()
                     if answer:
                         self.answer(handle, conversation, answer)
+                        await self.finish(identity, conversation)
                     break
                 outputs = []
                 for call in calls:
@@ -514,6 +510,20 @@ class TextDesk:
             self.send(handle, BROKE)
             return
         conversation.messages[:] = trim(conversation.messages)
+
+    async def finish(self, identity: Identity, conversation: Conversation) -> None:
+        """Mark the task this turn worked on as finished (the Live page shows it done). Best effort."""
+        task_id, conversation.task_id = conversation.task_id, None
+        if task_id is None:
+            return
+
+        def store(conn: db.Connection) -> None:
+            mandates.finish(conn, task_id, db.agent_id(conn, identity.agent))
+
+        try:
+            await self.run_db(store)
+        except Exception:
+            log.warning("texting: could not mark task %s finished", task_id, exc_info=True)
 
     @staticmethod
     async def call_tool(tool: Any, arguments: Any) -> dict[str, Any]:
@@ -573,13 +583,9 @@ class TextDesk:
             except mandates.TooManyTasks:
                 return results.TaskResult(status="FAILED", message=mcp_server.TOO_MANY_TASKS).model_dump_json()
             conversation.owner_texts.clear()
+            conversation.task_id = task_id
             log.info("texting: user %s started task %s, budget %s", identity.user_id, task_id, guard.usd(budget))
-            provisional = guard.POLICY["intent_provisional_budget"]
-            note = ""
-            if budget > provisional:
-                note = (f" It can spend up to ${results.usdc_text(provisional)} until you confirm the full budget at "
-                        f"{desk.base_url}/account/tasks.")
-            desk.send(handle, f"On it: {draft.goal.rstrip('.')}. Budget ${results.usdc_text(budget)}.{note}")
+            desk.send(handle, f"On it: {draft.goal.rstrip('.')}. Budget ${results.usdc_text(budget)}.")
             return results.task_started(task_id).model_dump_json()
 
         async def owns(task_id: int) -> bool:
@@ -644,39 +650,18 @@ class TextDesk:
             task = payments.Task(task_id, found_at[:500], desk.judge)
             return (await desk.execute(identity, handle, safe_url, reason[:500], task)).model_dump_json()
 
-        @beta_async_tool
-        async def resume_payment(request_id: int) -> str:
-            """Carry out a purchase the owner already approved on their approval page. It cannot approve anything.
-
-            Args:
-                request_id: The request_id the owner approved.
-            """
-            return (await desk.resume(identity, handle, request_id)).model_dump_json()
-
-        return [start_task, find_services, quote, pay, resume_payment]
+        return [start_task, find_services, quote, pay]
 
     # Paying, as mcp_server does it
 
     async def execute(self, identity: Identity, handle: str, url: str, reason: str, task: payments.Task,
-                      approval_id: int | None = None) -> results.ToolResult:
-        """Pay from the user's own wallet; text the owner whenever a human decision is needed."""
+                      ) -> results.ToolResult:
+        """Pay from the user's own wallet; text the owner one line per purchase bought or refunded."""
         busy = self.in_flight.acquire(identity.user_id)
         if busy is not None:
-            return mcp_server.nothing_paid(busy, approval_id)
+            return mcp_server.nothing_paid(busy)
         try:
-            result = await self.pay_with_wallet(identity, url, reason, task, approval_id)
-        except payments.ApprovalRequired as exc:
-            row = await self.run_db(link_approvals.get, identity.agent, exc.attempt_id)
-            if row is None or row["status"] != "pending":
-                return self.approval_result(row, exc.attempt_id)
-            self.send(handle, f"Approve ${results.usdc_text(int(row['atomic_amount']))} to {host_of(row['url'])}? "
-                              f"Sentinel has not seen this seller before. Yes or No here, within 5 minutes: "
-                              f"{self.base_url}/account/approvals/{exc.attempt_id}")
-            self.spawn(self.watch_approval(identity, handle, exc.attempt_id))
-            result = self.approval_result(row, exc.attempt_id)
-            result.message = ("Sentinel texted the owner a link to approve this purchase. Nothing is paid yet. Say "
-                              "you are waiting for their approval and stop; Sentinel will tell you when they answer.")
-            return result
+            result = await self.pay_with_wallet(identity, url, reason, task)
         finally:
             self.in_flight.release(identity.user_id)
         host = host_of(url)
@@ -687,19 +672,18 @@ class TextDesk:
         return result
 
     async def pay_with_wallet(self, identity: Identity, url: str, reason: str, task: payments.Task,
-                              approval_id: int | None) -> results.ToolResult:
-        """Open the user's own wallet, check it is the one on file, and pay. Raises ApprovalRequired for a new
-        seller."""
+                              ) -> results.ToolResult:
+        """Open the user's own wallet, check it is the one on file, and pay."""
         async with AsyncExitStack() as stack:
             try:
                 async with asyncio.timeout(mcp_server.OPEN_TIMEOUT_S):
                     signer = await stack.enter_async_context(self.open_signer(identity.user_id))
             except Exception:
                 log.warning("texting: could not open the wallet of user %s", identity.user_id, exc_info=True)
-                return mcp_server.nothing_paid(mcp_server.WALLET_FAILED, approval_id)
+                return mcp_server.nothing_paid(mcp_server.WALLET_FAILED)
             if str(getattr(signer, "address", "") or "").lower() != identity.wallet.lower():
                 log.error("texting: wallet of user %s does not match the address on file", identity.user_id)
-                return mcp_server.nothing_paid(mcp_server.WALLET_MISMATCH, approval_id)
+                return mcp_server.nothing_paid(mcp_server.WALLET_MISMATCH)
             extra: dict[str, Any] = {}
             if self.open_operator is not None:
                 try:
@@ -709,70 +693,16 @@ class TextDesk:
                     log.warning("texting: could not open the escrow operator; paying without escrow", exc_info=True)
             try:
                 outcome = await self.pay_fn(url, signer, agent=identity.agent, reason=reason, task=task,
-                                                 interactive=True, approval_id=approval_id, connect=self.connect,
-                                                 **extra)
-            except payments.ApprovalRequired:
-                raise
-            except payments.PaymentHeld as e:
-                return results.escalated(e.attempt_id, e.rule, e.detail)
+                                            connect=self.connect, **extra)
             except payments.PaymentRejected as e:
-                if e.rule == "approval" and e.attempt_id:
-                    row = await self.run_db(link_approvals.get, identity.agent, e.attempt_id)
-                    return self.approval_result(row, e.attempt_id)
                 return results.blocked(e.attempt_id, e.rule, e.detail, e.related_id)
             except payments.PaymentFailed as e:
                 log.error("texting: payment failed: request=%s tx=%s", e.attempt_id, e.tx_hash, exc_info=e)
                 return results.failed(e.attempt_id, e.tx_hash)
             except Exception:
                 log.warning("texting: pay to %s failed", host_of(url), exc_info=True)
-                return mcp_server.nothing_paid("Sentinel could not complete that, so nothing was paid.", approval_id)
+                return mcp_server.nothing_paid("Sentinel could not complete that, so nothing was paid.")
             return results.from_pay_result(outcome)
-
-    def approval_result(self, row: dict[str, Any] | None, request_id: int) -> results.ToolResult:
-        """What the agent sees for an approval request, as mcp_server shows it."""
-        if row is None:
-            return results.ToolResult(status="NOT_FOUND", request_id=request_id, message="No such request for you.")
-        return results.from_attempt({**row, "amount": row["atomic_amount"]}, None)
-
-    async def resume(self, identity: Identity, handle: str, request_id: int) -> results.ToolResult:
-        """Carry out a purchase the owner authorized on the approval page; anything else is reported, not paid."""
-        row = await self.run_db(link_approvals.get, identity.agent, request_id)
-        if row is None or row["status"] != "authorized":
-            return self.approval_result(row, request_id)
-        try:
-            safe_url = await asyncio.to_thread(urls.validate_url, row["url"])
-        except ValueError as exc:
-            return results.blocked(request_id, "url", str(exc))
-
-        def owns(conn: db.Connection) -> bool:
-            return mandates.get(conn, row["mandate_id"], db.agent_id(conn, identity.agent)) is not None
-
-        if not row.get("mandate_id") or not await self.run_db(owns):
-            return results.blocked(request_id, "no_task", mcp_server.NO_TASK)
-        task = payments.Task(row["mandate_id"], row.get("found_at"), self.judge)
-        return await self.execute(identity, handle, safe_url, row["reason"], task, request_id)
-
-    async def watch_approval(self, identity: Identity, handle: str, request_id: int) -> None:
-        """Wait for the owner's answer on the approval page, then tell the agent so it continues (or does not)."""
-        deadline = time.monotonic() + link_approvals.MAX_WAIT_S + 30
-        while time.monotonic() < deadline:
-            await asyncio.sleep(APPROVAL_POLL_S)
-            row = await self.run_db(link_approvals.get, identity.agent, request_id)
-            status = row["status"] if row else "missing"
-            if status == "pending":
-                continue
-            if status == "authorized":
-                note = (f"Sentinel: the owner approved request {request_id} on the approval page. Call "
-                        f"resume_payment({request_id}) and continue the task.")
-            else:
-                note = (f"Sentinel: request {request_id} was not approved ({status}), so nothing was paid. Continue "
-                        "without it and tell the owner what you could not get.")
-            conversation = self.conversations.get(handle)
-            if conversation is None:
-                return
-            async with conversation.lock:
-                await self.turn(identity, handle, conversation, note)
-            return
 
 
 def from_env(env: Mapping[str, str], base_url: str, link_key: bytes,

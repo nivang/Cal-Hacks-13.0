@@ -4,22 +4,24 @@
     python -m demo.run buy   Acme Robotics' funding history for $0.10 from approved CorpData: ALLOW, settles on Base
                              Sepolia
     python -m demo.run surge CorpData suddenly quotes 4x the usual price: BLOCK (price_jump; run buy first)
-    python -m demo.run scam  PremiumIntel's $9 dossier, as the newsroom's hidden text pushes: BLOCK (seller)
+    python -m demo.run scam  PremiumIntel's $9 dossier, as the newsroom's hidden text pushes: BLOCK (an unapproved
+                             seller: the per payment cap, or no escrow offer from an unapproved seller)
     python -m demo.run intent  a task to brief the owner on Acme Robotics (read by Claude): the funding history fits
                                and is paid, then the approved OpenWire's crypto signals do not fit: BLOCK (off_task)
-    python -m demo.run held    the same briefing expects about $0.03 a source, so a $0.12 court search is held: ESCALATE
+    python -m demo.run overpriced  the same briefing expects about $0.03 a source, so a $0.12 court search is
+                               blocked: BLOCK (per_call)
     python -m demo.run escrow  CorpData offers escrow: $0.08 for the headcount trend is held, the data passes the
                                delivery check, captured
     python -m demo.run void    CorpData's docket monitor sends an HTML error page where it promised JSON: voided
-    python -m demo.run escrow-held  the briefing buys headcount by department and gets the weather in its fields:
-                               Claude cannot vouch for it, so it stays in escrow for the owner, who then refunds it here
+    python -m demo.run escrow-refund  the briefing buys headcount by department and gets the weather in its fields:
+                               Claude cannot vouch for it, so Sentinel voids the escrow and the money comes back
     python -m demo.run compare compare Acme Robotics news sources, then buy the best value for the briefing
 
 Also seeds the approved sellers and the opening balance on first run. Real testnet payments, no simulation.
 Pays as research-agent from the shared test wallet (demo.DEMO_ACCOUNT), which is created on first use.
-intent, held, escrow-held and compare need ANTHROPIC_API_KEY: Claude reads the task and judges the payments. compare
-also needs SENTINEL_ALLOW_LOCAL_URLS=1 and SENTINEL_DISCOVERY_URL pointing at the test site's catalog, and searches the
-public directories too.
+intent, overpriced, escrow-refund and compare need ANTHROPIC_API_KEY: Claude reads the task and judges the payments.
+compare also needs SENTINEL_ALLOW_LOCAL_URLS=1 and SENTINEL_DISCOVERY_URL pointing at the test site's catalog, and
+searches the public directories too.
 The escrow modes also open the escrow operator (escrow.open_operator), which pays the gas.
 """
 import asyncio
@@ -50,11 +52,9 @@ from sentinel import (
 from sentinel.payments import (
     NETWORK,
     USDC_BASE_SEPOLIA,
-    PaymentHeld,
     PaymentRejected,
     Task,
     pay_for,
-    settle_held,
 )
 from test_site import FRESH_WALLET
 
@@ -68,7 +68,7 @@ API = "/test-site/api"
 ACME = "?company=Acme+Robotics"
 FUNDING = f"{API}/company/funding{ACME}"
 APPROVED = {"CorpData": "SELLER_A_ADDRESS", "OpenWire": "SELLER_B_ADDRESS"}
-SCENARIOS = ("seed", "buy", "surge", "scam", "intent", "held", "escrow", "void", "escrow-held", "compare")
+SCENARIOS = ("seed", "buy", "surge", "scam", "intent", "overpriced", "escrow", "void", "escrow-refund", "compare")
 COMPARE_TASK = "Find recent news about Acme Robotics, with summaries and source links; keep data costs under $1."
 COMPARE_REASON = "Need recent company news and sources for the Acme Robotics briefing; compare the offers."
 
@@ -98,11 +98,10 @@ async def set_price(path: str, price: str) -> None:
 
 async def start_task(the_judge: judge.Judge, text: str, per_call: int | None = None,
                      found_at: str = "owner") -> Task:
-    """Have Claude read the task into a mandate for research-agent and confirm it with its $1 budget, as the owner
-    would.
+    """Have Claude read the task into a mandate for research-agent with its $1 budget (live at once).
 
-    The per call estimate is set here (not left to the model), so the held scenario always holds and the others never
-    hold on it: tier 0's per_call rule runs before the off_task check.
+    The per call estimate is set here (not left to the model), so the overpriced scenario always blocks on it and the
+    others never do: tier 0's per_call rule runs before the off_task check.
     """
     draft = await the_judge.extract(text)
     print(f"TASK     {draft.goal} | may buy: {', '.join(draft.expected_types)} | "
@@ -111,7 +110,6 @@ async def start_task(the_judge: judge.Judge, text: str, per_call: int | None = N
         aid = db.agent_id(conn, AGENT)
         task_id = mandates.create(conn, aid, text, draft.goal, draft.expected_types, draft.out_of_scope, 1_000_000,
                                   per_call)
-        mandates.confirm(conn, task_id, aid, 1_000_000, attempts.load_agent(conn, AGENT)["weekly_budget"])
     return Task(task_id, found_at, the_judge)
 
 
@@ -140,7 +138,7 @@ async def set_auto_buy(on: bool) -> None:
 
 
 async def run_compare(signer: ClientEvmSigner) -> None:
-    """Compare marketplace news sources; demonstrate auto buy when the best value needs owner approval."""
+    """Compare marketplace news sources; demonstrate auto buy when the best value is the pricier option."""
     await set_auto_buy(False)
     task = await start_task(judge.ClaudeJudge(), COMPARE_TASK, None, "sentinel discovery")
     found = await compare_news(task)
@@ -162,31 +160,23 @@ async def run_compare(signer: ClientEvmSigner) -> None:
 async def attempt(
     signer: ClientEvmSigner, path: str, reason: str, task: Task | None = None,
     operator: escrow.EscrowOperator | None = None,
-) -> int | None:
-    """Pay for one path (or a full URL) and print the outcome. Returns the request id of a payment left in escrow for
-    the owner."""
+) -> None:
+    """Pay for one path (or a full URL) and print the outcome."""
     url = path if path.startswith(("http://", "https://")) else f"{SELLERS_URL}{path}"
     try:
         result = await pay_for(url, signer, agent=AGENT, reason=reason, task=task,
                                operator=operator)
-    except PaymentHeld as e:
-        print(f"HELD     {e}")
-        return None
     except PaymentRejected as e:
         print(f"BLOCKED  {e}")
-        return None
+        return
     if result.verdict is not None:
         print(f"CHECKED  {result.verdict.outcome} ({result.verdict.rule}): {result.verdict.detail}")
-    if result.escrow == "held":
-        print("ESCROW   held for the owner, the seller is not paid yet")
-        return result.attempt_id
     if result.escrow == "voided":
         print("REFUNDED the money went back, the data is withheld")
     else:
         print(f"PAID     HTTP {result.status} {result.body}" + (" (captured from escrow)" if result.escrow else ""))
     if result.tx_hash:
         print(f"https://sepolia.basescan.org/tx/{result.tx_hash}")
-    return None
 
 
 async def run_escrow(scenario: str, signer: ClientEvmSigner) -> None:
@@ -198,13 +188,8 @@ async def run_escrow(scenario: str, signer: ClientEvmSigner) -> None:
             await attempt(signer, f"{API}/legal/docket-monitor{ACME}", "demo escrow void", operator=operator)
         else:
             task = await start_task(judge.ClaudeJudge(), TASK)
-            held = await attempt(signer, f"{API}/company/headcount-by-team{ACME}", "The owner's Acme Robotics briefing "
-                                 "asks for the headcount trend; a split by department shows where it changed.", task,
-                                 operator)
-            if held is not None:
-                with db.connection() as conn:
-                    outcome = await settle_held(conn, operator, held, db.agent_id(conn, AGENT), False)
-                print(f"OWNER    refunds it: {outcome}")
+            await attempt(signer, f"{API}/company/headcount-by-team{ACME}", "The owner's Acme Robotics briefing asks "
+                          "for the headcount trend; a split by department shows where it changed.", task, operator)
 
 
 async def run(scenario: str) -> None:
@@ -215,9 +200,9 @@ async def run(scenario: str) -> None:
             db.init(conn)
             await bootstrap_books(conn, signer.address)
         if scenario == "seed":
-            print("Approved CorpData and OpenWire for every agent. To see a fresh wallet held, approve QuickScrape on")
-            print(f"the Rules page at {FRESH_WALLET}")
-        elif scenario in ("escrow", "void", "escrow-held"):
+            print("Approved CorpData and OpenWire for every agent. QuickScrape's fresh wallet stays unapproved, so")
+            print(f"Sentinel pays {FRESH_WALLET} only through escrow.")
+        elif scenario in ("escrow", "void", "escrow-refund"):
             await run_escrow(scenario, signer)
         elif scenario == "compare":
             await run_compare(signer)
@@ -226,7 +211,7 @@ async def run(scenario: str) -> None:
             await attempt(signer, FUNDING, REASON, task)
             await attempt(signer, f"{API}/crypto/signals", "Crypto market sentiment could add color to the briefing.",
                           task)
-        elif scenario == "held":
+        elif scenario == "overpriced":
             task = await start_task(judge.ClaudeJudge(), TASK, 30_000)
             await attempt(signer, f"{API}/legal/court-records{ACME}", "The owner's Acme Robotics briefing asks for any "
                           "litigation; the free sources have no court records.", task)

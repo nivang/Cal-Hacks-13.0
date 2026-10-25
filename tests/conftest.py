@@ -328,9 +328,7 @@ class PaySpy:
         self.calls.append((url, signer, agent, reason))
         self.tasks.append(task)
         quote = Quote(url, self.pay_to, self.amount, ASSET, NETWORK, 300)
-        attempt_id = await payments.authorize_task(self.conn, agent, reason, quote, task,
-                                                  interactive=options.get("interactive", False),
-                                                  approval_id=options.get("approval_id"))
+        attempt_id = await payments.authorize_task(self.conn, agent, reason, quote, task)
         tx = f"0xtx{attempt_id}"
         ledger.settle_attempt(self.conn, attempt_id, tx, self.body, "application/json")
         return PayResult(200, self.body.decode(), tx, quote, attempt_id, True, "application/json")

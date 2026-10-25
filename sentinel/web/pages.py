@@ -59,22 +59,27 @@ RULE_LABELS = {
     "listing_changed": "Sells something other than listed", "flagged_wallet": "Wallet flagged as a scam",
     "unused_wallet": "Wallet has no history", "bad_deliveries": "Seller's deliveries keep failing",
     "escrow_terms": "Escrow terms not safe",
-    "approval": "Purchase approval", "quote_changed": "Quote changed",
+    "approval": "Seller not approved", "quote_changed": "Quote changed",
+    "seller_escrow": "Not on your list, paid through escrow only",
+    "wallet_risk": "Seller not approved", "wallet_unknown": "Seller not approved",  # rows from the removed wallet model
 }
+# The models behind a decision (payment_attempts.ml_model, migration 019): shown name and what crossing the line does.
+ML_MODELS = {"injection": ("Injection model", "blocks")}
 ADDRESS = re.compile(r"0x[0-9a-fA-F]{40}")
 
 
 def why(payment: Mapping[str, Any]) -> tuple[str, str]:
     """The Payments page's Why cell as (label, detail): plain English, empty for a settled payment.
 
-    A blocked or denied payment gets a friendly label for the guard's (or intent binding's) rule and its own sentence
-    as detail. A held (escalated) one says it waits for the owner. A failed one says it did not complete (or, with a
-    tx hash, that it was paid but not recorded); an approved or pending one is in progress. An escrowed one is held
-    while Sentinel checks the delivery (or waits for the owner); a voided one was refunded because the delivery failed
-    the check; a settled one whose delivery failed the check (paid without escrow) says so.
+    Sentinel decides every payment itself, so nothing here waits for the owner. A payment Sentinel stopped (blocked,
+    denied, or escalated by an older version) gets a friendly label for the rule and its own sentence as detail. A
+    failed one says it did not complete (or, with a tx hash, that it was paid but not recorded); an approved one is in
+    progress. An escrowed one is held while Sentinel checks the delivery; a voided one was refunded because the
+    delivery failed the check; a settled one whose delivery failed the check (paid without escrow) says so. Rows from
+    the old approval flow (pending, authorized, cancelled, expired) were never paid.
     """
     status = payment.get("status")
-    if status in ("blocked", "denied"):
+    if status in ("blocked", "denied", "escalated"):
         rule = (payment.get("rule") or "").strip()
         label = RULE_LABELS.get(rule) or rule.replace("_", " ").title() or "Blocked"
         return label, (payment.get("detail") or "").strip()
@@ -84,46 +89,61 @@ def why(payment: Mapping[str, Any]) -> tuple[str, str]:
         return "Payment did not complete", ""
     if status == "approved":
         return "In progress", ""
-    if status == "escalated":
-        rule = (payment.get("rule") or "").strip()
-        return f"Held for you: {RULE_LABELS.get(rule, 'needs your decision').lower()}", (payment.get("detail") or "")
     _, _, delivery = (payment.get("delivery_reason") or "").partition(": ")
     if status == "escrowed":
-        if payment.get("delivery_verdict") == "unsure":
-            return "In escrow, waiting for you on Tasks", delivery
         return "In escrow while Sentinel checks the delivery", ""
     if status == "voided":
         return "Refunded: the delivery failed the check", delivery
     if status == "settled" and payment.get("delivery_verdict") == "fail":
         return "Paid, but the delivery failed the check (no escrow)", delivery
     if status in ("pending", "authorized", "cancelled", "expired"):
-        return {
-            "pending": ("Waiting for your approval", "Nothing has been signed."),
-            "authorized": ("Approved once", "Ask your agent to resume before approval expires."),
-            "cancelled": ("Approval dismissed", "Nothing was signed."),
-            "expired": ("Approval expired", "Nothing was signed."),
-        }[status]
+        return "Not paid", "Nothing was signed."
     return "", ""
+
+
+def ml_badge(payment: Mapping[str, Any]) -> dict[str, Any] | None:
+    """The model score behind a payment as {model, text, hit}, or None when no model scored it.
+
+    text reads like "Injection model 0.97 · blocks at 0.42"; hit is True when the score reached the threshold (the
+    model stopped the payment), so the page shows it red, else neutral.
+    """
+    model, score, threshold = payment.get("ml_model"), payment.get("ml_score"), payment.get("ml_threshold")
+    if not model or score is None:
+        return None
+    name, verb = ML_MODELS.get(model, (f"{str(model).replace('_', ' ').capitalize()} model", "stops"))
+    text = f"{name} {float(score):.2f}"
+    if threshold is not None:
+        text += f" · {verb} at {float(threshold):.2f}"
+    return {"model": model, "text": text, "hit": threshold is not None and float(score) >= float(threshold)}
 
 
 # Rules the spending guard (and the seller's payment offer) fire; every other rule that stops a payment is intent's.
 GUARD_RULES = frozenset({
     "seller", "cap", "budget", "price_jump", "duplicate", "url", "long_window", "lookalike", "payee_changed",
-    "flagged_wallet", "payment_option", "escrow_terms", "quote", "quote_changed",
+    "flagged_wallet", "payment_option", "escrow_terms", "quote", "quote_changed", "wallet_risk", "wallet_unknown",
 })
-APPROVAL_STATUSES = ("pending", "authorized", "denied", "cancelled", "expired")
+# The guard rules that are Sentinel's seller decision: the owner's lists, then escrow only for the rest.
+SELLER_RULES = frozenset({"seller", "wallet_risk", "wallet_unknown", "approval"})
+LEGACY_STATUSES = ("pending", "authorized", "denied", "cancelled", "expired")  # the old approval flow's rows
 TIER_TEXT = {0: "Rules passed", 1: "Classifier: on task", 2: "Judge: on task"}
 
 
-def _step(key: str, label: str, state: str, note: str = "", tx: str | None = None) -> dict[str, Any]:
-    return {"key": key, "label": label, "state": state, "note": note, "tx": tx}
+def _step(key: str, label: str, state: str, note: str = "", tx: str | None = None,
+          ml: dict[str, Any] | None = None) -> dict[str, Any]:
+    return {"key": key, "label": label, "state": state, "note": note, "tx": tx, "ml": ml}
+
+
+def _with(note: str, badge: dict[str, Any] | None) -> str:
+    return f"{note}. {badge['text']}" if badge else note
 
 
 def pipeline(payment: Mapping[str, Any]) -> list[dict[str, Any]]:
-    """The Live page's stepper for one attempt: Found, Policy, Task check, (Approval), Payment, Delivery, Result.
+    """The Live page's stepper for one attempt: Found, Policy, Seller, Task check, Payment, Delivery, Result.
 
-    Each step is a dict of key, label, state (ok, stop, wait or idle: passed, stopped here, waiting, not reached),
-    note (plain English) and tx (a transaction hash to link, or None). Steps after the one that stopped are idle.
+    Each step is a dict of key, label, state (ok, stop, wait or idle: passed, stopped here, in progress, not reached),
+    note (plain English), tx (a transaction hash to link, or None) and ml (pages.ml_badge of the model that decided
+    this step, or None). Sentinel decides every step itself: wait only means it is still working (paying, or checking
+    an escrowed delivery). Steps after the one that stopped are idle.
     """
     status = payment.get("status") or ""
     rule = (payment.get("rule") or "").strip()
@@ -132,6 +152,7 @@ def pipeline(payment: Mapping[str, Any]) -> list[dict[str, Any]]:
     stopped = status in ("blocked", "denied", "escalated")
     escrow = payment.get("escrow_state")
     tier = payment.get("intent_tier")
+    badge = ml_badge(payment)
     steps = []
 
     if payment.get("found_while_searching"):
@@ -142,30 +163,38 @@ def pipeline(payment: Mapping[str, Any]) -> list[dict[str, Any]]:
         steps.append(_step("found", "Found", "ok", f"The agent says it found this via {where}" if where
                            else "The agent asked to pay"))
 
-    guard_stop = stopped and rule in GUARD_RULES
+    seller_stop = (stopped and rule in SELLER_RULES) or status in LEGACY_STATUSES
+    guard_stop = stopped and rule in GUARD_RULES and not seller_stop
     steps.append(_step("guard", "Policy", "stop" if guard_stop else "ok",
-                       f"{label}. {detail}".strip() if guard_stop else "Seller, cap, budget, price and wallet checks"))
+                       f"{label}. {detail}".strip() if guard_stop else "Cap, budget, price and wallet checks"))
 
-    intent_stop = stopped and not guard_stop and rule != "approval"
     if guard_stop:
+        steps.append(_step("seller", "Seller", "idle"))
+    elif seller_stop:
+        if status in LEGACY_STATUSES:
+            note = "Not on your approved list, nothing was paid"
+        else:
+            note = f"{label}. {detail}".strip() if detail else label
+        steps.append(_step("seller", "Seller", "stop", note))
+    elif rule == "seller_escrow":
+        steps.append(_step("seller", "Seller", "ok", "Not on your list, so paid through escrow only"))
+    elif payment.get("seller"):
+        steps.append(_step("seller", "Seller", "ok", "On your approved list"))
+    else:
+        steps.append(_step("seller", "Seller", "ok", "Not on your list"))
+
+    injection = badge if badge and badge["model"] == "injection" else None
+    intent_stop = stopped and not guard_stop and not seller_stop
+    if guard_stop or seller_stop:
         steps.append(_step("intent", "Task check", "idle"))
     elif intent_stop:
-        note = f"{label}. {detail}".strip()
-        steps.append(_step("intent", "Task check", "wait" if status == "escalated" else "stop",
-                           f"Held for you: {note}" if status == "escalated" else note))
+        steps.append(_step("intent", "Task check", "stop", _with(f"{label}. {detail}".strip(), injection),
+                           ml=injection))
     else:
         note = TIER_TEXT.get(tier, "Passed") if tier is not None else "Passed"
         if payment.get("intent_reason") and tier:
             note = f"{note}. {payment['intent_reason']}"
-        steps.append(_step("intent", "Task check", "ok", note))
-
-    if status in APPROVAL_STATUSES or rule == "approval":
-        state, note = {
-            "pending": ("wait", "Waiting for your Yes"), "authorized": ("ok", "You approved it once"),
-            "denied": ("stop", "You said no"), "cancelled": ("stop", "Approval dismissed"),
-            "expired": ("stop", "Approval expired"),
-        }.get(status, ("stop", detail or "Approval unavailable") if stopped else ("ok", "You approved this seller"))
-        steps.append(_step("approval", "Your approval", state, note))
+        steps.append(_step("intent", "Task check", "ok", _with(note, injection), ml=injection))
 
     reached = status in ("approved", "settled", "failed", "escrowed", "voided")
     if not reached:
@@ -185,10 +214,8 @@ def pipeline(payment: Mapping[str, Any]) -> list[dict[str, Any]]:
     reason = reason or (payment.get("delivery_reason") or "")
     if verdict == "pass":
         steps.append(_step("delivery", "Delivery check", "ok", reason or "The data matches what was bought"))
-    elif verdict == "fail":
+    elif verdict == "fail" or (verdict == "unsure" and status != "escrowed"):
         steps.append(_step("delivery", "Delivery check", "stop", reason or "The data failed the check"))
-    elif verdict == "unsure":
-        steps.append(_step("delivery", "Delivery check", "wait", reason or "Unsure, waiting for you"))
     elif status == "escrowed":
         steps.append(_step("delivery", "Delivery check", "wait", "Checking what the seller sent"))
     else:
@@ -203,23 +230,18 @@ def pipeline(payment: Mapping[str, Any]) -> list[dict[str, Any]]:
         steps.append(_step("result", "Result", "stop", "Refunded to you, the seller got nothing",
                            payment.get("void_tx")))
     elif status == "escrowed":
-        steps.append(_step("result", "Result", "wait", "Waiting for you on Tasks" if payment.get("escrow_held")
-                           else "Money held until the check passes"))
-    elif status == "escalated":
-        steps.append(_step("result", "Result", "wait", "Held for you, nothing paid"))
-    elif status in ("pending", "authorized"):
-        steps.append(_step("result", "Result", "wait", "Nothing signed yet"))
+        steps.append(_step("result", "Result", "wait", "Money held until the check passes, else refunded"))
     elif status == "approved":
         steps.append(_step("result", "Result", "wait", "In progress"))
     elif status == "failed":
         steps.append(_step("result", "Result", "stop", "Payment did not complete"))
     else:
-        steps.append(_step("result", "Result", "stop", "Blocked, nothing paid"))
+        steps.append(_step("result", "Result", "stop", "Stopped by Sentinel, nothing paid"))
     return steps
 
 
 def outcome(payment: Mapping[str, Any]) -> str:
-    """A Live card's tone from its last step: ok, stop or wait."""
+    """A Live card's tone from its last step: ok, stop or wait (still in progress)."""
     return pipeline(payment)[-1]["state"]
 
 
@@ -244,7 +266,7 @@ def iso(value: datetime | None) -> str:
 
 
 templates.env.filters.update(usd=usd, short=short, when=when, why=why, host_path=host_path, account_name=account_name,
-                             pipeline=pipeline, outcome=outcome, iso=iso)
+                             pipeline=pipeline, outcome=outcome, iso=iso, ml_badge=ml_badge)
 templates.env.globals.update(tx_url=results.EXPLORER)
 
 

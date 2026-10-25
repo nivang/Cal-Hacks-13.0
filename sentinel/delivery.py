@@ -11,8 +11,8 @@ its example). check() runs the rules, first to fire wins, each a FAIL:
   missing_fields  a promised field is absent, null or empty
   injection       the body talks to AI agents (intent.INJECTION): seller text trying to steer the buyer
 When every rule passes, the judge reads the body against the promise and the task (judge.check_delivery): only
-"delivered" is a PASS. "not_delivered", "unsure" and a judge failure are UNSURE, which holds the payment for the
-owner: the model alone never takes a sale away from a seller, and never pays one it doubts.
+"delivered" is a PASS. "not_delivered", "unsure" and a judge failure are UNSURE, which voids the escrow (the buyer is
+refunded) just like a FAIL: Sentinel never pays a seller for a delivery it doubts.
 Pure apart from the judge call in payments.py, so test_delivery.py is the answer key.
 """
 import json
@@ -122,15 +122,15 @@ def case(mandate: intent.Mandate, promise: Promise, url: str, body: bytes) -> di
 
 
 def from_judge(verdict: str, reason: str) -> Verdict:
-    """The judge's opinion as a verdict: only delivered passes; anything else waits for the owner."""
+    """The judge's opinion as a verdict: only delivered passes; anything else is refunded."""
     if verdict == "delivered":
         return Verdict(PASS, "delivered", reason)
     return Verdict(UNSURE, "not_delivered" if verdict == "not_delivered" else "judge_unsure", reason)
 
 
 def unavailable() -> Verdict:
-    """The judge could not be reached: hold, never capture on a guess."""
-    return Verdict(UNSURE, "judge_unavailable", "The delivery check could not reach its model, so the owner decides.")
+    """The judge could not be reached: refund, never capture on a guess."""
+    return Verdict(UNSURE, "judge_unavailable", "The delivery check could not reach its model, so it is refunded.")
 
 
 def without_task() -> Verdict:

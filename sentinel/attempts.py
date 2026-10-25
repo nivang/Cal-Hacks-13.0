@@ -15,7 +15,9 @@ LIVE_STATUSES = ["settled", "approved", "escrowed"]  # attempts that count as sp
 ATOMIC = "* 1000000"  # SQL: whole USDC (numeric) to integer atomic units
 # What intent binding records with a payment made under a task (migration 010).
 INTENT_COLUMNS = ("mandate_id", "found_at", "seller_description", "intent_tier", "intent_verdict", "intent_reason",
-                  "preview")  # preview: a service stopped during a search, nothing attempted (migration 011)
+                  "preview",  # preview: a service stopped during a search, nothing attempted (migration 011)
+                  "ml_model", "ml_score", "ml_threshold")  # the model score behind the decision (migration 019)
+ML_COLUMNS = ("ml_model", "ml_score", "ml_threshold")
 
 
 def record_attempt(
