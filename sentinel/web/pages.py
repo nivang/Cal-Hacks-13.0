@@ -60,8 +60,9 @@ RULE_LABELS = {
     "unused_wallet": "Wallet has no history", "bad_deliveries": "Seller's deliveries keep failing",
     "escrow_terms": "Escrow terms not safe",
     "approval": "Seller not approved", "quote_changed": "Quote changed",
-    "seller_escrow": "Not on your list, paid through escrow only",
+    "seller_escrow": "Not on your list, paid through escrow",
     "wallet_risk": "Seller not approved", "wallet_unknown": "Seller not approved",  # rows from the removed wallet model
+    "apify_daily": "Over the shared Apify daily budget", "unlisted": "Not on your list, paid directly",
 }
 # The models behind a decision (payment_attempts.ml_model, migration 019): shown name and what crossing the line does.
 ML_MODELS = {"injection": ("Injection model", "blocks")}
@@ -145,6 +146,8 @@ def pipeline(payment: Mapping[str, Any]) -> list[dict[str, Any]]:
     this step, or None). Sentinel decides every step itself: wait only means it is still working (paying, or checking
     an escrowed delivery). Steps after the one that stopped are idle.
     """
+    if payment.get("kind") == "apify":
+        return apify_pipeline(payment)
     status = payment.get("status") or ""
     rule = (payment.get("rule") or "").strip()
     detail = (payment.get("detail") or "").strip()
@@ -177,7 +180,7 @@ def pipeline(payment: Mapping[str, Any]) -> list[dict[str, Any]]:
             note = f"{label}. {detail}".strip() if detail else label
         steps.append(_step("seller", "Seller", "stop", note))
     elif rule == "seller_escrow":
-        steps.append(_step("seller", "Seller", "ok", "Not on your list, so paid through escrow only"))
+        steps.append(_step("seller", "Seller", "ok", "Not on your list, so paid through escrow"))
     elif payment.get("seller"):
         steps.append(_step("seller", "Seller", "ok", "On your approved list"))
     else:
@@ -240,6 +243,112 @@ def pipeline(payment: Mapping[str, Any]) -> list[dict[str, Any]]:
     return steps
 
 
+APIFY_POLICY_RULES = frozenset({"cap", "budget", "apify_daily"})
+APIFY_RUNNING = ("STARTING", "READY", "RUNNING", "TIMING-OUT", "ABORTING")
+
+
+def apify_pipeline(run: Mapping[str, Any]) -> list[dict[str, Any]]:
+    """The same seven steps for an Apify credit run (an apify_runs row from books.list_apify_runs).
+
+    Amounts are millionths of USD, the same scale as USDC atomic units. Credits are not refundable, so a failed
+    delivery check stops the Result step but cannot give the money back.
+    """
+    status = run.get("status") or ""
+    rule = (run.get("rule") or "").strip()
+    detail = (run.get("detail") or "").strip()
+    label = RULE_LABELS.get(rule) or rule.replace("_", " ").capitalize()
+    blocked = status == "BLOCKED"
+    policy_stop = blocked and rule in APIFY_POLICY_RULES
+    badge = ml_badge(run)
+    injection = badge if badge and badge["model"] == "injection" else None
+    cap, spent = run.get("max_charge"), run.get("actual_charge")
+    verdict = run.get("delivery_verdict")
+    _, _, reason = (run.get("delivery_reason") or "").partition(": ")
+    reason = reason or (run.get("delivery_reason") or "")
+    steps = [_step("found", "Found", "ok", "From the Apify Store")]
+
+    steps.append(_step("guard", "Policy", "stop" if policy_stop else "ok",
+                       f"{label}. {detail}".strip() if policy_stop else "Cap, budget and daily credit checks"))
+    steps.append(_step("seller", "Seller", "idle" if policy_stop else "ok",
+                       "" if policy_stop else "Apify Store, paid with Apify credits, not your wallet"))
+    if policy_stop:
+        steps.append(_step("intent", "Task check", "idle"))
+    elif blocked:
+        steps.append(_step("intent", "Task check", "stop", _with(f"{label}. {detail}".strip(), injection),
+                           ml=injection))
+    else:
+        tier = run.get("intent_tier")
+        note = TIER_TEXT.get(tier, "Passed") if tier is not None else "Passed"
+        if run.get("intent_reason") and tier:
+            note = f"{note}. {run['intent_reason']}"
+        steps.append(_step("intent", "Task check", "ok", _with(note, injection), ml=injection))
+
+    if blocked:
+        steps.append(_step("payment", "Payment", "idle"))
+    elif status == "REJECTED":
+        steps.append(_step("payment", "Payment", "stop", "Apify rejected the run, nothing was spent"))
+    elif status == "UNKNOWN":
+        steps.append(_step("payment", "Payment", "stop", f"Start uncertain, the {usd(cap)} cap stays reserved"))
+    elif status in APIFY_RUNNING:
+        steps.append(_step("payment", "Payment", "wait", f"Running on Apify, capped at {usd(cap)}"))
+    elif status == "SUCCEEDED":
+        steps.append(_step("payment", "Payment", "ok", f"Run on Apify credits, capped at {usd(cap)}"))
+    elif status == "TIMED-OUT":
+        steps.append(_step("payment", "Payment", "ok", "Reached the time limit, kept the partial results"))
+    else:
+        steps.append(_step("payment", "Payment", "stop", f"The run ended {status.lower()}"))
+
+    if verdict == "pass":
+        steps.append(_step("delivery", "Delivery check", "ok", reason or "The results match what was bought"))
+    elif verdict == "fail":
+        steps.append(_step("delivery", "Delivery check", "stop", reason or "The results failed the check"))
+    elif status in ("SUCCEEDED", "TIMED-OUT"):
+        steps.append(_step("delivery", "Delivery check", "wait", "Checking the results"))
+    else:
+        steps.append(_step("delivery", "Delivery check", "idle"))
+
+    cost = usd(spent) if spent is not None else "the cap"
+    if blocked:
+        steps.append(_step("result", "Result", "stop", "Stopped by Sentinel, nothing spent"))
+    elif status == "REJECTED":
+        steps.append(_step("result", "Result", "stop", "Nothing spent"))
+    elif status == "UNKNOWN":
+        steps.append(_step("result", "Result", "stop", "Uncertain, check the Apify console"))
+    elif status in APIFY_RUNNING:
+        steps.append(_step("result", "Result", "wait", "Running"))
+    elif status in ("SUCCEEDED", "TIMED-OUT") and verdict == "pass":
+        partial = " (partial results)" if status == "TIMED-OUT" else ""
+        steps.append(_step("result", "Result", "ok", f"Spent {cost} of the {usd(cap)} cap{partial}"))
+    elif status in ("SUCCEEDED", "TIMED-OUT") and verdict == "fail":
+        steps.append(_step("result", "Result", "stop", f"Spent {cost}, but the results failed the check"))
+    elif status in ("SUCCEEDED", "TIMED-OUT"):
+        steps.append(_step("result", "Result", "wait", f"Spent {cost}, checking the results"))
+    else:
+        steps.append(_step("result", "Result", "stop", f"Run failed, {cost} spent"))
+    return steps
+
+
+def money_out(payment: Mapping[str, Any]) -> dict[str, Any]:
+    """A Live card's money lane: label, got and of (atomic units) and kind (paid, escrow, refunded, progress or
+    blocked, the card's colour), for payments and Apify runs alike."""
+    if payment.get("kind") == "apify":
+        status, verdict = payment.get("status"), payment.get("delivery_verdict")
+        if status in ("SUCCEEDED", "TIMED-OUT"):
+            kind = "blocked" if verdict == "fail" else "paid" if verdict == "pass" else "progress"
+        else:
+            kind = "progress" if status in APIFY_RUNNING else "blocked"
+        return {"label": "Apify charged", "got": payment.get("actual_charge") or 0, "of": payment.get("max_charge"),
+                "kind": kind}
+    status = payment.get("status")
+    if status == "settled" and payment.get("delivery_verdict") == "fail":
+        kind = "blocked"
+    else:
+        kind = {"settled": "paid", "escrowed": "escrow", "voided": "refunded", "approved": "progress"}.get(
+            status or "", "blocked")
+    got = payment.get("amount") if status in ("settled", "escrowed") else 0
+    return {"label": "Seller got", "got": got, "of": payment.get("amount"), "kind": kind}
+
+
 def outcome(payment: Mapping[str, Any]) -> str:
     """A Live card's tone from its last step: ok, stop or wait (still in progress)."""
     return pipeline(payment)[-1]["state"]
@@ -266,7 +375,8 @@ def iso(value: datetime | None) -> str:
 
 
 templates.env.filters.update(usd=usd, short=short, when=when, why=why, host_path=host_path, account_name=account_name,
-                             pipeline=pipeline, outcome=outcome, iso=iso, ml_badge=ml_badge)
+                             pipeline=pipeline, outcome=outcome, iso=iso, ml_badge=ml_badge,
+                             money_out=money_out)
 templates.env.globals.update(tx_url=results.EXPLORER)
 
 

@@ -102,8 +102,13 @@ def test_cap_budget_and_seller_messages_name_the_numbers():
     assert "$15.00" in evaluate(AGENT, quote(15 * USDC), history()).detail
     assert "$10.00" in evaluate(AGENT, quote(15 * USDC), history()).detail
     assert "$49.80" in evaluate(AGENT, quote(500_000), history(week_spend=49_800_000)).detail
-    assert SCAMMER in evaluate(AGENT, quote(USDC, SCAMMER), history(seller_status=None)).detail
     assert SCAMMER in evaluate(AGENT, quote(USDC, SCAMMER), history(seller_status="blocked")).detail
+
+
+def test_an_unlisted_seller_without_escrow_is_paid_directly_but_a_blocked_one_never():
+    unlisted = evaluate(AGENT, quote(USDC, SCAMMER), history(seller_status=None))
+    assert (unlisted.decision, unlisted.rule) == ("ALLOW", "unlisted") and "paid directly" in unlisted.detail
+    assert evaluate(AGENT, quote(USDC, SCAMMER), history(seller_status="blocked")).decision == "BLOCK"
 
 
 def test_duplicate_message_points_at_the_earlier_request():

@@ -7,10 +7,10 @@ details (payTo, amount) come from the seller's quote, never from text the agent 
 decided in wallets.py; this file only sees the x402 signer interface.
 
 Before the guard runs, the payee's Base Sepolia profile is read (chain.cached_profile); a seller not on the approved
-list is paid only through escrow (guard rule seller_escrow). A payment made under a task (Task, from the MCP pay
-tool) is also checked against the owner's intent once the guard allows it: review_intent runs intent.py's tiers
-(rules, the injection screen, then the judge's fast check,
-then the judge) and may block it. Without a task (a direct pay_for call, not the MCP tool) only the guard runs.
+list is paid through escrow when it offers it (guard rule seller_escrow), else directly (unlisted). A payment made
+under a task (Task, from the MCP pay tool) is also checked against the owner's intent once the guard allows it:
+review_intent runs intent.py's tiers (rules, the injection screen, then the judge's fast check, then the judge) and
+may block it. Without a task (a direct pay_for call, not the MCP tool) only the guard runs.
 
 When the seller offers x402 auth-capture with Sentinel as operator (escrow.check_terms), the money is held in escrow
 instead of paid outright: _pay_escrow holds it, fetches the data, checks the delivery (delivery.py, then the judge),

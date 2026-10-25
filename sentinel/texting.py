@@ -8,7 +8,8 @@ Who a text acts for comes only from phone_links (migration 016), never from anyt
 is linked by texting the one time code the account page shows (issue_code, link); "Sign out everywhere" and the
 Unlink button remove it. Texts from a handle that is not linked get the instructions to link it and nothing else.
 
-The agent is Claude over the Messages API with exactly Sentinel's tools: start_task, find_services, quote and pay.
+The agent is Claude over the Messages API with exactly Sentinel's tools: start_task, find_services, compare_prices,
+quote, pay, apify_actor and run_apify_actor (Apify Actors bought with the server's Apify credits, shown on Live).
 It has no web search or fetch tool, so the only facts it can report came back from Sentinel sources
 in this conversation; the system prompt makes it cite them and say what the sources did not cover. start_task takes
 no text from the model: the task is the owner's own texts since the last task, so the mandate is always their words.
@@ -21,7 +22,7 @@ and books are in the database as usual). One turn runs per handle at a time.
 
 Texting is a chat, so the agent keeps the owner posted and keeps it short: a cheerful line when it starts researching
 and when Sentinel checks sellers (once each per request, TextDesk.note), one line per purchase that was bought
-or refunded (blocked ones stay quiet), and answers of at
+or refunded, Apify runs included (blocked ones stay quiet), and answers of at
 most MAX_REPLY characters; the rest waits for the owner to text MORE.
 """
 import asyncio
@@ -39,13 +40,18 @@ from dataclasses import dataclass, field
 from typing import Any
 from urllib.parse import urlsplit
 
+import httpx
 from anthropic import AsyncAnthropic, beta_async_tool
 from x402.mechanisms.evm import ClientEvmSigner
 
 from sentinel import (
+    apify,
+    apify_runs,
     attempts,
     catalog,
+    compare,
     db,
+    discovery,
     escrow,
     guard,
     judge,
@@ -101,7 +107,11 @@ nothing, OK ones cost money. Services take query parameters (the description say
 ?company=<name>): call the listed URL with them set.
 3. Fetch FREE ones first with pay (nothing is charged). Buy a paid one only when the free results do not cover what \
 the owner asked for, with a specific reason and found_at="sentinel discovery".
-4. Sentinel decides every purchase on its own: SETTLED is paid, BLOCKED is refused (do not retry it; find another \
+4. For a need the free results do not cover, and always before saying a need is not covered, call compare_prices: \
+it checks the marketplace and the Apify Store together. Buy an x402 pick with pay. If the best value is an Apify \
+Actor with pay_with "apify_credit", call apify_actor for its inputs and minimum cap, then run_apify_actor with the \
+smallest cap that fits (it waits for the results). Cite those results as "Apify Actor <id>".
+5. Sentinel decides every purchase on its own: SETTLED is paid, BLOCKED is refused (do not retry it; find another \
 source or say what is missing), REFUNDED means the data failed Sentinel's check and the money came back. Never claim \
 the owner approved anything.
 
@@ -650,7 +660,79 @@ class TextDesk:
             task = payments.Task(task_id, found_at[:500], desk.judge)
             return (await desk.execute(identity, handle, safe_url, reason[:500], task)).model_dump_json()
 
-        return [start_task, find_services, quote, pay]
+        @beta_async_tool
+        async def compare_prices(task_id: int, query: str, calls: int = 1) -> str:
+            """Compare every seller of one thing the task needs, marketplace and Apify Store together, and get the
+            best value.
+
+            Args:
+                task_id: The task_id from start_task.
+                query: The kind of data you need in 2 to 4 words, without places or names, e.g. "Google Maps
+                    reviews".
+                calls: How many purchases the job takes.
+            """
+            if not await owns(task_id):
+                return results.ComparisonResult(status="FAILED", message=mcp_server.NO_TASK).model_dump_json()
+            desk.note(handle, conversation, "research", random.choice(RESEARCHING))
+            query = " ".join(query.split())[:200]
+            async with httpx.AsyncClient(timeout=discovery.TIMEOUT_S, follow_redirects=False) as client:
+                found = await compare.compare(
+                    desk.connect, identity.agent, payments.Task(task_id, "sentinel discovery", desk.judge), query,
+                    max(1, min(calls, compare.MAX_CALLS)), 50, fetch=discovery.http_fetcher(client, apify.headers_for),
+                    apify_credit=apify.has_credit(), purpose=f"Comparing offers for {query} for this task.",
+                )
+            return found.model_dump_json()
+
+        @beta_async_tool
+        async def apify_actor(actor: str) -> str:
+            """Look up an Apify Actor before running it: pricing, minimum cap, its inputs and an example input.
+
+            Args:
+                actor: The Actor id from compare_prices, username/name.
+            """
+            async with httpx.AsyncClient(timeout=discovery.TIMEOUT_S, follow_redirects=False) as client:
+                try:
+                    return (await apify.actor_details(apify.normalize_id(actor), discovery.http_fetcher(
+                        client, apify.headers_for))).model_dump_json()
+                except ValueError as exc:
+                    return apify.ActorDetails(status="INVALID", actor=actor[:170], message=str(exc)).model_dump_json()
+
+        @beta_async_tool
+        async def run_apify_actor(task_id: int, actor: str, actor_input: dict[str, Any], max_charge_usd: str,
+                                  reason: str) -> str:
+            """Buy an Apify Actor run with the owner's Apify credits (not the wallet) and wait for its results.
+            Sentinel checks it against the task first and the results after.
+
+            Args:
+                task_id: The task_id from start_task.
+                actor: The Actor id, username/name.
+                actor_input: The Actor's input, as apify_actor describes it.
+                max_charge_usd: The most this run may cost in USD, compute included, e.g. "0.50". Use the smallest
+                    cap that fits.
+                reason: One or two specific sentences: what you need and why this Actor. The owner reads this.
+            """
+            if not await owns(task_id):
+                return apify_runs.RunResult(status="BLOCKED", message=mcp_server.NO_TASK).model_dump_json()
+            busy = desk.in_flight.acquire(identity.user_id)
+            if busy is not None:
+                return apify_runs.RunResult(status="FAILED", message=busy).model_dump_json()
+            desk.note(handle, conversation, "checking", CHECKING)
+            try:
+                async with httpx.AsyncClient(timeout=30, follow_redirects=False) as client:
+                    run = await apify_runs.start(desk.connect, identity.agent, task_id, actor, actor_input,
+                                                 max_charge_usd[:20], reason[:500], desk.judge, client)
+                    if run.request_id is not None and run.status != apify_runs.BLOCKED:
+                        run = await apify_runs.wait(desk.connect, identity.agent, run.request_id, client, desk.judge)
+            finally:
+                desk.in_flight.release(identity.user_id)
+            if run.status in apify_runs.DELIVERED and run.delivery_verdict == "pass":
+                desk.send(handle, f"✅ Bought Apify {run.actor} for ${run.cost_usd or run.max_charge_usd}")
+            elif run.status in apify_runs.DELIVERED:
+                desk.send(handle, f"⚠️ Apify {run.actor} returned data that failed Sentinel's check "
+                                  f"(${run.cost_usd or '?'} in credits spent).")
+            return run.model_dump_json()
+
+        return [start_task, find_services, compare_prices, quote, pay, apify_actor, run_apify_actor]
 
     # Paying, as mcp_server does it
 

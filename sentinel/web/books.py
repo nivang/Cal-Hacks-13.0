@@ -176,7 +176,8 @@ def fingerprint(conn: Connection, agent_id: int) -> str:
         "  WHERE agent_id = %(aid)s"
         "  ORDER BY id DESC LIMIT %(tasks)s) m),"
         " (SELECT max(added_at) FROM sellers WHERE agent_id IS NULL OR agent_id = %(aid)s),"
-        " (SELECT concat_ws(':', count(*), max(updated_at)) FROM apify_runs WHERE agent_id = %(aid)s),"
+        " (SELECT concat_ws(':', count(*), max(updated_at), count(delivery_verdict)) FROM apify_runs"
+        "  WHERE agent_id = %(aid)s),"
         " (SELECT string_agg(concat_ws(':', id, cardinality(stages), attempt_id), ',' ORDER BY id) FROM live_checks"
         "  WHERE agent_id = %(aid)s AND updated_at >= now() - make_interval(secs => %(stale)s))"
         " )) AS tag",
@@ -195,8 +196,10 @@ def live_view(conn: Connection, agent_id: int, limit: int = LIVE_LIMIT) -> dict[
     or a preview it turned away) and kept_back (their amounts, atomic units), escrowed (in escrow now), refunded
     (voided) and searched (previews). escrow lists every authorized
     escrow, soonest deadline first. feed is the newest attempts of that task from list_attempts, escrow columns
-    included, minus the ones still being checked; checking is what Sentinel is working on right now under that task
-    (live.current), newest first.
+    included, minus the ones still being checked, merged with the task's Apify credit runs (list_apify_runs, kind
+    apify) newest first; Apify runs count in requests, paid (succeeded), stopped (blocked, rejected or a failed
+    delivery check) and apify_spent (their actual charges). checking is what Sentinel is working on right now under
+    that task (live.current), newest first.
     """
     newest = conn.execute(
         mandates.WITH_SPENT + " WHERE m.agent_id = %s ORDER BY m.id DESC LIMIT 1", (attempts.LIVE_STATUSES, agent_id),
@@ -206,8 +209,10 @@ def live_view(conn: Connection, agent_id: int, limit: int = LIVE_LIMIT) -> dict[
     busy = {c["attempt_id"] for c in checking if c["attempt_id"] is not None}
     # Only the current task; an attempt still being worked on shows as its check, not as a half finished card.
     feed = [r for r in owner.list_attempts(conn, limit, agent_id, task_id) if r["id"] not in busy]
+    runs = list_apify_runs(conn, agent_id, task_id) if task_id is not None else []
+    feed = sorted(feed + runs, key=lambda r: r["created_at"], reverse=True)[:limit]
     counts = {"requests": 0, "paid": 0, "paid_amount": 0, "sellers_paid": 0, "stopped": 0, "kept_back": 0,
-              "escrowed": 0, "refunded": 0, "searched": 0}
+              "escrowed": 0, "refunded": 0, "searched": 0, "apify_spent": 0}
     if newest is not None:
         stopped = "(status = ANY(%(stopped)s) OR preview IS TRUE)"
         row = conn.execute(
@@ -223,7 +228,12 @@ def live_view(conn: Connection, agent_id: int, limit: int = LIVE_LIMIT) -> dict[
             " FROM payment_attempts WHERE mandate_id = %(task)s",
             {"stopped": list(STOPPED), "task": newest["id"]},
         ).fetchone()
-        counts = {k: int(v) for k, v in (row or {}).items()} or counts
+        counts = {**counts, **{k: int(v) for k, v in (row or {}).items()}}
+        for run in runs:
+            counts["requests"] += 1
+            counts["paid"] += run["status"] in ("SUCCEEDED", "TIMED-OUT") and run["delivery_verdict"] == "pass"
+            counts["stopped"] += run["status"] in ("BLOCKED", "REJECTED") or run["delivery_verdict"] == "fail"
+            counts["apify_spent"] += run["actual_charge"] or 0
     escrow = escrow_now(conn, agent_id)
     names = {r["id"]: r["seller"] for r in feed}
     for e in escrow:
@@ -235,6 +245,20 @@ def live_view(conn: Connection, agent_id: int, limit: int = LIVE_LIMIT) -> dict[
             state = "done"
     return {"task": newest, "task_state": state, "counts": counts, "escrow": escrow, "feed": feed,
             "checking": checking}
+
+
+def list_apify_runs(conn: Connection, agent_id: int, task_id: int, limit: int = LIVE_LIMIT) -> list[dict[str, Any]]:
+    """This task's Apify credit runs for the Live feed, newest first: kind apify, seller "Apify · <actor>", and the
+    apify_runs columns pages.apify_pipeline reads (amounts in millionths of USD)."""
+    rows = conn.execute(
+        "SELECT id, actor, url, reason, status, max_charge, actual_charge, rule, detail, intent_tier, intent_reason,"
+        " ml_model, ml_score, ml_threshold, delivery_verdict, delivery_reason, created_at FROM apify_runs"
+        " WHERE agent_id = %s AND mandate_id = %s ORDER BY id DESC LIMIT %s",
+        (agent_id, task_id, limit),
+    ).fetchall()
+    for row in rows:
+        row.update(kind="apify", seller=f"Apify · {row['actor']}", url=row["url"] or f"https://apify.com/{row['actor']}")
+    return rows
 
 
 def escrow_now(conn: Connection, agent_id: int, limit: int = ESCROW_LIMIT) -> list[dict[str, Any]]:

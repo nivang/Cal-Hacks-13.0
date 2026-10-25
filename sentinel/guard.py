@@ -14,8 +14,9 @@ anything is signed, and test_guard.py is its answer key. Rules run in order and 
   8. price_jump     amount above 2x the median of the last 5 settled prices of this product (seller and URL) -> BLOCK
                     (no history means the first price is trusted and becomes the baseline)
   9. duplicate      same agent, payTo, url and amount inside the duplicate window -> BLOCK
- 10. seller_escrow  a seller not on the approved list is paid only through escrow -> ALLOW
-     seller         not on the approved list and no escrow offer -> BLOCK
+ 10. seller_escrow  a seller not on the approved list that offers escrow is paid through escrow -> ALLOW
+     unlisted       not on the approved list and no escrow offer: paid directly, after every check above and the
+                    intent review (wallet history, injection, judge) -> ALLOW
  11. clean          an approved seller and everything passed -> ALLOW
 """
 import json
@@ -196,7 +197,7 @@ def evaluate(agent: Agent, quote: Quote, history: History, policy: dict[str, int
 
 
 def judge_seller(quote: Quote, history: History) -> Decision:
-    """Rule 10: a seller not on the approved list is paid only through escrow, so a bad delivery is refunded."""
+    """Rule 10: a seller not on the approved list is paid through escrow when it offers it, else directly."""
     facts = f" ({history.wallet_summary})" if history.wallet_summary else ""
     if quote.escrow:
         return Decision(
@@ -205,7 +206,7 @@ def judge_seller(quote: Quote, history: History) -> Decision:
             "delivery fails the check.",
         )
     return Decision(
-        BLOCK, "seller",
-        f"The seller {quote.pay_to} is not on your approved list{facts} and does not offer escrow, so Sentinel will "
-        "not pay it directly.",
+        ALLOW, "unlisted",
+        f"This seller is not on your approved list{facts} and does not offer escrow, so it is paid directly once "
+        "every other check passes.",
     )

@@ -328,8 +328,30 @@ async def from_source(source: str, fetch: Fetch, query: str, limit: int, max_amo
     if source == "apify":
         # Without credit only some Actors (whitelisted for agentic payments) are kept, so ask for more.
         wanted = limit + 10 if apify_credit else min(limit * 3, 50)
-        return from_apify(await fetch(APIFY_URL, {"search": query, "limit": wanted}), credit=apify_credit)
+        found: list[Listing] = []
+        for words in apify_queries(query):  # the Store matches every word, so a long need finds nothing
+            found = from_apify(await fetch(APIFY_URL, {"search": words, "limit": wanted}), credit=apify_credit)
+            if found:
+                break
+        return found
     raise ValueError(f"unknown source {source}")
+
+
+FILLER = frozenset({"a", "an", "the", "of", "in", "on", "for", "to", "from", "about", "with", "and", "or", "recent",
+                    "latest", "current", "new", "data", "info", "information"})
+
+
+def apify_queries(query: str) -> list[str]:
+    """What to ask the Apify Store, in order: the query, then its first three and two words that are not filler.
+
+    "Recent Google Maps reviews of robotics companies in San Francisco" -> that, "Google Maps reviews", "Google Maps".
+    """
+    core = [w for w in query.split() if w.lower().strip(",.;:") not in FILLER]
+    out: list[str] = []
+    for words in (query, " ".join(core[:3]), " ".join(core[:2])):
+        if words and words not in out:
+            out.append(words)
+    return out
 
 
 def rank(listings: list[Listing]) -> list[Listing]:

@@ -137,3 +137,45 @@ def test_found_at_shows_where_the_agent_found_it():
     assert step(row(found_at="https://market.test/catalog?x=1"), "found")["note"].endswith("via market.test/catalog")
     assert step(row(found_at="sentinel discovery"), "found")["note"].endswith("via sentinel discovery")
 
+
+
+# Apify credit runs (books.list_apify_runs rows)
+
+
+def run(**kw):
+    base = {"kind": "apify", "status": "SUCCEEDED", "rule": None, "detail": None, "intent_tier": 1,
+            "intent_reason": "Fits.", "max_charge": 500_000, "actual_charge": 120_000, "delivery_verdict": "pass",
+            "delivery_reason": "delivered: Reviews as promised."}
+    return {**base, **kw}
+
+
+def test_an_apify_run_that_delivered_passes_every_step():
+    assert set(states(run()).values()) == {"ok"}
+    assert step(run(), "result")["note"] == "Spent $0.12 of the $0.50 cap"
+    assert pages.money_out(run()) == {"label": "Apify charged", "got": 120_000, "of": 500_000, "kind": "paid"}
+
+
+@pytest.mark.parametrize("rule,stopped_at", [("cap", "guard"), ("budget", "guard"), ("off_task", "intent"),
+                                             ("injection_ml", "intent")])
+def test_a_blocked_apify_run_stops_at_the_step_that_refused_it(rule, stopped_at):
+    blocked = run(status="BLOCKED", rule=rule, detail="No.", actual_charge=0, delivery_verdict=None)
+    shown = states(blocked)
+    assert shown[stopped_at] == "stop" and shown["payment"] == "idle" and shown["result"] == "stop"
+    assert step(blocked, "result")["note"] == "Stopped by Sentinel, nothing spent"
+    assert pages.money_out(blocked)["kind"] == "blocked"
+
+
+def test_a_running_apify_run_waits_and_a_failed_check_is_shown_as_stopped():
+    running = run(status="RUNNING", actual_charge=None, delivery_verdict=None)
+    assert states(running)["payment"] == "wait" and pages.outcome(running) == "wait"
+    checking = run(delivery_verdict=None)
+    assert states(checking)["delivery"] == "wait"
+    bad = run(delivery_verdict="fail", delivery_reason="not_delivered: Empty reviews.")
+    assert states(bad)["delivery"] == "stop" and step(bad, "delivery")["note"] == "Empty reviews."
+    assert "failed the check" in step(bad, "result")["note"] and pages.money_out(bad)["kind"] == "blocked"
+
+
+def test_a_timed_out_apify_run_with_checked_results_shows_them_as_partial():
+    partial = run(status="TIMED-OUT")
+    assert set(states(partial).values()) == {"ok"}
+    assert "partial results" in step(partial, "result")["note"] and pages.money_out(partial)["kind"] == "paid"

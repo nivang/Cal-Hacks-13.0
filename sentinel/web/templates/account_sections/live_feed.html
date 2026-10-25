@@ -34,7 +34,7 @@
   <div class="lv-node">
     <p class="lv-node-name">Sellers</p>
     <p class="lv-node-big tabular-nums">{{ counts.paid_amount | usd }}</p>
-    <p class="lv-node-sub">paid to {{ counts.sellers_paid }} {{ "seller" if counts.sellers_paid == 1 else "sellers" }}</p>
+    <p class="lv-node-sub">paid to {{ counts.sellers_paid }} {{ "seller" if counts.sellers_paid == 1 else "sellers" }}{% if counts.apify_spent %} · {{ counts.apify_spent | usd }} Apify credits{% endif %}</p>
   </div>
 </section>
 {% if task_state == "done" %}
@@ -82,7 +82,7 @@
         <p class="lv-lane-label">Agent asked</p>
         <p class="lv-seller">{{ (c.url | host_path).split("/")[0] }}</p>
         <p class="lv-url">{{ c.url | host_path }}</p>
-        <p class="lv-meta">{{ "Found while searching" if c.kind == "search" else "The agent wants to pay" }}</p>
+        <p class="lv-meta">{{ {"search": "Found while searching", "apify": "The agent wants to run an Apify Actor"}.get(c.kind, "The agent wants to pay") }}</p>
       </div>
       <div class="lv-lane">
         <p class="lv-lane-label">Sentinel checking</p>
@@ -93,8 +93,8 @@
         </ul>
       </div>
       <div class="lv-lane lv-out k-progress">
-        <p class="lv-lane-label">Seller got</p>
-        <p class="lv-money tabular-nums">{% if c.amount %}{{ c.amount | usd }}<span>at stake</span>{% else %}…{% endif %}</p>
+        <p class="lv-lane-label">{{ "Apify charged" if c.kind == "apify" else "Seller got" }}</p>
+        <p class="lv-money tabular-nums">{% if c.amount %}{{ c.amount | usd }}<span>{{ "cap" if c.kind == "apify" else "at stake" }}</span>{% else %}…{% endif %}</p>
         <p class="lv-verdict" role="status">Sentinel is deciding</p>
         <div class="lv-progress" aria-hidden="true"><span></span></div>
       </div>
@@ -103,10 +103,11 @@
     {% for p in feed %}
     {% set steps = p | pipeline %}
     {% set result = steps[-1] %}
-    <li class="lv-card" data-card="{{ p.id }}">
+    {% set money = p | money_out %}
+    <li class="lv-card" data-card="{{ 'apify-' ~ p.id if p.kind == 'apify' else p.id }}">
       <div class="lv-lane">
         <p class="lv-lane-label">Agent asked</p>
-        <p class="lv-seller">{{ p.seller or (p.pay_to | short) or "Unknown seller" }}{% if not p.seller %} <span class="lv-pill">Not on your list</span>{% endif %}</p>
+        <p class="lv-seller">{{ p.seller or (p.pay_to | short) or "Unknown seller" }}{% if p.kind == "apify" %} <span class="lv-pill">Apify credits</span>{% elif not p.seller %} <span class="lv-pill">Not on your list</span>{% endif %}</p>
         <p class="lv-url">{{ p.url | host_path }}</p>
         {% if p.reason %}<p class="lv-quote" title="{{ p.reason }}">“{{ p.reason }}”</p>{% endif %}
         <p class="lv-meta"><time datetime="{{ p.created_at | iso }}" data-ago>{{ p.created_at | when }}</time>{% if p.found_while_searching %} · while searching{% endif %}</p>
@@ -125,10 +126,9 @@
           {% endfor %}
         </ul>
       </div>
-      {% set kind = "blocked" if p.status == "settled" and p.delivery_verdict == "fail" else {"settled": "paid", "escrowed": "escrow", "voided": "refunded", "approved": "progress"}.get(p.status, "blocked") %}
-      <div class="lv-lane lv-out is-{{ result.state }} k-{{ kind }}">
-        <p class="lv-lane-label">Seller got</p>
-        <p class="lv-money tabular-nums">{% if p.status in ("settled", "escrowed") %}{{ p.amount | usd }}{% else %}$0.00{% endif %}<span>of {{ p.amount | usd }}</span></p>
+      <div class="lv-lane lv-out is-{{ result.state }} k-{{ money.kind }}">
+        <p class="lv-lane-label">{{ money.label }}</p>
+        <p class="lv-money tabular-nums">{{ (money.got or 0) | usd }}<span>of {{ money.of | usd }}</span></p>
         <p class="lv-verdict">{{ result.note }}</p>
         {% if result.tx %}<a class="lv-tx" href="{{ tx_url }}{{ result.tx }}" rel="noreferrer" title="{{ result.tx }}">{{ result.tx | short(6, 4) }}</a>{% endif %}
       </div>

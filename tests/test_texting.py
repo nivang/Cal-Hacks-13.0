@@ -184,7 +184,8 @@ async def test_the_agent_has_only_sentinel_tools_and_no_web_access(make_desk, co
     await linked_user(connect, desk)
     await desk.handle(PHONE, "hi there")
     request = desk.client.requests[0]
-    assert {tool["name"] for tool in request["tools"]} == {"start_task", "find_services", "quote", "pay"}
+    assert {tool["name"] for tool in request["tools"]} == {"start_task", "find_services", "compare_prices", "quote",
+                                                           "pay", "apify_actor", "run_apify_actor"}
     assert all("type" not in tool or tool["type"] == "custom" for tool in request["tools"])  # no server web tools
     assert "no web search" in request["system"] and "Cite the source URL" in request["system"]
     assert sent(desk) == ["Hello."]

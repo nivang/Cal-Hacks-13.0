@@ -28,7 +28,9 @@
       {% for p in t.apify_purchases or [] %}
       <div class="mt-3 rounded-md bg-stone-50 p-3 text-sm">
         <p class="font-medium">Apify credit purchase: {{ p.actor }} · {{ p.status }}</p>
-        <p class="mt-1">{% if p.actual_charge is not none %}Charged ${{ p.charge_usd }} USD{% else %}Reserved up to {{ p.max_charge | usd }} USD{% endif %} · request {{ p.id }}</p>
+        <p class="mt-1">{% if p.status == "BLOCKED" %}Stopped by Sentinel, nothing spent{% elif p.actual_charge is not none %}Charged ${{ p.charge_usd }} USD{% else %}Reserved up to {{ p.max_charge | usd }} USD{% endif %} · request {{ p.id }}</p>
+        {% if p.status == "BLOCKED" and p.detail %}<p class="mt-1 text-red-700">{{ p.detail }}</p>{% endif %}
+        {% if p.delivery_verdict == "fail" %}<p class="mt-1 text-red-700">Delivery check failed: {{ p.delivery_reason.partition(": ")[2] or p.delivery_reason }}</p>{% endif %}
         <p class="mt-1 text-stone-600">{{ p.reason }}</p>
       </div>
       {% endfor %}

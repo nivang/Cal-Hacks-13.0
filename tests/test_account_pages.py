@@ -904,3 +904,26 @@ async def test_the_tasks_page_shows_each_price_comparison_with_the_pick_and_the_
     assert "&lt;b&gt;Hotels Cheap&lt;/b&gt;" in page.text and "<b>Hotels Cheap</b>" not in page.text
     bob = await signed_in(browser, mailer, "bob@example.com", BOB_IP)
     assert "Tokyo hotel prices" not in (await bob.get("/account/tasks", headers=headers)).text
+
+
+@pytest.mark.anyio
+async def test_apify_runs_show_on_live_with_the_payments_and_count(browser, mailer, conn):
+    client = await signed_in(browser, mailer)
+    user = user_of(conn, client)
+    task = task_for(conn, user)
+    in_task(conn, user, task, "settled", 100_000)
+    for status, actual, rule, verdict in [("SUCCEEDED", 120_000, None, "pass"), ("BLOCKED", 0, "cap", None)]:
+        conn.execute(
+            "INSERT INTO apify_runs (agent_id, mandate_id, actor, input_hash, reason, max_charge, actual_charge,"
+            " status, rule, detail, delivery_verdict, delivery_reason) VALUES (%s, %s, 'compass/maps-reviews', %s,"
+            " 'Need reviews.', 500000, %s, %s, %s, %s, %s, 'delivered: Reviews as promised.')",
+            (user["agent_id"], task, status, actual, status, rule, "Over the cap." if rule else None, verdict),
+        )
+    view = books.live_view(conn, user["agent_id"])
+    assert [r.get("kind") for r in view["feed"]].count("apify") == 2
+    counts = view["counts"]
+    assert counts["requests"] == 3 and counts["paid"] == 2 and counts["stopped"] == 1
+    assert counts["apify_spent"] == 120_000
+    page = (await client.get("/account/live")).text
+    assert "Apify · compass/maps-reviews" in page and "Apify charged" in page
+    assert "Stopped by Sentinel, nothing spent" in page and "$0.12 Apify credits" in page

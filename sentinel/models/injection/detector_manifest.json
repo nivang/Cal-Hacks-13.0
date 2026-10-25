@@ -4,7 +4,7 @@
   "files": {
     "vectorizer.joblib": "1a6ef742cd5ce5f05cd01501058b15648944cb4ce321911eef98100bda33e547",
     "xgboost.json": "bccdb49ebf62f92e325fdf2ca516169bba70e597c6a6d35ca904b1302a353b0d",
-    "thresholds.json": "aba75947087607949c3a7b0cf95677cec458e6e932eb9004d48daa7faab1f4c7",
+    "thresholds.json": "aac9711fbcd4b6ff4c475f703c6776df32ac6a2bab127efa310c99beb4880e48",
     "environment.json": "13cd6c4f69a90464ebe727075bd33de224faaf738a47d9c741f6ecd95ab9ffb4"
   }
 }

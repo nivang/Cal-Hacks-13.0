@@ -393,3 +393,17 @@ def test_the_summary_points_apify_listings_at_apify_actor():
     found = search(Directory(), sources=("apify",), apify_credit=True)
     r = results.discovered("maps", found)
     assert "run on the owner's Apify credit" in r.message and "None can be paid" not in r.message
+
+
+def test_a_long_need_is_retried_on_the_apify_store_with_fewer_words():
+    asked = []
+
+    async def fetch(url: str, params: dict[str, Any]) -> Any:
+        asked.append(params["search"])
+        return APIFY if params["search"] == "Google Maps reviews" else {"data": {"items": []}}
+
+    found = asyncio.run(discovery.from_source("apify", fetch, "Recent Google Maps reviews of robotics companies in SF",
+                                              5, None, False, apify_credit=True))
+    assert asked == ["Recent Google Maps reviews of robotics companies in SF", "Google Maps reviews"]
+    assert found and found[0].pay_with == "apify_credit"
+    assert discovery.apify_queries("hotel prices") == ["hotel prices"]  # short already: asked once
