@@ -1,0 +1,39 @@
+{% from "account_macros.html" import primary, danger %}
+{% if escrow_held %}
+<section class="mb-6 border-b border-stone-200 pb-6" aria-labelledby="escrow-h">
+  <h2 id="escrow-h" class="font-semibold">Held in escrow</h2>
+  <p class="mt-1 text-sm text-stone-600">Your money is in escrow and the seller is not paid yet: Sentinel was not sure the delivery is what you paid for. Look at what came back, then pay the seller or take your money back. If you do neither, Sentinel refunds it before the deadline.</p>
+  <ul class="mt-4 divide-y divide-stone-100">
+    {% for h in escrow_held %}
+    <li class="py-3">
+      <div class="flex flex-wrap items-start justify-between gap-3">
+        <div class="min-w-0 max-w-xl">
+          <p class="text-sm"><span class="font-semibold tabular-nums">{{ h.amount | usd }}</span> <span class="break-all text-stone-600">{{ h.url | host_path }}</span></p>
+          <p class="mt-1 text-sm text-stone-800">{{ h.detail }}</p>
+          {% if h.reason %}<p class="mt-1 text-xs text-stone-500">Agent's reason: {{ h.reason }}</p>{% endif %}
+          <p class="mt-1 text-xs text-stone-500">{% if h.goal %}Task: {{ h.goal }} · {% endif %}refunded automatically by {{ h.capture_deadline | when }}</p>
+        </div>
+        <div class="flex shrink-0 gap-2">
+          <form method="post" action="/account/tasks/capture">
+            <input type="hidden" name="csrf" value="{{ csrf }}">
+            <input type="hidden" name="request_id" value="{{ h.id }}">
+            <button type="submit" class="{{ primary }}">Pay seller</button>
+          </form>
+          <form method="post" action="/account/tasks/void">
+            <input type="hidden" name="csrf" value="{{ csrf }}">
+            <input type="hidden" name="request_id" value="{{ h.id }}">
+            <button type="submit" class="{{ danger }}">Refund me</button>
+          </form>
+        </div>
+      </div>
+      {% if h.preview %}
+      <details class="mt-2">
+        <summary class="cursor-pointer text-xs font-medium text-stone-600">What the seller sent</summary>
+        <pre class="mt-2 max-h-48 overflow-auto whitespace-pre-wrap break-all rounded-md bg-stone-50 p-3 text-xs text-stone-700">{{ h.preview }}</pre>
+      </details>
+      {% endif %}
+    </li>
+    {% endfor %}
+  </ul>
+</section>
+{% endif %}

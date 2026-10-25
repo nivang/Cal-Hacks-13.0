@@ -32,7 +32,7 @@ EVIL = "https://evil.example"
 SELLER = "0x1111111111111111111111111111111111111111"
 OTHER_SELLER = "0x2222222222222222222222222222222222222222"
 PAGES = [("/account", "Overview"), ("/account/payments", "Payments"), ("/account/tasks", "Tasks"),
-         ("/account/rules", "Rules"), ("/account/books", "Books")]
+         ("/account/rules", "Settings"), ("/account/books", "Books")]
 REASON = "Need 2026 email open-rate benchmarks for the Q3 report the owner asked for; DataCo is named in the brief."
 
 
@@ -149,7 +149,8 @@ async def test_each_page_renders_with_its_tab_marked_and_the_site_headers(browse
     response = await client.get(path)
     assert response.status_code == 200
     assert "alice@example.com" in response.text
-    current = re.findall(r'<a href="([^"]+)" aria-current="page"[^>]*>([^<]+)</a>', response.text)
+    links = re.findall(r'<a href="([^"]+)" aria-current="page"[^>]*>(.*?)</a>', response.text, re.DOTALL)
+    current = [(href, re.sub(r"<[^>]+>", "", content).strip()) for href, content in links]
     assert current == [(path, label)]
     assert response.headers["cache-control"] == "no-store"
     assert "script-src" in response.headers["content-security-policy"]
@@ -366,7 +367,7 @@ async def test_the_payments_page_lists_statuses_why_and_a_transaction_link(brows
     for text in ["SETTLED", "BLOCKED", "PROCESSING", "not approved", "$0.50", "a real purchase", "http://x/paid"]:
         assert text in page, text
     assert "Seller not approved" in page and "is not on the owner" in page  # the label and the guard's sentence
-    assert "In progress" in page and "<details" not in page and "SELLER" not in page
+    assert "In progress" in page and "Purchase details" in page and "<details" in page
     assert "up to the latest 20,000" in page
     assert 'href="https://sepolia.basescan.org/tx/0xtx' in page
     assert "Download CSV" in page and "/account/payments.csv" in page
@@ -429,17 +430,22 @@ async def test_the_pages_hold_to_the_screen_width_no_wide_text_and_tables_scroll
     client = await signed_in(browser, mailer)
     user = user_of(conn, client)
     await pay_spy("http://x/paid", None, agent=user["agent"], reason="r")
+    stylesheet = (await client.get("/static/site.css")).text
+    email_styles = re.search(r"\.sidebar-email\s*\{([^}]+)\}", stylesheet)
+    assert email_styles and all(rule in email_styles.group(1) for rule in (
+        "min-width:0", "overflow:hidden", "text-overflow:ellipsis", "white-space:nowrap",
+    ))
+    main_styles = re.search(r"\.account-main\s*\{([^}]+)\}", stylesheet)
+    assert main_styles and "max-width:1120px" in main_styles.group(1)
     for path in ["/account", "/account/payments", "/account/rules", "/account/books"]:
         text = (await client.get(path)).text
-        assert "min-w-0 max-w-[9rem] truncate" in text and "shrink-0" in text, path  # email truncates, Sign out stays
-        main = re.search(r'<main class="([^"]*)"', text)
-        assert main and "max-w-5xl" in main.group(1).split() and "min-w-0" in main.group(1).split(), path
-        # max-w-full next to max-w-5xl wins in CSS and stretches the page edge to edge on a desktop (a real regression)
+        assert 'class="sidebar-email"' in text and 'class="sidebar-signout"' in text, path
+        main = re.search(r'<main\b[^>]*class="([^"]*)"', text)
+        assert main and {"account-main", "min-w-0"} <= set(main.group(1).split()), path
         assert "max-w-full" not in main.group(1).split(), path
         for table in re.finditer(r"<table", text):
             before = text[max(0, table.start() - 120):table.start()]
             assert "overflow-x-auto" in before, (path, before)
-    assert "grid-cols-1" in (await client.get("/account")).text
 
 
 @pytest.mark.anyio
@@ -488,18 +494,20 @@ async def test_the_books_page_shows_balanced_scoped_books(browser, mailer, conn,
 
 
 @pytest.mark.anyio
-async def test_the_overview_shows_the_stats_the_wallet_and_the_connect_card(browser, mailer, conn, pay_spy):
+async def test_the_overview_shows_stats_and_wallet_with_setup_controls_in_settings(browser, mailer, conn, pay_spy):
     client = await signed_in(browser, mailer)
     user = user_of(conn, client)
     await pay_spy("http://x/p", None, agent=user["agent"], reason="r")
     page = (await client.get("/account")).text
-    assert "Spent this week" in page and "$0.50" in page and "of $50.00" in page and "Per payment cap" in page
+    assert "Spent this week" in page and "$0.50" in page and "of $50.00" in page and "per payment cap" in page
     assert 'style="width: 1%"' in page and 'role="progressbar"' in page and "bg-stone-900" in page
     assert f"https://sepolia.basescan.org/address/{user['wallet_address']}" in page
     assert 'href="https://faucet.circle.com"' in page and "Fund it" in page and "Base Sepolia" in page
-    assert "claude mcp add --transport http sentinel http://localhost:8000/mcp" in page and "<details" in page
+    settings_page = (await client.get("/account/rules")).text
+    assert "claude mcp add --transport http sentinel http://localhost:8000/mcp" in settings_page
+    assert "<details" in settings_page
     assert "Recent payments" in page and "SETTLED" in page
-    assert "Sign out everywhere" in page
+    assert "Sign out everywhere" in settings_page
 
 
 @pytest.mark.anyio
@@ -524,14 +532,14 @@ async def test_the_checklist_ticks_as_steps_complete_then_says_all_set(browser, 
     client = await signed_in(browser, mailer)
     clear_operator_list(conn)
     page = (await client.get("/account")).text
-    assert "Get started" in page and page.count("(done)") == 1 and page.count("(to do)") == 2
+    assert "Finish setup" in page and page.count("(done)") == 1 and page.count("(to do)") == 2
     assert 'href="/account/rules"' in page
     await add_seller(client)
     page = (await client.get("/account")).text
     assert page.count("(done)") == 2 and page.count("(to do)") == 1
     await connect_flow(client, mailer, "alice@example.com")
     page = (await client.get("/account")).text
-    assert "All set" in page and "Get started" not in page
+    assert "All set" in page and "Finish setup" not in page
 
 
 @pytest.mark.anyio
@@ -900,7 +908,8 @@ async def test_auto_buy_refuses_anything_but_on_or_off_and_only_changes_the_owne
 
 
 @pytest.mark.anyio
-async def test_the_tasks_page_shows_each_price_comparison_with_the_pick_and_the_offers(browser, mailer, conn):
+@pytest.mark.parametrize("headers", [{}, {"x-sentinel-section": "tasks_list"}])
+async def test_the_tasks_page_shows_each_price_comparison_with_the_pick_and_the_offers(browser, mailer, conn, headers):
     client = await signed_in(browser, mailer)
     user = user_of(conn, client)
     task_id = task_for(conn, user)
@@ -914,10 +923,11 @@ async def test_the_tasks_page_shows_each_price_comparison_with_the_pick_and_the_
                              ("http://m.test/pro", "Hotels Pro", 150_000),
                              ("http://m.test/lite", "Hotels Lite", 50_000),
                              "Best value: Hotels Pro at $0.15 for this job, scoring 90 of 100.")
-    page = await client.get("/account/tasks")
+    page = await client.get("/account/tasks", headers=headers)
+    assert page.status_code == 200
     assert "Price comparison: Tokyo hotel prices" in page.text
     assert "picked Hotels Pro ($0.15) over Hotels Lite ($0.05)" in page.text
     assert "Fifty hotels with prices." in page.text and "· blocked" in page.text
     assert "&lt;b&gt;Hotels Cheap&lt;/b&gt;" in page.text and "<b>Hotels Cheap</b>" not in page.text
     bob = await signed_in(browser, mailer, "bob@example.com", BOB_IP)
-    assert "Tokyo hotel prices" not in (await bob.get("/account/tasks")).text
+    assert "Tokyo hotel prices" not in (await bob.get("/account/tasks", headers=headers)).text

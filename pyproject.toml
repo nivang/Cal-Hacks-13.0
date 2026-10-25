@@ -31,7 +31,7 @@ packages = ["sentinel", "sentinel.web", "demo", "test_site"]
 
 [tool.setuptools.package-data]
 sentinel = ["policy.json", "templates/*.html", "migrations/*.sql"]
-"sentinel.web" = ["templates/*.html", "static/*"]
+"sentinel.web" = ["templates/*.html", "templates/account_sections/*.html", "static/*"]
 
 [tool.ruff]
 line-length = 120

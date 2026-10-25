@@ -286,7 +286,8 @@ def count_pending(conn: Connection, agent_id: int) -> dict[str, int]:
         "SELECT count(*) AS n FROM mandates WHERE agent_id = %s AND status = 'provisional' AND expires_at > now()",
         (agent_id,),
     ).fetchone()
-    return {"tasks": int(tasks["n"]) if tasks else 0, "held": len(list_held(conn, agent_id))}
+    return {"tasks": int(tasks["n"]) if tasks else 0, "held": len(list_held(conn, agent_id)),
+            "escrow": len(list_escrow_held(conn, agent_id))}
 
 
 def list_held(conn: Connection, agent_id: int, limit: int = HELD_LIMIT) -> list[dict[str, Any]]:

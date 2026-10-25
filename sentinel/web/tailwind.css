@@ -1,0 +1,143 @@
+@import "tailwindcss";
+@source "./templates";
+@source "./app.py";
+
+/* White surfaces and Coinbase-inspired blue across every page. */
+@theme {
+  --color-stone-50: #f8fafc;
+  --color-stone-100: #f1f5f9;
+  --color-stone-200: #e2e8f0;
+  --color-stone-300: #cbd5e1;
+  --color-stone-400: #94a3b8;
+  --color-stone-500: #64748b;
+  --color-stone-600: #475569;
+  --color-stone-700: #334155;
+  --color-stone-800: #1e293b;
+  --color-stone-900: #0f172a;
+  --color-stone-950: #020617;
+}
+
+.sentinel-theme {
+  color-scheme: light;
+  --sidebar-width: 252px;
+  --sidebar-surface: #ffffff;
+  --sidebar-ink: #0a0b0d;
+  --sidebar-muted: #5b616e;
+  --accent: #0052ff;
+  background: #ffffff;
+}
+
+.account-sidebar {
+  position: fixed;
+  inset: 0 auto 0 0;
+  z-index: 20;
+  display: flex;
+  flex-direction: column;
+  width: var(--sidebar-width);
+  padding: 32px 20px 20px;
+  overflow-y: auto;
+  background: var(--sidebar-surface);
+  color: var(--sidebar-ink);
+  border-right: 1px solid #e5e7eb;
+}
+.sidebar-brand { display: flex; align-items: center; gap: 12px; padding: 0 10px; font-size: 23px; font-weight: 650; letter-spacing: -.8px; }
+.sidebar-emblem { display: grid; flex: none; place-items: center; width: 39px; height: 43px; border: 1px solid #d6e3ff; border-radius: 13px; color: var(--accent); background: #eef4ff; }
+.sidebar-brand-caption { display: block; margin-top: 2px; font-size: 10px; font-weight: 400; letter-spacing: .3px; color: var(--sidebar-muted); }
+.sidebar-content { display: flex; flex: 1; flex-direction: column; min-height: 0; }
+.sidebar-navigation { margin-top: 48px; }
+.sidebar-section-label { margin: 0 12px 14px; color: var(--sidebar-muted); font-size: 10px; letter-spacing: 1.8px; text-transform: uppercase; font-weight: 600; }
+.sidebar-links { display: grid; gap: 7px; }
+.sidebar-link { display: flex; align-items: center; gap: 12px; min-height: 45px; padding: 11px 13px; border-radius: 8px; font-size: 14px; font-weight: 500; color: #454b57; transition: background-color .15s, color .15s; }
+.sidebar-link:hover { background: #f4f7fc; color: #0052ff; }
+.sidebar-link.is-active { background: #eef4ff; color: #0052ff; font-weight: 650; }
+.sidebar-active-dot { margin-left: auto; width: 5px; height: 5px; border-radius: 50%; background: currentColor; }
+.sidebar-subnavigation { margin: 9px 0 12px 22px; padding-left: 20px; border-left: 1px solid #dce3ef; }
+.sidebar-sublink { display: block; padding: 8px 0; color: var(--sidebar-muted); font-size: 13px; }
+.sidebar-sublink:hover, .sidebar-sublink.is-active { color: var(--accent); }
+.sidebar-sublink.is-active { font-weight: 650; }
+.sidebar-bottom { margin-top: auto; padding: 40px 10px 0; }
+.sidebar-network { display: flex; align-items: center; gap: 7px; color: #454b57; font-size: 11px; }
+.sidebar-network > span:first-child { width: 6px; height: 6px; border-radius: 50%; background: #0052ff; }
+.sidebar-network-label { margin-left: auto; padding: 2px 6px; border: 1px solid #e0e4eb; border-radius: 4px; color: var(--sidebar-muted); font-size: 9px; }
+.sidebar-note { margin: 17px 0 24px; color: var(--sidebar-muted); font-size: 12px; line-height: 1.7; }
+.sidebar-account { display: flex; align-items: center; gap: 9px; min-width: 0; border-top: 1px solid #e5e7eb; padding-top: 20px; }
+.sidebar-avatar { display: grid; place-items: center; flex: none; width: 29px; height: 29px; border-radius: 50%; background: #eef4ff; color: var(--accent); font-size: 12px; font-weight: 600; }
+.sidebar-email { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11px; color: #454b57; }
+.sidebar-email button { text-decoration: underline; }
+.sidebar-signout { display: flex; align-items: center; justify-content: space-between; width: 100%; padding: 14px 0 0 38px; color: var(--sidebar-muted); font-size: 11px; cursor: pointer; }
+.sidebar-signout:hover { color: var(--accent); }
+.account-sidebar a:focus-visible, .account-sidebar button:focus-visible { outline: 2px solid var(--accent); outline-offset: 4px; }
+.account-main { max-width: 1120px; margin-left: var(--sidebar-width); padding: 52px 48px 36px; }
+.account-footer { max-width: 1120px; margin-left: var(--sidebar-width); padding: 0 48px 32px; }
+.account-main h1 { font-size: 30px; font-weight: 600; letter-spacing: -1.2px; }
+.account-main h2 { letter-spacing: -.2px; }
+.account-main > :first-child, .account-main #account-loading > :first-child { margin-top: 0; }
+.account-main table thead { color: var(--color-stone-600); }
+.account-main details > summary { text-underline-offset: 4px; }
+.account-main summary:hover { color: var(--color-stone-900); }
+.account-main input:not([type="hidden"]):focus { outline-color: #0052ff; }
+.account-main [role="progressbar"] { background: #e5edff; }
+.account-main [role="progressbar"] > .bg-stone-900 { background: #0052ff; }
+.account-main ::selection { background: #d6e4ff; color: #003bb5; }
+.sentinel-theme .bg-white { background-color: #ffffff; }
+.sentinel-theme .account-primary { background: #0052ff; color: #fff; border: 1px solid #0052ff; }
+.sentinel-theme .account-primary:hover { background: #0044d4; }
+.sentinel-theme .account-secondary:hover { background: #f0f5ff; border-color: #9abbff; }
+.sentinel-theme input:not([type="hidden"]) { caret-color: #0052ff; }
+.sentinel-theme a.underline { text-decoration-color: #a6b2c6; }
+.sentinel-theme a.underline:hover { color: #0052ff; text-decoration-color: currentColor; }
+.account-main h1 { color: #0a0b0d; }
+.account-main h2 { color: #1d2433; }
+.sidebar-toggle, .sidebar-menu-button { display: none; }
+.skip-navigation { position: fixed; top: 10px; left: -1000px; z-index: 50; padding: 10px 16px; border-radius: 6px; background: #0052ff; color: #ffffff; }
+.skip-navigation:focus { left: 12px; }
+@media (min-width: 1600px) {
+  .account-main, .account-footer { margin-right: auto; margin-left: calc(var(--sidebar-width) + (100vw - var(--sidebar-width) - 1120px) / 2); }
+}
+@media (max-width: 900px) {
+  .account-app { --sidebar-width: 220px; }
+  .account-sidebar { padding-left: 14px; padding-right: 14px; }
+  .account-main { padding: 36px 28px; }
+  .account-footer { padding: 0 28px 28px; }
+}
+@media (max-width: 680px) {
+  .account-sidebar { position: relative; width: 100%; padding: 16px 20px; overflow: visible; }
+  .sidebar-brand { width: fit-content; padding: 0; font-size: 20px; }
+  .sidebar-emblem { width: 33px; height: 36px; border-radius: 10px; }
+  .sidebar-brand-caption { font-size: 9px; }
+  .sidebar-menu-button { display: flex; align-items: center; gap: 10px; position: absolute; right: 20px; top: 22px; padding: 5px 0; font-size: 12px; color: var(--sidebar-ink); cursor: pointer; }
+  .sidebar-toggle { display: block; position: absolute; width: 1px; height: 1px; padding: 0; opacity: 0; }
+  .sidebar-toggle:focus-visible + .sidebar-menu-button { outline: 2px solid var(--accent); outline-offset: 5px; }
+  .sidebar-content { display: none; }
+  .sidebar-toggle:checked ~ .sidebar-content { display: flex; }
+  .sidebar-navigation { margin-top: 30px; }
+  .sidebar-bottom { padding-top: 24px; }
+  .sidebar-note { display: none; }
+  .sidebar-account { margin-top: 18px; }
+  .sidebar-email { font-size: 13px; }
+  .sidebar-signout { padding-bottom: 8px; font-size: 12px; }
+  .account-main, .account-footer { margin-left: 0; margin-right: 0; padding-left: 20px; padding-right: 20px; }
+  .account-main { padding-top: 30px; }
+  .account-main h1 { font-size: 27px; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .sidebar-link { transition: none; }
+}
+
+/* Public pages share the workspace palette without inheriting the sidebar layout. */
+.public-site > header { background: #ffffff; border-color: #e5e7eb; }
+.public-site > header > div { min-height: 72px; }
+.public-site header img { filter: none; }
+.public-site header a:first-child { color: #0052ff; }
+.public-site main { padding-top: 56px; padding-bottom: 48px; }
+.public-site h1 { color: #0a0b0d; line-height: 1.2; }
+.public-site main > h1 { letter-spacing: -1px; }
+.public-site input:not([type="hidden"]) { color: #0f172a; }
+.public-site input:focus-visible, .public-site button:focus-visible, .public-site a:focus-visible { outline: 2px solid #0052ff; outline-offset: 4px; }
+.public-site .bg-stone-900 { background: #0052ff; color: #fff; }
+.public-site .bg-stone-900:hover { background: #0044d4; }
+.public-site main > ol > li > span { color: #0052ff; }
+.public-site ::selection { background: #d6e4ff; color: #003bb5; }
+@media (max-width: 680px) {
+  .public-site main { padding-top: 36px; }
+}

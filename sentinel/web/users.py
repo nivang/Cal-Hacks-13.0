@@ -241,11 +241,12 @@ def identity_for(conn: db.Connection, user_id: str) -> Identity | None:
     return Identity(uid, row["name"], row["wallet_address"])
 
 
-def account_view(conn: db.Connection, user_id: str) -> dict[str, Any]:
+def account_view(conn: db.Connection, user_id: str, include_spend: bool = True) -> dict[str, Any]:
     """What the account pages show: email, wallet_address, agent, agent_id, per_payment_cap, weekly_budget, auto_buy
     (the owner's auto buy switch, off before the wallet exists) and week_spend.
 
     Amounts are atomic units; week_spend counts settled and in flight payments over the guard's budget window.
+    Lazy sections can skip the spending query with include_spend=False.
     Before the wallet exists wallet_address, agent, agent_id and the limits are None and week_spend is 0.
     LookupError for an unknown user.
     """
@@ -263,7 +264,10 @@ def account_view(conn: db.Connection, user_id: str) -> dict[str, Any]:
         raise LookupError("no such user")
     aid = row.pop("aid")
     row["agent_id"] = aid
-    row["week_spend"] = attempts.week_spend(conn, aid, guard.POLICY["budget_window_days"]) if aid is not None else 0
+    row["week_spend"] = (
+        attempts.week_spend(conn, aid, guard.POLICY["budget_window_days"])
+        if aid is not None and include_spend else 0
+    )
     return row
 
 

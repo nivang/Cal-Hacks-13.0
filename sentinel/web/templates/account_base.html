@@ -1,33 +1,61 @@
 {% extends "base.html" %}
 {% block width %}max-w-5xl{% endblock %}
+{% block body_class %}sentinel-theme account-app min-h-screen bg-stone-50 text-stone-900 antialiased{% endblock %}
+{% block main_class %}account-main min-w-0{% endblock %}
+{% block footer_class %}account-footer text-xs text-stone-500{% endblock %}
 {% block header %}
-<header class="border-b border-stone-200 bg-white">
-  <div class="mx-auto {{ self.width() }} min-w-0 px-4">
-    <div class="flex min-w-0 items-center justify-between gap-x-4 gap-y-2 py-3">
-      <a href="/" class="flex shrink-0 items-center gap-2 font-semibold tracking-tight">
-        <img src="/favicon.ico" alt="" width="20" height="20"> Sentinel
-      </a>
-      <div class="flex min-w-0 items-center gap-3 text-sm">
-        <span class="min-w-0 max-w-[9rem] truncate text-stone-600 sm:max-w-xs" title="{{ email }}">{{ email }}</span>
-        <form method="post" action="/signout" class="shrink-0">
-          <input type="hidden" name="csrf" value="{{ csrf }}">
-          <button type="submit" class="rounded-md border border-stone-300 px-3 py-1 font-medium hover:bg-stone-100 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-stone-900">Sign out</button>
-        </form>
-      </div>
-    </div>
-    <nav aria-label="Account" class="-mb-px max-w-full overflow-x-auto">
-      <ul class="flex min-w-max gap-1 text-sm">
-        {% for key, label, href in [("overview", "Overview", "/account"), ("payments", "Payments", "/account/payments"), ("tasks", "Tasks", "/account/tasks"), ("rules", "Rules", "/account/rules"), ("books", "Books", "/account/books")] %}
+<a href="#main-content" class="skip-navigation">Skip to content</a>
+<aside class="account-sidebar" aria-label="Workspace sidebar">
+  <a href="/account" class="sidebar-brand">
+    <span class="sidebar-emblem" aria-hidden="true">
+      <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="m12 3 8 3v6c0 5-8 9-8 9s-8-4-8-9V6l8-3Z"/><path d="m8.5 11.5 2.5 2.5 4.5-5"/></svg>
+    </span>
+    <span>Sentinel<span class="sidebar-brand-caption">Your agent. Your rules.</span></span>
+  </a>
+  <input id="sidebar-toggle" class="sidebar-toggle" type="checkbox" aria-controls="sidebar-content">
+  <label class="sidebar-menu-button" for="sidebar-toggle">Menu <span aria-hidden="true">☰</span></label>
+  <div id="sidebar-content" class="sidebar-content">
+    <nav aria-label="Account" class="sidebar-navigation">
+      <p class="sidebar-section-label">Workspace</p>
+      {% set activity = tab in ("tasks", "payments", "books") %}
+      <ul class="sidebar-links">
+        {% for key, label, href, path in [
+          ("overview", "Overview", "/account", "M3 3h7v7H3z M14 3h7v7h-7z M3 14h7v7H3z M14 14h7v7h-7z"),
+          ("activity", "Activity", "/account/tasks", "M3 12h4l3-8 4 16 3-8h4"),
+          ("rules", "Settings", "/account/rules", "M4 6h16 M4 12h16 M4 18h16 M8 3v6 M16 9v6 M10 15v6")
+        ] %}
         <li>
-          {% if key == tab %}
-          <a href="{{ href }}" aria-current="page" class="block border-b-2 border-stone-900 px-3 py-2 font-semibold text-stone-900">{{ label }}</a>
-          {% else %}
-          <a href="{{ href }}" class="block border-b-2 border-transparent px-3 py-2 font-medium text-stone-600 hover:border-stone-300 hover:text-stone-900 focus-visible:outline-2 focus-visible:outline-stone-900">{{ label }}</a>
+          {% set selected = key == tab or (key == "activity" and activity) %}
+          <a href="{{ href }}"{% if selected %} aria-current="{{ 'location' if key == 'activity' else 'page' }}"{% endif %} class="sidebar-link{% if selected %} is-active{% endif %}">
+            <svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="{{ path }}"/></svg>
+            <span>{{ label }}</span>
+            {% if selected %}<span class="sidebar-active-dot" aria-hidden="true"></span>{% endif %}
+          </a>
+          {% if key == "activity" %}
+          <nav aria-label="Activity views" class="sidebar-subnavigation">
+            <ul>
+              {% for view, title, url in [("tasks", "Tasks", "/account/tasks"), ("payments", "Payments", "/account/payments"), ("books", "Books", "/account/books")] %}
+              <li><a href="{{ url }}"{% if view == tab %} aria-current="page"{% endif %} class="sidebar-sublink{% if view == tab %} is-active{% endif %}">{{ title }}</a></li>
+              {% endfor %}
+            </ul>
+          </nav>
           {% endif %}
         </li>
         {% endfor %}
       </ul>
     </nav>
+    <div class="sidebar-bottom">
+      <div class="sidebar-network"><span aria-hidden="true"></span> Base Sepolia <span class="sidebar-network-label">Testnet</span></div>
+      <p class="sidebar-note">A little independence.<br>A lot of peace of mind.</p>
+      <div class="sidebar-account">
+        <span class="sidebar-avatar" aria-hidden="true">S</span>
+        <span class="sidebar-email"{% if loading %} data-account-section="identity" aria-busy="true"{% else %} title="{{ email }}"{% endif %}>{% if loading %}<span data-loading-message role="status">Loading account…</span><button data-loading-retry type="button" hidden>Try again</button>{% else %}{{ email }}{% endif %}</span>
+      </div>
+      <form method="post" action="/signout">
+        <input type="hidden" name="csrf" value="{{ csrf }}">
+        <button type="submit" class="sidebar-signout">Sign out <span aria-hidden="true">↗</span></button>
+      </form>
+    </div>
   </div>
-</header>
+</aside>
 {% endblock %}

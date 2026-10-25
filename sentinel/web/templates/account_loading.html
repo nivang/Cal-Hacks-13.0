@@ -1,0 +1,8 @@
+{% extends account_template %}
+{% block content %}
+<div id="account-loading">
+{{ super() }}
+</div>
+<noscript><p class="mt-3 text-sm"><a href="{{ full_url }}" class="underline">Load this page without JavaScript</a></p></noscript>
+<script src="/static/account-loading.js" defer></script>
+{% endblock %}

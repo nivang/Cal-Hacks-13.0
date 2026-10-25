@@ -44,12 +44,12 @@ T = TypeVar("T")
 STATIC_DIR = Path(__file__).parent / "static"
 FAVICON = STATIC_DIR / "favicon.svg"
 BINDING_TTL_S = oauth.PENDING_TTL_S  # the consent binding cookie lives as long as the pending request
-TAILWIND = "https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4.3.3/dist/index.global.js"
 BASESCAN_ADDRESS = "https://sepolia.basescan.org/address/"
 FAUCET = "https://faucet.circle.com"
 
 CSP_BEFORE_FORM = (
-    f"default-src 'none'; script-src {TAILWIND}; style-src 'self' 'unsafe-inline'; img-src 'self' data:; "
+    "default-src 'none'; script-src 'self'; connect-src 'self'; "
+    "style-src 'self' 'unsafe-inline'; img-src 'self' data:; "
     "base-uri 'none'; object-src 'none'; "
 )
 CSP_AFTER_FORM = "; frame-ancestors 'none'"
@@ -522,6 +522,8 @@ def create_app(
             "csrf": auth.csrf_token(settings, session.value, "account"),
             "basescan_url": BASESCAN_ADDRESS + address if address else None,
             "faucet_url": FAUCET,
+            "mcp_url": settings.resource_url,
+            "claude_command": f"claude mcp add --transport http sentinel {settings.resource_url}",
             "cap": usdc(view["per_payment_cap"]),
             "budget": usdc(view["weekly_budget"]),
             "spent": usdc(view["week_spend"]),
@@ -530,11 +532,124 @@ def create_app(
             "error": None,
         }
 
+    section_names = {
+        "/account": {"overview_spending", "overview_cap", "overview_wallet", "overview_setup", "overview_recent"},
+        "/account/payments": {"payments_list"},
+        "/account/rules": {"rules_limits", "rules_auto_buy", "rules_sellers", "seller_wallet"},
+        "/account/tasks": {"tasks_escrow", "tasks_held", "tasks_list"},
+        "/account/books": {"books_summary", "books_journal", "books_totals"},
+    }
+
+    async def account_section(
+        request: Request, path: str, session: auth.Session, user: Mapping[str, Any], section: str,
+    ) -> Response:
+        """Load only one authenticated region, without waiting for unrelated queries or services."""
+        if section not in section_names.get(path, set()) | {"identity"}:
+            return error(request, "Unknown section", "Reload the page and try again.", 400)
+        if section == "identity":
+            return page(request, "account_fragment.html", {"section": section, "email": user["email"]})
+        view = await run_db(users.account_view, user["id"], section in {"overview_spending", "rules_limits"})
+        aid = view["agent_id"]
+        tab = "overview" if path == "/account" else path.rsplit("/", 1)[-1]
+        context = {**account_context(session, view, tab), "section": section}
+        if aid is not None:
+            if section == "overview_setup":
+                def setup(conn: db.Connection) -> dict[str, Any]:
+                    return {
+                        "has_seller": any(s["status"] == "approved" for s in books.list_sellers(conn, aid)),
+                        "connected": books.has_live_grant(conn, str(user["id"])),
+                    }
+                found = await run_db(setup)
+                steps = [
+                    (True, "Create your wallet", None),
+                    (found["has_seller"], "Approve a seller your agent may pay", "/account/rules"),
+                    (found["connected"], "Connect your AI app", "/account/rules#connect-h"),
+                ]
+                context.update(steps=steps, all_set=all(done for done, _, _ in steps))
+            elif section == "overview_recent":
+                context["recent"] = await run_db(books.recent_payments, aid)
+                context["waiting"] = await run_db(mandates.count_pending, aid)
+            elif section == "payments_list":
+                await run_db(link_approvals.expire, view["agent"])
+                groups = await run_db(books.payments_by_task, aid)
+                context.update(groups=groups, payments=[row for group in groups for row in group["rows"]],
+                               csv_limit=f"{books.CSV_LIMIT:,}")
+            elif section == "rules_sellers":
+                sellers = await run_db(books.list_sellers, aid)
+                context["lazy_wallets"] = True
+                context.update(sellers=sellers, typed_name="", typed_pay_to="")
+            elif section == "seller_wallet":
+                address = request.headers.get("x-sentinel-wallet", "")
+                sellers = await run_db(books.list_sellers, aid)
+                if not any(s["pay_to"].lower() == address.lower() for s in sellers):
+                    return error(request, "Unknown seller", "This seller is not on your list.", 404)
+                with connect() as conn:
+                    profile = await chain.cached_profile(conn, address)
+                context.update(wallet_label=profile.summary() if profile else "could not check",
+                               wallet_warn=bool(profile and (profile.flagged or profile.unused or profile.is_new())))
+            elif section == "tasks_escrow":
+                context["escrow_held"] = await run_db(mandates.list_escrow_held, aid)
+            elif section == "tasks_held":
+                context["held"] = await run_db(mandates.list_held, aid)
+            elif section == "tasks_list":
+                context["tasks"] = await run_db(mandates.list_for_agent, aid)
+                comparisons: dict[int, list[dict[str, Any]]] = {}
+                for c in await run_db(mandates.list_comparisons, aid):
+                    comparisons.setdefault(c["mandate_id"], []).append(c)
+                context["comparisons"] = comparisons
+                context["provisional_cap"] = usdc(guard.POLICY["intent_provisional_budget"])
+            elif section == "books_summary":
+                context["summary"] = await run_db(books.summary, aid)
+                context["totals"] = await run_db(books.totals, aid)
+            elif section == "books_journal":
+                context["journal"] = await run_db(books.journal, aid)
+            elif section == "books_totals":
+                context["totals"] = await run_db(books.totals, aid)
+        elif section == "overview_setup":
+            context.update(steps=[(False, "Create your wallet", None),
+                                  (False, "Approve a seller your agent may pay", "/account/rules"),
+                                  (False, "Connect your AI app", "/account/rules#connect-h")], all_set=False)
+        if section == "rules_limits":
+            context.update(typed_cap=results.usdc_text(view["per_payment_cap"]) if aid is not None else "",
+                           typed_budget=results.usdc_text(view["weekly_budget"]) if aid is not None else "")
+        return page(request, "account_fragment.html", context)
+
     async def account_get(request: Request, path: str) -> tuple[Response | None, auth.Session | None, dict[str, Any]]:
         """The checks every account page shares: a live session, else the sign in redirect. Returns the user's view."""
+        # Only render public layout here. The content request below still checks the live session in the database,
+        # including revocation, before exposing any account data. Non-browser clients and the no-JS link get HTML.
+        if (request.method == "GET" and request.url.path == path
+                and "text/html" in request.headers.get("accept", "")
+                and request.headers.get("x-sentinel-content") != "1"
+                and not request.headers.get("x-sentinel-section")
+                and request.query_params.get("full") != "1"):
+            session = auth.read_session(settings, request.cookies.get(session_cookie))
+            if session is None:
+                return sign_in_redirect(path, False), None, {}
+            tab, title = {
+                "/account": ("overview", "Your account"),
+                "/account/payments": ("payments", "Payments"),
+                "/account/tasks": ("tasks", "Tasks"),
+                "/account/rules": ("rules", "Rules"),
+                "/account/books": ("books", "Books"),
+            }[path]
+            return page(request, "account_loading.html", {
+                "tab": tab, "title": title, "email": "", "loading": True,
+                "account_template": "account.html" if tab == "overview" else f"account_{tab}.html",
+                "mcp_url": settings.resource_url,
+                "claude_command": f"claude mcp add --transport http sentinel {settings.resource_url}",
+                "done": request.query_params.get("done"),
+                "done_text": (TASK_DONE_TEXT if tab == "tasks" else DONE_TEXT).get(
+                    request.query_params.get("done", ""), ""),
+                "csrf": auth.csrf_token(settings, session.value, "account"),
+                "full_url": str(request.url.include_query_params(full="1")),
+            }), None, {}
         session, user, stale = await current(request)
         if session is None or user is None:
             return sign_in_redirect(path, stale), None, {}
+        section = request.headers.get("x-sentinel-section")
+        if section:
+            return await account_section(request, path, session, user, section), None, {}
         view = await run_db(users.account_view, user["id"])
         return None, session, view
 
@@ -562,7 +677,7 @@ def create_app(
         steps = [
             (aid is not None, "Create your wallet", None),
             (found["has_seller"], "Approve a seller your agent may pay", "/account/rules"),
-            (found["connected"], "Connect your AI app", "#connect-h"),
+            (found["connected"], "Connect your AI app", "/account/rules#connect-h"),
         ]
         context = {
             **account_context(session, view, "overview"), **found, "steps": steps,

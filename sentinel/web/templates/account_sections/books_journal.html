@@ -1,0 +1,29 @@
+{% from "account_macros.html" import primary, secondary, danger, input, card, status_badge, seller_cell, seller_badge, source_badge, banners, no_wallet %}
+<section class="mt-6 border-b border-stone-200 pb-6" aria-labelledby="journal-h">
+  <h2 id="journal-h" class="font-semibold">Journal</h2>
+  {% if journal %}
+  <ol class="mt-3 space-y-4">
+    {% for e in journal %}
+    <li class="rounded-md border border-stone-200">
+      <div class="flex flex-wrap items-baseline justify-between gap-x-4 gap-y-1 border-b border-stone-200 bg-stone-50 px-3 py-2">
+        <span class="text-xs text-stone-500">{{ e.date | when }}</span>
+        <span class="min-w-0 flex-1 break-words text-sm" title="{{ e.memo }}">{% if e.attempt %}Paid {{ e.attempt.seller or (e.attempt.pay_to | short) }} for <span class="break-all">{{ e.attempt.url | host_path }}</span>{% if e.attempt.tx_hash %} <a href="{{ tx_url }}{{ e.attempt.tx_hash }}" rel="noreferrer" class="whitespace-nowrap font-mono text-xs underline" title="{{ e.attempt.tx_hash }}">{{ e.attempt.tx_hash | short(8, 6) }}</a>{% endif %}{% else %}<span class="break-all">{{ e.memo }}</span>{% endif %}{% if e.attempt_id %} <a href="/account/payments" class="whitespace-nowrap text-xs underline">View payments</a>{% endif %}</span>
+      </div>
+      <div class="overflow-x-auto"><table class="w-full min-w-[20rem] text-sm">
+        <tbody>
+        {% for l in e.lines %}
+          <tr class="{{ 'text-stone-900' if l.debit else 'text-stone-900' }}">
+            <td class="px-3 py-1.5 {{ '' if l.debit else 'pl-8' }}"><span class="font-mono text-xs text-stone-500">{{ l.code }}</span> {{ l.name | account_name }}</td>
+            <td class="w-28 px-3 py-1.5 text-right tabular-nums">{% if l.debit %}<span class="text-xs text-stone-500">Dr</span> {{ l.debit | usd }}{% endif %}</td>
+            <td class="w-28 px-3 py-1.5 text-right tabular-nums">{% if l.credit %}<span class="text-xs text-stone-500">Cr</span> {{ l.credit | usd }}{% endif %}</td>
+          </tr>
+        {% endfor %}
+        </tbody>
+      </table></div>
+    </li>
+    {% endfor %}
+  </ol>
+  {% else %}
+  <p class="mt-3 text-sm text-stone-600">No entries yet. A payment is booked the moment it settles.</p>
+  {% endif %}
+</section>

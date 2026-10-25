@@ -146,7 +146,7 @@ def payments_by_task(conn: Connection, agent_id: int, limit: int = PAYMENT_LIMIT
         group["rows"].append(row)
         group["paid"] += row["status"] == "settled"
         group["blocked"] += row["status"] == "blocked"
-        group["held"] += row["status"] == "escalated"
+        group["held"] += row["status"] in ("escalated", "escrowed")
         group["searched"] += bool(row.get("found_while_searching"))
     ordered = [g for key, g in groups.items() if key is not None]
     if None in groups:

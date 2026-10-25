@@ -1,0 +1,68 @@
+{% from "account_macros.html" import primary, secondary, danger, input, card, status_badge, seller_cell, seller_badge, source_badge, banners, no_wallet %}
+<div class="mt-6">
+{% if not agent %}
+{{ no_wallet() }}
+{% elif not payments %}
+<div class="{{ card }} text-center">
+  <h2 class="font-semibold">No payments yet</h2>
+  <p class="mx-auto mt-2 max-w-md text-sm text-stone-600">Approve a seller and connect your AI app in Settings, then ask your agent to buy something. Every request lands here, paid or blocked.</p>
+  <p class="mt-4 flex flex-wrap justify-center gap-3"><a href="/account/rules" class="{{ primary }}">Approve a seller</a> <a href="/account/rules#connect-h" class="{{ secondary }}">Connect your AI app</a></p>
+</div>
+{% else %}
+{% for group in groups %}
+<section class="{% if not loop.first %}mt-8 {% endif %}" aria-labelledby="task-{{ loop.index }}-h">
+  <div class="mb-3 flex flex-wrap items-end justify-between gap-2">
+    <div class="min-w-0">
+      {% if group.task %}
+      <h2 id="task-{{ loop.index }}-h" class="font-semibold">Task {{ group.task_id }}: {{ group.task.goal }}</h2>
+      <p class="mt-0.5 text-xs text-stone-500">
+        {% if group.state == "provisional" %}Needs your confirmation{% elif group.state == "confirmed" %}Confirmed{% elif group.state == "revoked" %}Revoked{% else %}Ended{% endif %}
+        · spent {{ group.task.spent | usd }} of {{ group.task.budget | usd }} · started {{ group.task.created_at | when }}
+      </p>
+      {% else %}
+      <h2 id="task-{{ loop.index }}-h" class="font-semibold">Not under a task</h2>
+      <p class="mt-0.5 text-xs text-stone-500">Payments made outside an agent task.</p>
+      {% endif %}
+    </div>
+    <p class="text-xs text-stone-600">{{ group.paid }} paid · {{ group.blocked }} blocked · {{ group.held }} held{% if group.searched %} · {{ group.searched }} found while searching{% endif %}</p>
+  </div>
+<div class="overflow-x-auto rounded-lg border border-stone-200 bg-white">
+  <table class="w-full min-w-[40rem] text-left text-sm">
+    <thead class="border-b border-stone-200 bg-stone-50 text-xs uppercase tracking-wide text-stone-500">
+      <tr>
+        <th scope="col" class="px-3 py-2 font-medium">When</th>
+        <th scope="col" class="px-3 py-2 font-medium">Seller</th>
+        <th scope="col" class="px-3 py-2 text-right font-medium">Amount</th>
+        <th scope="col" class="px-3 py-2 font-medium">Status</th>
+        <th scope="col" class="px-3 py-2 font-medium">Why</th>
+      </tr>
+    </thead>
+    <tbody class="divide-y divide-stone-100 align-top">
+    {% for p in group.rows %}
+      <tr>
+        <td class="whitespace-nowrap px-3 py-2 text-stone-600">{{ p.created_at | when }}</td>
+        <td class="px-3 py-2">{{ seller_cell(p) }}
+          <details class="max-w-[14rem]"><summary class="cursor-pointer text-stone-600">Purchase details</summary><p class="mt-2 break-words">{{ p.reason or "No reason supplied." }}</p><p class="mt-2 break-all text-xs text-stone-500">{{ p.url }}</p><p class="mt-2">{% if p.tx_hash %}<a href="{{ tx_url }}{{ p.tx_hash }}" rel="noreferrer" class="break-all font-mono text-xs underline" title="{{ p.tx_hash }}">{{ p.tx_hash | short(8, 6) }}</a>{% endif %}</p></details></td>
+
+        <td class="whitespace-nowrap px-3 py-2 text-right tabular-nums">{{ p.amount | usd }}</td>
+        <td class="px-3 py-2">{{ status_badge(p.status) }}
+          {% if p.status == "escrowed" %}<a class="mt-1 block underline" href="/account/tasks#escrow-h">Review delivery</a>{% endif %}
+          {% if p.status in ("pending", "authorized") %}<a class="mt-1 block underline" href="/account/approvals/{{ p.id }}">Review approval</a>{% endif %}
+        </td>
+        <td class="px-3 py-2">
+          {% set w = p | why %}
+          {% if w[0] %}<div class="max-w-[16rem] break-words"><span class="text-sm font-medium">{{ w[0] }}</span>{% if w[1] %}
+            <details class="mt-1 text-xs text-stone-500"><summary class="cursor-pointer">Why this happened</summary><p class="mt-1">{{ w[1] }}</p></details>{% endif %}</div>{% endif %}
+          {% if p.found_while_searching %}<p class="mt-0.5 text-xs text-stone-500">Found while your agent was searching; it was never shown this one and nothing was paid.</p>{% endif %}
+          {% if p.intent_reason %}<p class="mt-0.5 max-w-[16rem] break-words text-xs text-stone-500">{{ p.intent_reason }}</p>{% endif %}
+        </td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+</div>
+</section>
+{% endfor %}
+<p class="mt-2 text-xs text-stone-500">Showing the latest 200 payments. The CSV has up to the latest {{ csv_limit }}.</p>
+{% endif %}
+</div>

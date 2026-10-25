@@ -1,116 +1,18 @@
 {% extends "account_base.html" %}
 {% from "account_macros.html" import primary, secondary, danger, card, status_badge, seller_cell, banners %}
 {% block title %}Your account · Sentinel{% endblock %}
+{% from "account_loading_macros.html" import placeholder %}
 {% block content %}
 {{ banners(false, "", error) }}
 <h1 class="text-2xl font-semibold tracking-tight">Your account</h1>
-<p class="mt-1 break-all text-stone-600">{{ email }}</p>
-{% if waiting and (waiting.tasks or waiting.held) %}
-<p class="mt-4 rounded-md border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900" role="status">
-  {% if waiting.held %}{{ waiting.held }} payment{{ "s" if waiting.held != 1 }} held for you.{% endif %}
-  {% if waiting.tasks %}{{ waiting.tasks }} task{{ "s" if waiting.tasks != 1 }} waiting for you to confirm.{% endif %}
-  <a href="/account/tasks" class="font-medium underline">Open Tasks</a>
-</p>
-{% endif %}
+<p class="mt-1 text-sm text-stone-600">Spending, recent activity, and anything that needs your attention.</p>
 
-<div class="mt-6 grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
-  <section class="min-w-0 {{ card }}" aria-labelledby="spent-h">
-    <h2 id="spent-h" class="text-sm font-medium text-stone-600">Spent this week</h2>
-    {% if agent %}
-    <p class="mt-2 text-2xl font-semibold">{{ spent }} <span class="text-sm font-normal text-stone-500">of {{ budget }}</span></p>
-    <div class="mt-3 h-2 overflow-hidden rounded-full bg-stone-200" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="{{ percent }}" aria-label="Share of the weekly budget spent">
-      <div class="h-full rounded-full {{ bar }}" style="width: {{ percent }}%"></div>
-    </div>
-    <p class="mt-2 text-xs text-stone-500">{{ percent }}% of your weekly budget. <a href="/account/rules" class="underline">Change limits</a></p>
-    {% else %}<p class="mt-2 text-sm text-stone-500">Available once your wallet exists.</p>{% endif %}
-  </section>
 
-  <section class="min-w-0 {{ card }}" aria-labelledby="cap-h">
-    <h2 id="cap-h" class="text-sm font-medium text-stone-600">Per payment cap</h2>
-    {% if agent %}
-    <p class="mt-2 text-2xl font-semibold">{{ cap }}</p>
-    <p class="mt-3 text-xs text-stone-500">The most one payment may cost.</p>
-    {% else %}<p class="mt-2 text-sm text-stone-500">Available once your wallet exists.</p>{% endif %}
-  </section>
+{% if loading %}{{ placeholder("overview_spending", "Spent this week") }}{% else %}{% include "account_sections/overview_spending.html" %}{% endif %}
+{% if loading %}{{ placeholder("overview_wallet", "Wallet") }}{% else %}{% include "account_sections/overview_wallet.html" %}{% endif %}
 
-  <section class="min-w-0 {{ card }} sm:col-span-2 lg:col-span-1" aria-labelledby="wallet-h">
-    <h2 id="wallet-h" class="text-sm font-medium text-stone-600">Wallet</h2>
-    {% if wallet_address %}
-    <p class="mt-2 font-mono text-sm"><a href="{{ basescan_url }}" class="underline" rel="noreferrer" title="{{ wallet_address }}">{{ wallet_address | short(8, 6) }}</a></p>
-    <p class="mt-1 break-all text-xs text-stone-500">{{ wallet_address }}</p>
-    <p class="mt-3"><a href="{{ faucet_url }}" rel="noreferrer" class="{{ primary }}">Fund it</a></p>
-    <p class="mt-2 text-xs text-stone-500">Pick Base Sepolia and USDC on the faucet, then paste the address.</p>
-    {% else %}
-    <p class="mt-2 text-sm text-stone-700">Your wallet could not be created yet.</p>
-    <form method="post" action="/account/wallet" class="mt-3">
-      <input type="hidden" name="csrf" value="{{ csrf }}">
-      <input type="hidden" name="next" value="/account">
-      <button type="submit" class="{{ primary }}">Create my wallet</button>
-    </form>
-    {% endif %}
-  </section>
-</div>
+{% if loading %}{{ placeholder("overview_setup", "Setup") }}{% else %}{% include "account_sections/overview_setup.html" %}{% endif %}
 
-<section class="mt-4 {{ card }}" aria-labelledby="start-h">
-  {% if all_set %}
-  <h2 id="start-h" class="font-semibold">All set</h2>
-  <p class="mt-1 text-sm text-stone-600">Your wallet exists, a seller is approved and your AI app is connected.</p>
-  {% else %}
-  <h2 id="start-h" class="font-semibold">Get started</h2>
-  <ol class="mt-3 space-y-2 text-sm">
-    {% for done, text, href in steps %}
-    <li class="flex items-start gap-2">
-      <span class="mt-0.5 inline-flex h-5 w-5 flex-none items-center justify-center rounded-full text-xs font-bold {{ 'bg-emerald-600 text-white' if done else 'border border-stone-300 text-stone-400' }}" aria-hidden="true">{{ "&#10003;"|safe if done else loop.index }}</span>
-      <span class="{{ 'text-stone-500 line-through' if done else 'text-stone-900' }}">
-        {% if href and not done %}<a href="{{ href }}" class="font-medium underline">{{ text }}</a>{% else %}{{ text }}{% endif %}
-        <span class="sr-only">{{ "(done)" if done else "(to do)" }}</span>
-      </span>
-    </li>
-    {% endfor %}
-  </ol>
-  {% endif %}
-</section>
+{% if loading %}{{ placeholder("overview_recent", "Recent payments") }}{% else %}{% include "account_sections/overview_recent.html" %}{% endif %}
 
-<section class="mt-4 {{ card }}" aria-labelledby="connect-h">
-  <h2 id="connect-h" class="font-semibold">Connect your AI app</h2>
-  <p class="mt-1 text-sm text-stone-600">Your agent asks Sentinel to pay; Sentinel checks your rules first.</p>
-  <details class="mt-3"{% if not connected %} open{% endif %}>
-    <summary class="cursor-pointer text-sm font-medium">Show the connection details</summary>
-    <p class="mt-3 text-sm text-stone-700">In Claude, add a custom connector with this URL (leave the OAuth fields empty):</p>
-    <p class="mt-2 break-all rounded bg-stone-100 px-3 py-2 font-mono text-sm select-all">{{ mcp_url }}</p>
-    <p class="mt-4 text-sm text-stone-700">In Claude Code:</p>
-    <p class="mt-2 break-all rounded bg-stone-100 px-3 py-2 font-mono text-sm select-all">{{ claude_command }}</p>
-    <p class="mt-2 text-sm text-stone-600">Then run /mcp and approve the connection in your browser.</p>
-  </details>
-</section>
-
-<section class="mt-4 {{ card }}" aria-labelledby="recent-h">
-  <div class="flex items-center justify-between gap-3">
-    <h2 id="recent-h" class="font-semibold">Recent payments</h2>
-    <a href="/account/payments" class="text-sm font-medium underline">See all</a>
-  </div>
-  {% if recent %}
-  <div class="mt-3 overflow-x-auto">
-    <table class="w-full min-w-[32rem] text-left text-sm">
-      <thead class="text-xs uppercase tracking-wide text-stone-500"><tr><th class="py-2 pr-3 font-medium">When</th><th class="py-2 pr-3 font-medium">Seller</th><th class="py-2 pr-3 text-right font-medium">Amount</th><th class="py-2 font-medium">Status</th></tr></thead>
-      <tbody class="divide-y divide-stone-100">
-      {% for p in recent %}
-        <tr><td class="whitespace-nowrap py-2 pr-3 text-stone-600">{{ p.created_at | when }}</td><td class="py-2 pr-3">{{ seller_cell(p) }}</td><td class="py-2 pr-3 text-right tabular-nums">{{ p.amount | usd }}</td><td class="py-2">{{ status_badge(p.status) }}</td></tr>
-      {% endfor %}
-      </tbody>
-    </table>
-  </div>
-  {% else %}
-  <p class="mt-3 text-sm text-stone-600">Nothing yet. When your agent asks Sentinel to pay, it shows up here.</p>
-  {% endif %}
-</section>
-
-<section class="mt-4 rounded-lg border border-red-200 bg-white p-5" aria-labelledby="out-h">
-  <h2 id="out-h" class="font-semibold">Sign out everywhere</h2>
-  <p class="mt-1 text-sm text-stone-700">This ends every browser session and disconnects every app you approved. You will have to connect your AI app again.</p>
-  <form method="post" action="/account/signout-everywhere" class="mt-3">
-    <input type="hidden" name="csrf" value="{{ csrf }}">
-    <button type="submit" class="{{ danger }}">Sign out everywhere</button>
-  </form>
-</section>
 {% endblock %}

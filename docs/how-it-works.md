@@ -252,7 +252,6 @@ Not built yet: month end flags and the QuickBooks export.
 
 - **Fetch hardening for `pay`:** pinning the fetch to the checked IP (DNS rebinding), a response size cap, an overall deadline, and holding a database connection only around database steps. Until it lands, do not open sign up to untrusted users.
 - **Blocking CDP signer:** each signature is a blocking CDP call inside the event loop. An async x402 signer would fix it.
-- **Tailwind:** the browser build compiles CSS at runtime (pinned with SRI).
 - **Funding:** a new user's cash account goes negative in the books until funding is booked.
 - **Ledger page:** the operator's page shows `user-<uuid>` agents without their email yet.
 - **Intent latency:** a first look costs one or two Claude calls (about 1.2 to 2.6 seconds each), well above the 300 ms target; caching makes repeats instant. Embeddings for tier 1 would be faster.

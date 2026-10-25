@@ -1,0 +1,12 @@
+<div class="min-w-0" data-account-fragment="{{ section }}">
+{% if section == "identity" %}
+<span title="{{ email }}">{{ email }}</span>
+{% elif not agent and not section.startswith("overview_") %}
+{% if section in ("payments_list", "rules_limits", "tasks_held", "books_summary") %}
+{% from "account_macros.html" import no_wallet %}
+{{ no_wallet() }}
+{% endif %}
+{% else %}
+{% include "account_sections/" + section + ".html" %}
+{% endif %}
+</div>

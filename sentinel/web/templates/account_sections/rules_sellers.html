@@ -1,0 +1,63 @@
+{% from "account_macros.html" import primary, secondary, danger, input, card, status_badge, seller_cell, seller_badge, source_badge, banners, no_wallet %}
+<section class="mt-6 border-b border-stone-200 pb-6" aria-labelledby="sellers-h">
+  <h2 id="sellers-h" class="font-semibold">Approved sellers</h2>
+  <details class="mt-2 text-sm text-stone-600"><summary class="cursor-pointer">How seller approvals work</summary><p class="mt-2">Your agent can only pay addresses approved here, whatever a web page it read says. Operator rows apply to everyone and you cannot change them.</p></details>
+  {% if sellers %}
+  <div class="mt-4 overflow-x-auto">
+    <table class="w-full min-w-[40rem] text-left text-sm">
+      <thead class="text-xs uppercase tracking-wide text-stone-500">
+        <tr><th scope="col" class="py-2 pr-3 font-medium">Name</th><th scope="col" class="py-2 pr-3 font-medium">Address</th><th scope="col" class="py-2 pr-3 font-medium">Status</th><th scope="col" class="py-2 pr-3 font-medium">Wallet history</th><th scope="col" class="py-2 pr-3 font-medium">Source</th><th scope="col" class="py-2 font-medium"><span class="sr-only">Change</span></th></tr>
+      </thead>
+      <tbody class="divide-y divide-stone-100 align-middle">
+      {% for s in sellers %}
+        <tr>
+          <td class="max-w-[12rem] break-words py-2 pr-3 font-medium">{{ s.name }}</td>
+          <td class="max-w-[16rem] break-all py-2 pr-3 font-mono text-xs">{{ s.pay_to }}</td>
+          <td class="py-2 pr-3">{{ seller_badge(s.status) }}</td>
+          <td class="max-w-[14rem] py-2 pr-3 text-xs {% if s.wallet_warn %}font-medium text-red-800{% else %}text-stone-600{% endif %}">{% if lazy_wallets %}<span data-account-section="seller_wallet" data-wallet="{{ s.pay_to }}" aria-busy="true"><span data-loading-message role="status">Checking wallet…</span> <button data-loading-retry type="button" hidden class="underline">Try again</button></span>{% else %}{{ s.wallet }}{% endif %}</td>
+          <td class="py-2 pr-3">{{ source_badge(s.source) }}</td>
+          <td class="py-2 text-right">
+            {% if s.source == "you" %}
+            <form method="post" action="/account/rules/sellers">
+              <input type="hidden" name="csrf" value="{{ csrf }}">
+              <input type="hidden" name="name" value="{{ s.name }}">
+              <input type="hidden" name="pay_to" value="{{ s.pay_to }}">
+              {% if s.own_status == "approved" %}
+              <input type="hidden" name="status" value="blocked">
+              <button type="submit" class="{{ danger }}">Block</button>
+              {% else %}
+              <input type="hidden" name="status" value="approved">
+              <button type="submit" class="{{ secondary }}">Approve</button>
+              {% endif %}
+            </form>
+            {% endif %}
+          </td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% else %}
+  <p class="mt-4 rounded-md bg-stone-50 p-3 text-sm text-stone-700">No sellers yet, so every payment is blocked until you approve one. Add the address of a vendor below.</p>
+  {% endif %}
+
+  <details class="mt-6 border-t border-stone-200 pt-5"{% if not sellers or typed_name or typed_pay_to %} open{% endif %}>
+  <summary class="cursor-pointer text-sm font-semibold">Add a seller</summary>
+  <form method="post" action="/account/rules/sellers" class="mt-4">
+    <input type="hidden" name="csrf" value="{{ csrf }}">
+    <input type="hidden" name="status" value="approved">
+    <div class="mt-3 grid grid-cols-1 gap-4 sm:grid-cols-[1fr_2fr]">
+      <div class="min-w-0">
+        <label for="seller-name" class="text-sm font-medium">Name</label>
+        <input id="seller-name" name="name" type="text" required maxlength="100" autocomplete="off" value="{{ typed_name }}" class="{{ input }}">
+      </div>
+      <div class="min-w-0">
+        <label for="seller-address" class="text-sm font-medium">Address</label>
+        <input id="seller-address" name="pay_to" type="text" required inputmode="text" autocomplete="off" spellcheck="false" placeholder="0x..." value="{{ typed_pay_to }}" class="{{ input }} font-mono">
+      </div>
+    </div>
+    <p class="mt-3 rounded-md border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900">Only add addresses that came from the vendor or from your own instructions. Never one an agent found online.</p>
+    <button type="submit" class="mt-4 {{ primary }}">Approve this seller</button>
+  </form>
+  </details>
+</section>
