@@ -44,7 +44,7 @@ DEFAULT_LIMIT, MAX_LIMIT = 10, 25
 NETWORK_LABELS = {"base": BASE_MAINNET, "base-sepolia": NETWORK, "base sepolia": NETWORK}
 BROWSE_ONLY = "Browse only: this listing does not offer Base Sepolia USDC, the only option Sentinel pays."
 APIFY_CREDIT_NOTE = ("Runs on the owner's Apify credit, not x402. Call apify_actor(actor) for its pricing and the "
-                     "inputs it needs. Sentinel cannot start Actor runs yet: tell the owner which Actor and input fit.")
+                     "inputs it needs. Use run_apify_actor with a task_id and max_charge_usd cap to buy results.")
 APIFY_NOTE = ("Browse only: Apify Actors are paid through an Apify prepaid token (Base mainnet), not per call, so "
               "pay() cannot buy them. Tell the owner if this Actor fits the task.")
 

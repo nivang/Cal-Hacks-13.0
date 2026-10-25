@@ -8,7 +8,8 @@ Sentinel is an MCP server that holds the wallet so the agent never does. Claude 
 
 1. **The task.** The agent calls `start_task` with the user's own words. Claude Haiku reads them into a mandate: the goal, what may be bought, what is out of scope, and a budget. A new task can spend at most $1 until the user confirms it on their Tasks page.
 2. **Finding services.** `find_services` searches a catalog of paid APIs (x402 Bazaar format) and previews each one under the task, without paying. The agent only ever sees the ones Sentinel would pay for and the free ones; everything turned away goes to the user's payment log.
-   To look beyond that catalog, `discover` searches the live x402 Bazaar, agentic.market, payapi.market and the Apify Store at once (only Base Sepolia listings can be paid), and `apify_actor` shows an Apify Actor's pricing and inputs. Neither pays or authorizes anything.
+   When more than one seller could do the job, `compare_prices` reads every seller's live price, runs the same checks `pay` would, has Claude Haiku rate what each delivers, and recommends the best value: the most for the money, not always the cheapest. If that is the pricier option, Sentinel asks the user first, unless they turned on auto buy.
+   To look beyond that catalog, `discover` searches the live x402 Bazaar, agentic.market, payapi.market and the Apify Store at once (only Base Sepolia listings can be paid with x402), and `apify_actor` shows an Apify Actor's pricing and inputs. Neither pays or authorizes anything. With `APIFY_TOKEN` configured, `run_apify_actor` buys an Actor run using Apify credits and `apify_run_status` retrieves its results and actual USD cost.
 3. **Paying.** `pay` asks the seller for its price (the x402 402 response), then runs every check below. Only if all pass does Sentinel sign, pay through the CDP facilitator, and post a balanced journal entry.
 4. **The user.** The account site shows every payment grouped by task (paid, blocked, held, and what was turned away while searching), lets the user confirm or revoke tasks, approve sellers, and allow a held payment once.
 
@@ -104,7 +105,6 @@ The operator's ledger page (`uvicorn sentinel.ledger_app:create_app --factory --
 - **Checking what was delivered.** Sentinel judges what a seller says it sells, not what arrives. A seller that describes itself consistently and then sends junk is only stopped by the approved seller list.
 - **Fetch hardening** for `pay` (pinning the fetch to the checked IP, a response size cap, an overall deadline). Do not open sign up to untrusted users before it lands.
 - **The live x402 Bazaar for `find_services`.** Its catalog is local, in the Bazaar format; pointing `SENTINEL_DISCOVERY_URL` at the real one is untested. (`discover` already searches the live Bazaar.)
-- **Running Apify Actors.** `discover` and `apify_actor` find and describe them on the owner's `APIFY_TOKEN` credit; Sentinel cannot start a run yet.
 - Month end flags and a QuickBooks export.
 
 Honest limits of what is built: the injection rule matches phrases, so subtle attempts are left to the model; a scammer can give a new wallet some activity before using it, so wallet age only warns; the explorer's scam flag only knows reported wallets; and the agent itself declares where it found a URL.

@@ -222,8 +222,9 @@ class FakeJudge:
     """A Judge with no model behind it. Records every case it was shown.
 
     Knobs: fit (tier 1 verdict, or a dict of URL substring -> verdict, default fits), decision (tier 2 verdict),
-    delivered (the delivery check's verdict, default delivered), draft (fields to override in the mandate draft), and
-    fail_extract / fail_classify / fail_decide / fail_delivery (raise JudgeError).
+    scores (price discovery ratings by offer name substring -> (fit, coverage), default (8, 8)), delivered (the
+    delivery check's verdict, default delivered), draft (fields to override in the mandate draft), and
+    fail_extract / fail_classify / fail_decide / fail_rate / fail_delivery (raise JudgeError).
     """
 
     def __init__(self) -> None:
@@ -232,10 +233,12 @@ class FakeJudge:
         self.decision = "allow"
         self.delivered = "delivered"
         self.draft: dict[str, Any] = {}
-        self.fail_extract = self.fail_classify = self.fail_decide = self.fail_delivery = False
+        self.fail_extract = self.fail_classify = self.fail_decide = self.fail_rate = self.fail_delivery = False
+        self.scores: dict[str, tuple[int, int]] = {}
         self.tasks: list[str] = []
         self.classified: list[dict[str, Any]] = []
         self.decided: list[dict[str, Any]] = []
+        self.rated: list[dict[str, Any]] = []
         self.deliveries: list[dict[str, Any]] = []
 
     async def extract(self, task: str) -> judge.MandateDraft:
@@ -266,6 +269,17 @@ class FakeJudge:
         if self.fail_decide:
             raise judge.JudgeError("decide failed")
         return judge.JudgeOpinion(verdict=self.decision, reason=f"The judge says {self.decision}.")  # type: ignore[arg-type]
+
+    async def rate(self, case: dict[str, Any]) -> judge.Ratings:
+        """Price discovery ratings from the scores knob (name substring -> (fit, coverage)), default (8, 8)."""
+        self.rated.append(case)
+        if self.fail_rate:
+            raise judge.JudgeError("rate failed")
+        sheet = []
+        for o in case["offers"]:
+            fit, coverage = next((v for k, v in self.scores.items() if k in o["name"]), (8, 8))
+            sheet.append(judge.Rating(id=o["id"], fit=fit, coverage=coverage, reason=f"{o['name']} rated {fit}."))
+        return judge.Ratings(ratings=sheet)
 
     async def check_delivery(self, case: dict[str, Any]) -> judge.DeliveryOpinion:
         """The delivery check from the delivered knob."""

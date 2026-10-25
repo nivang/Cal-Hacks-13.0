@@ -41,11 +41,13 @@ class Quote:
 
 @dataclass(frozen=True)
 class Agent:
-    """The requesting agent's limits, both in USDC atomic units."""
+    """The requesting agent's limits, both in USDC atomic units, and the owner's auto buy switch (intent.py's
+    pricier_pick rule: on, the recommended best value of a price comparison is bought without asking)."""
 
     name: str
     per_payment_cap: int
     weekly_budget: int
+    auto_buy_best_value: bool = False
 
 
 @dataclass(frozen=True)

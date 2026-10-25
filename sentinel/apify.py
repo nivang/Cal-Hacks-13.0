@@ -54,6 +54,7 @@ class ActorDetails(BaseModel):
     url: str | None = None
     description: str | None = None
     pricing_model: str | None = None
+    build: str | None = None
     events: list[ActorEvent] = []
     min_max_charge_usd: str | None = None
     users_30d: int | None = None
@@ -149,8 +150,8 @@ def parse_actor(actor_id: str, actor: dict[str, Any], build: Any) -> ActorDetail
     if rental:
         message = "This Actor is rented by the month, so it needs a subscription; pick a pay per event or free Actor."
     elif credit:
-        message = ("Runs on the owner's Apify credit. Sentinel cannot start Actor runs yet: tell the owner this Actor, "
-                   "the input you would use (start from example_input) and the expected cost.")
+        message = ("Runs on the owner's Apify credit. Use run_apify_actor with a task_id, actor_input, reason and "
+                   "max_charge_usd spending cap. Start from example_input; retrieve data with apify_run_status.")
     else:
         message = "The owner has not connected an Apify account, so Actors can only be browsed."
     readme = (build or {}).get("readme") if isinstance(build, dict) else None
@@ -163,6 +164,7 @@ def parse_actor(actor_id: str, actor: dict[str, Any], build: Any) -> ActorDetail
         status="OK", message=message, actor=actor_id, title=clean(actor.get("title"), 100) or None,
         url=f"https://apify.com/{actor_id}", description=clean(actor.get("description"), 400) or None,
         pricing_model=model, events=events[:15],
+        build=build.get("buildNumber") if isinstance(build, dict) else None,
         min_max_charge_usd=str(min_charge) if isinstance(min_charge, (int, float)) else None,
         users_30d=stats.get("totalUsers30Days") if isinstance(stats.get("totalUsers30Days"), int) else None,
         rating=round(float(stats["actorReviewRating"]), 2) if isinstance(stats.get("actorReviewRating"), (int, float))

@@ -81,7 +81,7 @@ def section_client(settings, monkeypatch):
     monkeypatch.setattr(users, "session_user", lambda *_: {"id": USER_ID, "email": "sections@example.com"})
     monkeypatch.setattr(users, "account_view", lambda *_, **__: {
         "email": "sections@example.com", "wallet_address": None, "agent": "my-agent", "agent_id": 7,
-        "per_payment_cap": 1_000_000, "weekly_budget": 5_000_000, "week_spend": 0,
+        "per_payment_cap": 1_000_000, "weekly_budget": 5_000_000, "week_spend": 0, "auto_buy": False,
     })
     app = create_app(settings, connect=connect)
     client = httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url=settings.base_url)
@@ -196,6 +196,7 @@ async def test_invalid_section_is_rejected(section_client):
     ("/account", "overview_setup", "Finish setup"),
     ("/account", "overview_recent", "Nothing yet"),
     ("/account/payments", "payments_list", "No payments yet"),
+    ("/account/rules", "rules_auto_buy", "Turn auto buy on"),
     ("/account/tasks", "tasks_held", "Nothing is waiting for you"),
     ("/account/tasks", "tasks_list", "No tasks yet"),
     ("/account/books", "books_summary", "Books balance"),
@@ -207,7 +208,8 @@ async def test_each_data_section_renders_independently(section_client, monkeypat
     from sentinel.web import books
 
     for module, name in [(books, "recent_payments"), (books, "list_sellers"), (books, "payments_by_task"),
-                         (books, "journal"), (mandates, "list_held"), (mandates, "list_for_agent")]:
+                         (books, "journal"), (mandates, "list_held"), (mandates, "list_for_agent"),
+                         (mandates, "list_comparisons")]:
         monkeypatch.setattr(module, name, lambda *_: [])
     monkeypatch.setattr(books, "has_live_grant", lambda *_: False)
     monkeypatch.setattr(books, "summary", lambda *_: {"spent": 0, "settled": 0})
