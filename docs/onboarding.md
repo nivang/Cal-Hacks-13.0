@@ -66,7 +66,7 @@ python -m sentinel.db migrate
 python -m sentinel.mcp_server                 # site, OAuth and MCP on http://127.0.0.1:8000
 ```
 
-Dev mode means `PUBLIC_BASE_URL` and the bind host are both loopback. Only then may `RESEND_API_KEY` and `MAIL_FROM` stay empty: each sign in link prints to the server's stderr as `Sign in link for <email>: <link>`. Only then is `SENTINEL_ALLOW_LOCAL_URLS=1` allowed, which lets `pay` reach the test sellers (`uvicorn test_site.app:app --port 4000`). Those sellers can be paid once approved: `python -m demo.run buy` approves DataCo and InsightLab, or each user approves them on the Rules page, where dev mode offers them with one click.
+Dev mode means `PUBLIC_BASE_URL` and the bind host are both loopback. Only then may `RESEND_API_KEY` and `MAIL_FROM` stay empty: each sign in link prints to the server's stderr as `Sign in link for <email>: <link>`. Only then is `SENTINEL_ALLOW_LOCAL_URLS=1` allowed, which lets `pay` reach the test sellers (`uvicorn test_site.app:app --port 4000`). Those sellers can be paid once approved: `python -m demo.run seed` approves CorpData and OpenWire, or each user approves them on the Rules page by address.
 
 Open the site at the host named in `PUBLIC_BASE_URL` (`localhost` and `127.0.0.1` are different origins to a browser; a form posted from the other one is refused).
 

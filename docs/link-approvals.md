@@ -74,9 +74,10 @@ browser CSRF and ownership, quote changes, expiry, replay and independent
 Postgres transactions competing for one authorization or the last budget funds.
 
 The command-line `demo.run` remains noninteractive and blocks unlisted sellers.
-To try the real chat gate locally, request the unlisted `/test-site/premium` fixture and
-choose No in the native form. Its quote is 9 test USDC; a lower cap blocks it
-before any prompt, as intended. Use a funded wallet and an appropriate explicit
+To try the real chat gate locally, request the unlisted `/test-site/api/intel/litigation-complete?company=Acme+Robotics` (PremiumIntel, 0.25 test
+USDC) and
+choose No in the native form. The unlisted `/test-site/api/intel/deep-dossier` quotes 9
+test USDC, so a lower cap blocks it before any prompt, as intended. Use a funded wallet and an appropriate explicit
 limit before testing Yes with a vendor you intend to pay.
 
 ## Integration with tasks

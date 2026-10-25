@@ -7,6 +7,7 @@ can never read or change another's task or held payment. Amounts go in and out a
 """
 from collections.abc import Sequence
 from typing import Any
+from urllib.parse import urlsplit, urlunsplit
 
 from psycopg.types.json import Jsonb
 
@@ -186,12 +187,22 @@ def remember_listings(conn: Connection, mandate_id: int, listings: Sequence[Any]
         )
 
 
+def endpoint(url: str) -> str:
+    """url without its query string or fragment: the endpoint a catalog lists, whatever parameters the agent sets."""
+    return urlunsplit(urlsplit(url)._replace(query="", fragment=""))
+
+
 def listing_for(conn: Connection, mandate_id: int, url: str) -> intent.Listing | None:
-    """What the catalog advertised for this URL under this task, or None if it was never listed."""
+    """What the catalog advertised for this URL under this task, or None if it was never listed.
+
+    A catalog lists endpoints (https://seller/funding) and agents call them with parameters
+    (https://seller/funding?company=Acme), so a URL with a query string falls back to its endpoint's listing; an exact
+    listing wins. The parameters never change the seller, the price or the wallet the listing promised.
+    """
     row = conn.execute(
         f"SELECT (listed_amount {ATOMIC})::bigint AS amount, listed_pay_to, name, description FROM listings_seen"
-        " WHERE mandate_id = %s AND url = %s",
-        (mandate_id, url),
+        " WHERE mandate_id = %s AND url = ANY(%s) ORDER BY url = %s DESC LIMIT 1",
+        (mandate_id, [url, endpoint(url)], url),
     ).fetchone()
     if row is None:
         return None

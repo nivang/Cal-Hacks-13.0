@@ -1,4 +1,4 @@
-"""One escrow round trip on Base Sepolia, outside the payment flow: hold $0.10 from the demo wallet, then pay DataCo
+"""One escrow round trip on Base Sepolia, outside the payment flow: hold $0.10 from the demo wallet, then pay CorpData
 (capture) or give it back (void). Proves the signing domain, the nonce, the calldata and the operator's gas.
 
 Creates the operator account (SENTINEL_OPERATOR_ACCOUNT, default sentinel-operator) on first run and asks the CDP

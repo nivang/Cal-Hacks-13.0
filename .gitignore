@@ -8,3 +8,6 @@ __pycache__/
 build/
 dist/
 node_modules/
+
+# The storefront build is committed so the demo needs no Node
+!test_site/storefront/dist/
