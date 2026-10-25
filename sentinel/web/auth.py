@@ -31,7 +31,9 @@ SESSION_VERSION = "v2"  # v1 cookies had no nonce and are refused
 SESSION_NONCE_RE = re.compile(r"[A-Za-z0-9_-]{16}")  # token_urlsafe(12)
 MAX_SESSION = 512  # longer cookie values are rejected before any HMAC work
 MAX_EMAIL = 254
-NEXT_RE = re.compile(r"/account(?:/live|/payments|/rules|/books|/tasks)?|/oauth/consent\?req=[A-Za-z0-9._-]{1,4096}")
+NEXT_RE = re.compile(
+    r"/account(?:/live|/payments|/rules|/books|/tasks|/texting)?|/oauth/consent\?req=[A-Za-z0-9._-]{1,4096}"
+)
 GMAIL_DOMAINS = frozenset({"gmail.com", "googlemail.com"})
 
 clock = time.time  # tests monkeypatch it to move session expiry

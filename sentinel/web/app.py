@@ -33,7 +33,20 @@ from starlette.datastructures import Headers, MutableHeaders
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 from x402.mechanisms.evm import ClientEvmSigner
 
-from sentinel import chain, db, guard, judge, link_approvals, mandates, mcp_server, owner, payments, results, wallets
+from sentinel import (
+    chain,
+    db,
+    guard,
+    judge,
+    link_approvals,
+    mandates,
+    mcp_server,
+    owner,
+    payments,
+    results,
+    texting,
+    wallets,
+)
 from sentinel.web import Settings, auth, books, oauth, pages, ratelimit, users
 from sentinel.web.mailer import Mailer, MailError, make_mailer, sign_in_message
 
@@ -60,6 +73,7 @@ SITE_PATHS = frozenset({
     "/account/live", "/account/payments", "/account/payments.csv", "/account/rules", "/account/rules/limits",
     "/account/rules/sellers", "/account/rules/auto-buy", "/account/books", "/account/tasks", "/account/tasks/confirm",
     "/account/tasks/revoke", "/account/tasks/allow", "/account/tasks/capture", "/account/tasks/void",
+    "/account/texting", "/account/texting/code", "/account/texting/unlink",
     "/oauth/consent", "/healthz", "/favicon.ico", "/authorize",
 })
 DONE_TEXT = {  # the ?done= values the Rules page shows a banner for; anything else is ignored
@@ -280,6 +294,7 @@ def create_app(
     open_signer: OpenSigner = wallets.open_user_wallet,
     judge_: judge.Judge | None = None,
     open_operator: mcp_server.OpenOperator | None = None,
+    texts: texting.TextDesk | None = None,
 ) -> FastAPI:
     """Build the site, the OAuth server and /mcp as one app.
 
@@ -287,6 +302,7 @@ def create_app(
     None). pay_fn, open_signer and judge_ go to mcp_server.create_server (tests replace them). open_operator opens
     Sentinel's escrow operator (escrow.open_operator, which main passes); with it, payments use escrow when a seller
     offers it, the owner can pay or refund a held payment, and a background sweep finishes holds every SWEEP_EVERY_S.
+    texts: the texting desk (texting.from_env, which main passes); None turns /texting/* off.
     The pool is not touched here; mcp_server.main() closes it when uvicorn stops.
     """
     mail = mailer if mailer is not None else make_mailer(settings)
@@ -320,6 +336,8 @@ def create_app(
         finally:
             if task is not None:
                 task.cancel()
+            if texts is not None:
+                await texts.close()
 
     app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None,
                   lifespan=combine_lifespans(mcp_app.lifespan, sweeper))
@@ -1179,6 +1197,74 @@ def create_app(
         response = _redirect("/")
         clear_cookie(response, session_cookie)
         return response
+
+    # Texting (texting.py): the relay's two routes, then the page that links a phone
+
+    @app.post("/texting/inbound")
+    async def texting_inbound(request: Request) -> Response:
+        """One incoming text from the relay: {"from": handle, "text": ...}. The reply arrives in the outbox."""
+        if texts is None or not texts.relay_allowed(request.headers.get("authorization")):
+            return JSONResponse({"error": "not found"}, status_code=404)
+        try:
+            body = await request.json()
+        except ValueError:
+            return JSONResponse({"error": "send JSON"}, status_code=400)
+        if not isinstance(body, dict):
+            return JSONResponse({"error": "send a JSON object"}, status_code=400)
+        accepted = texts.receive(body.get("from"), body.get("text"))
+        return JSONResponse({"accepted": accepted}, status_code=202 if accepted else 400)
+
+    @app.get("/texting/outbox")
+    async def texting_outbox(request: Request) -> Response:
+        """The texts waiting to be sent, held open up to ?wait= seconds (at most 30) until there is one."""
+        if texts is None or not texts.relay_allowed(request.headers.get("authorization")):
+            return JSONResponse({"error": "not found"}, status_code=404)
+        try:
+            wait = min(max(float(request.query_params.get("wait") or 25), 0.0), 30.0)
+        except ValueError:
+            wait = 25.0
+        return Response(texting.message_json(await texts.take(wait)), media_type="application/json")
+
+    async def texting_page(request: Request, session: auth.Session, user: Mapping[str, Any],
+                           code: str | None = None) -> Response:
+        """Render Texting: the linked handle, or a code to link one."""
+        view = await run_db(users.account_view, user["id"], False)
+        handle = await run_db(texting.linked_handle, str(user["id"])) if texts is not None else None
+        return page(request, "account_texting.html", {
+            **account_context(session, view, "texting"), "enabled": texts is not None,
+            "handle": texting.display_handle(handle) if handle else None, "code": code,
+        })
+
+    @app.get("/account/texting")
+    async def account_texting(request: Request) -> Response:
+        """Texting: link a phone so its texts reach this user's agent."""
+        session, user, stale = await current(request)
+        if session is None or user is None:
+            return sign_in_redirect("/account/texting", stale)
+        return await texting_page(request, session, user)
+
+    @app.post("/account/texting/code")
+    async def texting_code(request: Request) -> Response:
+        """A fresh one time code; texting it from a phone links that phone to the session user."""
+        refusal, user, _ = await account_post(request, "/account/texting")
+        if refusal is not None or user is None:
+            return refusal or forbidden(request)
+        session, _, _ = await current(request)
+        if session is None or texts is None:
+            return forbidden(request)
+        code = await run_db(texting.issue_code, settings.key("phone-link"), str(user["id"]))
+        log.info("user %s asked for a texting code", user["id"])
+        return await texting_page(request, session, user, code)
+
+    @app.post("/account/texting/unlink")
+    async def texting_unlink(request: Request) -> Response:
+        """Unlink the session user's phone."""
+        refusal, user, _ = await account_post(request, "/account/texting")
+        if refusal is not None or user is None:
+            return refusal or forbidden(request)
+        await run_db(texting.unlink, str(user["id"]))
+        log.info("user %s unlinked their texting handle", user["id"])
+        return _redirect("/account/texting")
 
     # Consent
 
