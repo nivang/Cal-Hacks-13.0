@@ -1,4 +1,4 @@
-<div class="min-w-0" data-account-fragment="{{ section }}"{% if section in ("payments_list", "live_feed") %} data-refresh="3000"{% endif %}>
+<div class="min-w-0" data-account-fragment="{{ section }}"{% if section in ("payments_list", "live_feed") %} data-refresh="{{ 1000 if checking else 3000 }}"{% endif %}>
 {% if section == "identity" %}
 <span title="{{ email }}">{{ email }}</span>
 {% elif not agent and not section.startswith("overview_") %}

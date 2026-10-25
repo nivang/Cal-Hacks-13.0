@@ -118,14 +118,16 @@ def list_agents(conn: Connection, budget_window_days: int) -> list[dict[str, Any
     return [{**r, "week_spend": attempts.week_spend(conn, r["id"], budget_window_days)} for r in rows]
 
 
-def list_attempts(conn: Connection, limit: int = 200, agent_id: int | None = None) -> list[dict[str, Any]]:
+def list_attempts(
+    conn: Connection, limit: int = 200, agent_id: int | None = None, mandate_id: int | None = None,
+) -> list[dict[str, Any]]:
     """The newest payment attempts with agent, seller name and who listed that seller. Amount in atomic units.
 
     rule_fired is split into rule and detail. Escrowed attempts carry their escrow row (escrow_state, escrow_held,
     authorize_tx, capture_tx, void_tx, capture_deadline, decided_by), None otherwise. seller is None when the
     address was never on a list that applies to the attempt's agent. When several seller rows share an address, one
     is picked per attempt (the attempt's own agent's row first, then the operator's), so an attempt never repeats.
-    agent_id limits the log to one agent.
+    agent_id limits the log to one agent, mandate_id to one task.
     """
     rows = conn.execute(
         f"SELECT a.id, a.created_at, ag.name AS agent, a.reason, s.name AS seller, a.pay_to,"
@@ -140,9 +142,9 @@ def list_attempts(conn: Connection, limit: int = 200, agent_id: int | None = Non
         "  WHERE lower(x.pay_to) = lower(a.pay_to) AND x.network = %s AND lower(x.asset) = lower(%s)"
         "  AND (x.agent_id IS NULL OR x.agent_id = a.agent_id)"
         "  ORDER BY (x.agent_id IS NULL), x.id LIMIT 1) s ON true"
-        " WHERE (%s::bigint IS NULL OR a.agent_id = %s::bigint)"
+        " WHERE (%s::bigint IS NULL OR a.agent_id = %s::bigint) AND (%s::bigint IS NULL OR a.mandate_id = %s::bigint)"
         " ORDER BY a.id DESC LIMIT %s",
-        (NETWORK, USDC_BASE_SEPOLIA, agent_id, agent_id, limit),
+        (NETWORK, USDC_BASE_SEPOLIA, agent_id, agent_id, mandate_id, mandate_id, limit),
     ).fetchall()
     for r in rows:
         r["rule"], _, r["detail"] = (r.pop("rule_fired") or "").partition(": ")

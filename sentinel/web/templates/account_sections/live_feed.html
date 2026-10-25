@@ -68,11 +68,35 @@
     <h2 id="lv-feed-h" class="lv-heading">Every request, as it happens</h2>
     <a class="text-sm text-stone-500 underline" href="/account/payments">All payments</a>
   </div>
-  {% if not feed %}
-  <div class="{{ card }} mt-3 text-center text-sm text-stone-600">Nothing yet. Requests appear here a second or two after your agent asks.</div>
+  {% if not feed and not checking %}
+  <div class="{{ card }} mt-3 text-center text-sm text-stone-600">Nothing yet for this task. Requests appear here as soon as your agent asks.</div>
   {% else %}
   <div class="lv-lanes-head" aria-hidden="true"><span>Agent asked</span><span>Sentinel checked</span><span>Seller got</span></div>
   <ol class="lv-feed">
+    {% for c in checking %}
+    <li class="lv-card lv-checking" data-card="check-{{ c.id }}" aria-busy="true">
+      <div class="lv-lane">
+        <p class="lv-lane-label">Agent asked</p>
+        <p class="lv-seller">{{ (c.url | host_path).split("/")[0] }}</p>
+        <p class="lv-url">{{ c.url | host_path }}</p>
+        <p class="lv-meta">{{ "Found while searching" if c.kind == "search" else "The agent wants to pay" }}</p>
+      </div>
+      <div class="lv-lane">
+        <p class="lv-lane-label">Sentinel checking</p>
+        <ul class="lv-checks">
+          {% for stage in c.stages %}
+          <li class="is-{{ 'run' if loop.last else 'ok' }}"><span class="lv-dot" aria-hidden="true"></span><span><span class="lv-check-label">{{ stage }}{% if loop.last %}…{% endif %}</span></span></li>
+          {% endfor %}
+        </ul>
+      </div>
+      <div class="lv-lane lv-out k-progress">
+        <p class="lv-lane-label">Seller got</p>
+        <p class="lv-money tabular-nums">{% if c.amount %}{{ c.amount | usd }}<span>at stake</span>{% else %}…{% endif %}</p>
+        <p class="lv-verdict" role="status">Sentinel is deciding</p>
+        <div class="lv-progress" aria-hidden="true"><span></span></div>
+      </div>
+    </li>
+    {% endfor %}
     {% for p in feed %}
     {% set steps = p | pipeline %}
     {% set result = steps[-1] %}
@@ -82,7 +106,7 @@
         <p class="lv-seller">{{ p.seller or (p.pay_to | short) or "Unknown seller" }}{% if not p.seller %} <span class="lv-pill is-wait">Not on your list</span>{% endif %}</p>
         <p class="lv-url">{{ p.url | host_path }}</p>
         {% if p.reason %}<p class="lv-quote" title="{{ p.reason }}">“{{ p.reason }}”</p>{% endif %}
-        <p class="lv-meta"><time datetime="{{ p.created_at | iso }}" data-ago>{{ p.created_at | when }}</time>{% if p.found_while_searching %} · while searching{% endif %}{% if p.task_id and task and p.task_id != task.id %} · task {{ p.task_id }}{% endif %}</p>
+        <p class="lv-meta"><time datetime="{{ p.created_at | iso }}" data-ago>{{ p.created_at | when }}</time>{% if p.found_while_searching %} · while searching{% endif %}</p>
       </div>
       <div class="lv-lane">
         <p class="lv-lane-label">Sentinel checked</p>

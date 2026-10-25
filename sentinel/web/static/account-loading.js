@@ -48,8 +48,9 @@
   }
 
   function poll(fragment, section, etag) {
-    const every = Number(fragment.dataset.refresh) || 3000;
     let current = fragment;
+    // Faster while Sentinel is mid check (the fragment says 1000), else every 3 s.
+    const every = () => Number(current.dataset.refresh) || 3000;
     let tag = etag;
     let busy = false;
     let timer = null;
@@ -61,7 +62,7 @@
 
     async function tick() {
       if (leaving || !current.isConnected) return;
-      if (document.hidden || busy) { later(every); return; }
+      if (document.hidden || busy) { later(every()); return; }
       busy = true;
       const controller = new AbortController();
       const timeout = setTimeout(() => controller.abort(), 20000);
@@ -76,7 +77,7 @@
           window.location.replace(response.url);
           return;
         }
-        if (response.status === 304) { setOnline(true); later(every); return; }
+        if (response.status === 304) { setOnline(true); later(every()); return; }
         if (!response.ok) throw new Error("Section could not refresh");
         const page = new DOMParser().parseFromString(await response.text(), "text/html");
         const next = page.querySelector("[data-account-fragment]");
@@ -93,7 +94,7 @@
         tag = response.headers.get("ETag") || tag;
         setOnline(true);
         tickClocks();
-        later(every);
+        later(every());
       } catch {
         setOnline(false);
         later(SLOW_MS);
@@ -106,7 +107,7 @@
     document.addEventListener("visibilitychange", () => {
       if (!document.hidden && current.isConnected) later(0);
     });
-    later(every);
+    later(every());
   }
 
   // Escrow deadlines count down and "when" times read as "12 s ago", ticking in the browser between polls.

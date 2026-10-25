@@ -30,7 +30,7 @@ from x402.mechanisms.evm import ClientEvmSigner
 from x402.mechanisms.evm.exact import ExactEvmScheme
 from x402.schemas import PaymentPayload
 
-from sentinel import attempts, chain, db, delivery, escrow, guard, intent, judge, ledger, link_approvals, mandates
+from sentinel import attempts, chain, db, delivery, escrow, guard, intent, judge, ledger, link_approvals, live, mandates
 
 log = logging.getLogger("sentinel.payments")
 
@@ -371,6 +371,7 @@ async def review_intent(
     if profile is not None and profile.unused:
         session = replace(session, payee_unused=True)
 
+    live.step("Task rules")
     verdict = intent.tier0(mandate, payment, session, guard.Agent(**agent_row), policy)
     if verdict is None:
         verdict = await _model_tiers(conn, task.judge, mandate, payment, session, policy)
@@ -388,6 +389,7 @@ async def _model_tiers(
     page = intent.found_on_page(mandate, payment)
     hit = mandates.cached(conn, mandate.id, quote.pay_to, quote.url, policy["intent_cache_ttl_s"])
     if hit is None:
+        live.step("Quick check against the task")
         try:
             opinion = await judge_.classify(intent.case(mandate, payment))
         except judge.JudgeError:
@@ -397,6 +399,7 @@ async def _model_tiers(
     settled = intent.from_tier1(hit[0], hit[1], page)
     if settled is not None:
         return settled
+    live.step("The judge decides")
     try:
         answer = await judge_.decide(intent.case(mandate, payment, session))
     except judge.JudgeError:
@@ -462,6 +465,7 @@ async def preview(conn: db.Connection, agent: str, url: str, reason: str, task: 
                      {"mandate_id": task.mandate_id, "found_at": task.found_at, "seller_description": description})
         return Preview(url, guard.BLOCK, e.rule, e.detail, seller=seller)
     quote = build_quote(url, requirement)
+    live.step("Policy guard", pay_to=quote.pay_to, amount=quote.amount)
     profile = await payee_profile(conn, quote)
     decision = decide(conn, agent, quote, profile)
     if decision.decision == guard.BLOCK:
@@ -505,7 +509,8 @@ async def pay_for(
     the payment, PaymentHeld when it is held for the owner, and PaymentFailed when an approved payment does not
     complete.
     """
-    with connect() as conn:
+    with connect() as conn, live.watching(conn, agent, task.mandate_id if task else None, url,
+                                          "Asking the seller for its price"):
         return await _pay_with(conn, url, signer, agent, reason, task, operator, interactive=interactive,
                                approval_id=approval_id)
 
@@ -541,9 +546,13 @@ async def _pay_with(
                 conn, agent, url, reason, status="blocked", decision=guard.BLOCK, rule_fired=str(e)
             )
             raise
+        live.step("Policy guard", pay_to=quote.pay_to, amount=quote.amount)
         attempt_id = await authorize_task(conn, agent, reason, quote, task, seller_from(payment_required),
                                           interactive=interactive, approval_id=approval_id)
-        if operator is not None and getattr(requirement, "scheme", "exact") == escrow.SCHEME:
+        in_escrow = operator is not None and getattr(requirement, "scheme", "exact") == escrow.SCHEME
+        live.step("Locking the money in escrow" if in_escrow else "Paying the seller", attempt_id=attempt_id)
+        if in_escrow:
+            assert operator is not None
             return await _pay_escrow(conn, session, http, operator, signer, agent, payment_required, requirement,
                                      quote, attempt_id, task)
 
@@ -636,11 +645,13 @@ async def _pay_escrow(
         raise PaymentFailed("the payment is held in escrow but could not be recorded", attempt_id, authorize_tx) from e
 
     proof.payload["authorizeTx"] = authorize_tx
+    live.step("Fetching the data")
     try:
         paid = await session.get(quote.url, headers=http.encode_payment_signature_header(proof))
         status, content_type, body = paid.status_code, paid.headers.get("content-type"), paid.content
     except httpx.HTTPError:
         status, content_type, body = 0, None, b""
+    live.step("Checking the delivery")
     verdict = await check_delivery(conn, agent, task, quote.url, delivery.promise_from(payment_required), status,
                                    content_type, body)
     log.info("escrow: request %s delivery %s (%s)", attempt_id, verdict.outcome, verdict.rule)
@@ -648,6 +659,7 @@ async def _pay_escrow(
     ledger.record_delivery(conn, attempt_id, body, content_type, verdict.outcome, verdict.rule, verdict.detail, held)
     if held:
         return PayResult(status, "", None, quote, attempt_id, False, content_type, "held", verdict)
+    live.step("Releasing the money to the seller" if verdict.outcome == delivery.PASS else "Refunding you")
     outcome, tx = await _finish(conn, operator, attempt_id, info, verdict.outcome == delivery.PASS, "sentinel")
     if outcome == "captured":
         text = body.decode("utf-8", errors="replace")

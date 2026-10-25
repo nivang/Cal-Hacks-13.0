@@ -22,7 +22,7 @@ from typing import Any
 
 import httpx
 
-from sentinel import db, guard, intent, mandates, payments, results, urls
+from sentinel import db, guard, intent, live, mandates, payments, results, urls
 from sentinel.payments import NETWORK, USDC_BASE_SEPOLIA
 
 log = logging.getLogger("sentinel.discovery")
@@ -166,7 +166,7 @@ async def check(connect: Connect, agent: str, task: payments.Task, url: str, pur
     except ValueError as e:
         return payments.Preview(url, "BLOCKED", BAD_URL, str(e))
     try:
-        with connect() as conn:
+        with connect() as conn, live.watching(conn, agent, task.mandate_id, safe_url, "Checking a listing", "search"):
             found = await payments.preview(conn, agent, safe_url, purpose, task)
     except httpx.HTTPError as e:
         log.warning("could not preview a service (%s)", type(e).__name__)

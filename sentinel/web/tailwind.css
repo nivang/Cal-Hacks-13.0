@@ -259,6 +259,23 @@
 .lv-out.k-held .lv-verdict { color: var(--lv-wait); }
 .lv-out.k-escrow .lv-money, .lv-out.k-escrow .lv-verdict { color: var(--lv-escrow); }
 .lv-out.k-progress .lv-verdict { color: var(--lv-muted); }
+/* A check in progress: the running step spins, an indeterminate bar runs; finished cards tick their steps in turn. */
+.lv-checking { border-color: var(--lv-line-2); background: var(--lv-surface-2); }
+.lv-checks .is-run .lv-dot { border: 2px solid var(--lv-line-2); border-top-color: var(--lv-escrow); background: none;
+  animation: lv-spin 700ms linear infinite; }
+.lv-checks .is-run .lv-check-label { color: var(--lv-escrow); font-weight: 600; }
+@keyframes lv-spin { to { transform: rotate(360deg); } }
+.lv-progress { position: relative; height: 3px; margin-top: 10px; border-radius: 999px; background: var(--lv-track); overflow: hidden; }
+.lv-progress > span { position: absolute; inset: 0; width: 40%; border-radius: inherit; background: var(--lv-escrow);
+  animation: lv-slide 1.1s cubic-bezier(0.77, 0, 0.175, 1) infinite; }
+@keyframes lv-slide { from { transform: translateX(-100%); } to { transform: translateX(250%); } }
+.lv-card.is-new .lv-checks li { animation: lv-tick 220ms var(--lv-ease) both; }
+.lv-card.is-new .lv-checks li:nth-child(2) { animation-delay: 90ms; }
+.lv-card.is-new .lv-checks li:nth-child(3) { animation-delay: 180ms; }
+.lv-card.is-new .lv-checks li:nth-child(4) { animation-delay: 270ms; }
+.lv-card.is-new .lv-checks li:nth-child(5) { animation-delay: 360ms; }
+.lv-card.is-new .lv-out { animation: lv-tick 220ms var(--lv-ease) 420ms both; }
+@keyframes lv-tick { from { opacity: 0; transform: translateX(-4px); } }
 .lv-tx { display: inline-block; margin-top: 4px; font-family: var(--font-mono); font-size: 11px; color: var(--lv-escrow); text-decoration: underline; text-decoration-color: var(--lv-faint); text-underline-offset: 3px; }
 .lv-action { display: inline-block; margin-top: 10px; border-radius: 8px; padding: 6px 12px; font-size: 13px; font-weight: 600; color: #fff; background: #0052ff;
   transition: transform 160ms var(--lv-ease), background-color 160ms ease; }
@@ -285,5 +302,8 @@
 }
 @media (prefers-reduced-motion: reduce) {
   .lv-card.is-new { animation: lv-tint 1600ms ease-out; }
+  .lv-card.is-new .lv-checks li, .lv-card.is-new .lv-out { animation: none; }
+  .lv-checks .is-run .lv-dot { animation-duration: 2s; }
+  .lv-progress > span { animation: none; width: 100%; opacity: .5; }
   .lv-bar > span, .lv-action { transition: none; }
 }
